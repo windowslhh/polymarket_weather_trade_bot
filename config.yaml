@@ -1,0 +1,176 @@
+strategy:
+  # Minimum distance (°F) from forecast to consider buying NO
+  no_distance_threshold_f: 8
+  # Minimum expected value to enter a NO position
+  min_no_ev: 0.02
+  # YES confirmation: min probability that current temp stays in slot
+  yes_confirmation_threshold: 0.85
+  # Maximum USD per single slot position
+  max_position_per_slot_usd: 5.0
+  # Maximum USD exposure per city
+  max_exposure_per_city_usd: 50.0
+  # Maximum total USD exposure across all cities
+  max_total_exposure_usd: 1000.0
+  # Daily loss circuit breaker (USD)
+  daily_loss_limit_usd: 50.0
+  # Kelly fraction multiplier (0.5 = half Kelly)
+  kelly_fraction: 0.5
+
+scheduling:
+  # How often to discover new markets (minutes)
+  discovery_interval_minutes: 15
+  # How often to rebalance positions (minutes)
+  rebalance_interval_minutes: 60
+  # How often to snapshot P&L (hours)
+  pnl_snapshot_interval_hours: 24
+
+cities:
+  - name: "New York"
+    icao: "KLGA"
+    lat: 40.7128
+    lon: -74.0060
+
+  - name: "Los Angeles"
+    icao: "KLAX"
+    lat: 34.0522
+    lon: -118.2437
+
+  - name: "Chicago"
+    icao: "KORD"
+    lat: 41.8781
+    lon: -87.6298
+
+  - name: "Houston"
+    icao: "KIAH"
+    lat: 29.7604
+    lon: -95.3698
+
+  - name: "Phoenix"
+    icao: "KPHX"
+    lat: 33.4484
+    lon: -112.0740
+
+  - name: "Dallas"
+    icao: "KDAL"
+    lat: 32.7767
+    lon: -96.7970
+
+  - name: "San Francisco"
+    icao: "KSFO"
+    lat: 37.7749
+    lon: -122.4194
+
+  - name: "Seattle"
+    icao: "KSEA"
+    lat: 47.6062
+    lon: -122.3321
+
+  - name: "Denver"
+    icao: "KDEN"
+    lat: 39.7392
+    lon: -104.9903
+
+  - name: "Miami"
+    icao: "KMIA"
+    lat: 25.7617
+    lon: -80.1918
+
+  - name: "Atlanta"
+    icao: "KATL"
+    lat: 33.7490
+    lon: -84.3880
+
+  - name: "Boston"
+    icao: "KBOS"
+    lat: 42.3601
+    lon: -71.0589
+
+  - name: "Minneapolis"
+    icao: "KMSP"
+    lat: 44.9778
+    lon: -93.2650
+
+  - name: "Detroit"
+    icao: "KDTW"
+    lat: 42.3314
+    lon: -83.0458
+
+  - name: "Nashville"
+    icao: "KBNA"
+    lat: 36.1627
+    lon: -86.7816
+
+  - name: "Las Vegas"
+    icao: "KLAS"
+    lat: 36.1699
+    lon: -115.1398
+
+  - name: "Portland"
+    icao: "KPDX"
+    lat: 45.5152
+    lon: -122.6784
+
+  - name: "Memphis"
+    icao: "KMEM"
+    lat: 35.1495
+    lon: -90.0490
+
+  - name: "Louisville"
+    icao: "KSDF"
+    lat: 38.2527
+    lon: -85.7585
+
+  - name: "Salt Lake City"
+    icao: "KSLC"
+    lat: 40.7608
+    lon: -111.8910
+
+  - name: "Kansas City"
+    icao: "KMCI"
+    lat: 39.0997
+    lon: -94.5786
+
+  - name: "Charlotte"
+    icao: "KCLT"
+    lat: 35.2271
+    lon: -80.8431
+
+  - name: "St. Louis"
+    icao: "KSTL"
+    lat: 38.6270
+    lon: -90.1994
+
+  - name: "Indianapolis"
+    icao: "KIND"
+    lat: 39.7684
+    lon: -86.1581
+
+  - name: "Cincinnati"
+    icao: "KCVG"
+    lat: 39.1031
+    lon: -84.5120
+
+  - name: "Pittsburgh"
+    icao: "KPIT"
+    lat: 40.4406
+    lon: -79.9959
+
+  - name: "Orlando"
+    icao: "KMCO"
+    lat: 28.5383
+    lon: -81.3792
+
+  - name: "San Antonio"
+    icao: "KSAT"
+    lat: 29.4241
+    lon: -98.4936
+
+  - name: "Cleveland"
+    icao: "KCLE"
+    lat: 41.4993
+    lon: -81.6944
+
+  - name: "Tampa"
+    icao: "KTPA"
+    lat: 27.9506
+    lon: -82.4572
