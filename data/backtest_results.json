@@ -1,0 +1,68 @@
+[
+  {
+    "city": "New York",
+    "days": 0,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "pnl": 0,
+    "risked": 0,
+    "roi_pct": 0,
+    "error_dist": {
+      "city": "New York",
+      "samples": 0,
+      "mean_error": 0.0,
+      "std_error": 4.0,
+      "p5": 0,
+      "p25": 0,
+      "p50": 0,
+      "p75": 0,
+      "p95": 0
+    }
+  },
+  {
+    "city": "Dallas",
+    "days": 0,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "pnl": 0,
+    "risked": 0,
+    "roi_pct": 0,
+    "error_dist": {
+      "city": "Dallas",
+      "samples": 0,
+      "mean_error": 0.0,
+      "std_error": 4.0,
+      "p5": 0,
+      "p25": 0,
+      "p50": 0,
+      "p75": 0,
+      "p95": 0
+    }
+  },
+  {
+    "city": "Seattle",
+    "days": 0,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "pnl": 0,
+    "risked": 0,
+    "roi_pct": 0,
+    "error_dist": {
+      "city": "Seattle",
+      "samples": 0,
+      "mean_error": 0.0,
+      "std_error": 4.0,
+      "p5": 0,
+      "p25": 0,
+      "p50": 0,
+      "p75": 0,
+      "p95": 0
+    }
+  }
+]

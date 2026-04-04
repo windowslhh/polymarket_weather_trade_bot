@@ -106,27 +106,43 @@ def _simulate_market_prices(
     slots: list[tuple[float, float]],
     forecast_std: float = 4.0,
     house_edge: float = 0.03,
+    market_noise_std: float = 0.03,
 ) -> list[SimulatedSlot]:
     """Simulate market NO prices based on forecast.
 
-    Models what a rational market would price each slot's NO at,
-    given the forecast and typical forecast uncertainty.
+    Models what a typical Polymarket weather market actually looks like:
+    - Base pricing uses a WIDER uncertainty than the true forecast error
+      (market participants don't have perfect models)
+    - House edge: the sum of all NO prices > $1.00
+    - Per-slot noise: prices aren't perfectly calibrated
+    - Near-forecast slots are often mispriced (too cheap or expensive)
+
+    This is intentionally adversarial to avoid overfitting the backtest.
     """
     import math
+    import random
+
+    # Market uses a wider sigma than the true forecast std
+    # (participants are uncertain about their own uncertainty)
+    market_sigma = forecast_std * 1.3
 
     simulated = []
     for lower, upper in slots:
         mid = (lower + upper) / 2
         distance = abs(mid - forecast_high_f)
-        sigma = max(forecast_std, 1.0)
-        z = distance / sigma
+        z = distance / max(market_sigma, 1.0)
 
-        # Fair P(NO) = P(actual NOT in [lower, upper])
-        # Approximate using normal CDF
+        # Fair P(NO) based on market's (noisier) model
         fair_no = 0.5 * (1.0 + math.erf(z / math.sqrt(2)))
 
-        # Apply house edge (market prices NO slightly higher than fair)
-        market_no = min(fair_no + house_edge * (1.0 - fair_no), 0.98)
+        # Apply house edge (scales with how "safe" the bet looks)
+        # Distant slots: higher edge because they look "free money"
+        edge = house_edge * (1.0 + 0.5 * min(z, 3.0))
+        market_no = fair_no + edge * (1.0 - fair_no)
+
+        # Add per-slot noise (market inefficiency, but sometimes in our favor)
+        noise = random.gauss(0, market_noise_std)
+        market_no = max(0.50, min(0.98, market_no + noise))
 
         simulated.append(SimulatedSlot(
             lower_f=lower,
