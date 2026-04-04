@@ -13,7 +13,9 @@ from src.portfolio.tracker import PortfolioTracker
 from src.strategy.evaluator import evaluate_exit_signals, evaluate_no_signals, evaluate_yes_signals
 from src.strategy.sizing import compute_size
 from src.weather.forecast import get_forecasts_batch
-from src.weather.metar import DailyMaxTracker, get_latest_metar
+from src.weather.historical import ForecastErrorDistribution
+from src.weather.metar import DailyMaxTracker
+from src.weather.settlement import fetch_settlement_temp, validate_station_config
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +30,18 @@ class Rebalancer:
         portfolio: PortfolioTracker,
         executor: Executor,
         max_tracker: DailyMaxTracker | None = None,
+        error_distributions: dict[str, ForecastErrorDistribution] | None = None,
     ) -> None:
         self._config = config
         self._clob = clob
         self._portfolio = portfolio
         self._executor = executor
         self._max_tracker = max_tracker or DailyMaxTracker()
+        self._error_dists = error_distributions or {}
+
+    def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
+        """Update error distributions (e.g. after rebuilding from fresh data)."""
+        self._error_dists = dists
 
     async def run(self) -> list[TradeSignal]:
         """Execute one full rebalance cycle.
@@ -41,6 +49,11 @@ class Rebalancer:
         Returns all trade signals generated (for logging/monitoring).
         """
         logger.info("=== Starting rebalance cycle ===")
+
+        # Validate station config on first run
+        mismatches = validate_station_config(self._config.cities)
+        for m in mismatches:
+            logger.warning("Station mismatch: %s — %s", m.city, m.issue)
 
         # Check circuit breaker
         daily_pnl = await self._portfolio.get_daily_pnl(date.today())
@@ -61,14 +74,20 @@ class Rebalancer:
         forecasts = await get_forecasts_batch(city_configs)
         logger.info("Fetched forecasts for %d cities", len(forecasts))
 
-        # 3. Fetch METAR observations
+        # 3. Fetch observations from settlement-consistent stations
         import httpx
         observations: dict[str, float | None] = {}  # city -> daily_max
         async with httpx.AsyncClient(timeout=15) as client:
             for city_cfg in city_configs:
-                obs = await get_latest_metar(city_cfg.icao, client)
+                obs = await fetch_settlement_temp(city_cfg.name, client)
                 if obs:
-                    daily_max = self._max_tracker.update(obs)
+                    from src.weather.models import Observation
+                    metar_obs = Observation(
+                        icao=obs.icao, temp_f=obs.temp_f,
+                        observation_time=obs.observation_time,
+                        raw_metar=obs.raw_data,
+                    )
+                    daily_max = self._max_tracker.update(metar_obs)
                     observations[city_cfg.name] = daily_max
 
         # 4. Evaluate signals for each event
@@ -82,9 +101,12 @@ class Rebalancer:
 
             city_exposure = await self._portfolio.get_city_exposure(event.city)
             daily_max = observations.get(event.city)
+            error_dist = self._error_dists.get(event.city)
 
-            # Phase 4: NO signals
-            no_signals = evaluate_no_signals(event, forecast, self._config.strategy)
+            # Phase 4: NO signals (with empirical distribution if available)
+            no_signals = evaluate_no_signals(
+                event, forecast, self._config.strategy, error_dist,
+            )
 
             # Phase 5: Exit signals for held positions
             held_no_slots = await self._portfolio.get_held_no_slots(event.event_id)

@@ -14,7 +14,9 @@ from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
 from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
+from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
+from src.weather.settlement import validate_station_config
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -45,15 +47,32 @@ async def run(args: argparse.Namespace) -> None:
 
     logger.info("Loaded %d cities from config", len(config.cities))
 
+    # Validate settlement station configuration
+    mismatches = validate_station_config(config.cities)
+    for m in mismatches:
+        logger.warning("STATION MISMATCH: %s — %s", m.city, m.issue)
+    if mismatches:
+        logger.warning("Fix config.yaml ICAO codes to match Polymarket settlement stations!")
+
     # Initialize components
     store = Store(config.db_path)
     await store.initialize()
+
+    # Build empirical forecast error distributions (cached, ~7 day refresh)
+    logger.info("Loading forecast error distributions...")
+    error_dists = await build_all_distributions(config.cities)
+    for city_name, dist in error_dists.items():
+        if dist._count > 0:
+            logger.info("  %s: %d samples, mean=%.2f°F, std=%.2f°F",
+                       city_name, dist._count, dist.mean, dist.std)
+        else:
+            logger.warning("  %s: no historical data, using normal fallback", city_name)
 
     clob = ClobClient(config)
     portfolio = PortfolioTracker(store)
     executor = Executor(clob, portfolio)
     max_tracker = DailyMaxTracker()
-    rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker)
+    rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
 
     # Setup scheduler
     scheduler = setup_scheduler(config, rebalancer)

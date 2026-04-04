@@ -390,11 +390,12 @@ class TestPortfolioIntegration:
         with (
             patch("src.strategy.rebalancer.discover_weather_markets", new_callable=AsyncMock) as mock_discover,
             patch("src.strategy.rebalancer.get_forecasts_batch", new_callable=AsyncMock) as mock_forecasts,
-            patch("src.strategy.rebalancer.get_latest_metar", new_callable=AsyncMock) as mock_metar,
+            patch("src.strategy.rebalancer.fetch_settlement_temp", new_callable=AsyncMock) as mock_settle,
+            patch("src.strategy.rebalancer.validate_station_config", return_value=[]),
         ):
             mock_discover.return_value = events
             mock_forecasts.return_value = forecasts
-            mock_metar.return_value = None  # No METAR data (just forecast-based trading)
+            mock_settle.return_value = None  # No observation data (just forecast-based trading)
 
             signals = await rebalancer.run()
 

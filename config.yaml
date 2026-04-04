@@ -51,7 +51,7 @@ cities:
     lon: -112.0740
 
   - name: "Dallas"
-    icao: "KDAL"
+    icao: "KDFW"
     lat: 32.7767
     lon: -96.7970
 

@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from src.config import StrategyConfig
 from src.markets.models import Side, TempSlot, TokenType, WeatherMarketEvent
 from src.strategy.evaluator import (
-    _estimate_no_win_probability,
+    _estimate_no_win_probability_normal as _estimate_no_win_probability,
     _slot_distance,
     evaluate_exit_signals,
     evaluate_no_signals,
