@@ -55,6 +55,8 @@ class DayResult:
     no_losses: int
     gross_pnl: float  # before fees
     total_risked: float
+    fees_paid: float = 0.0  # Polymarket taker fees
+    net_pnl: float = 0.0  # after fees
 
 
 @dataclass
@@ -72,6 +74,10 @@ class BacktestResult:
     avg_daily_pnl: float
     max_daily_loss: float
     max_daily_profit: float
+    # Fee tracking
+    total_fees: float = 0.0
+    net_pnl: float = 0.0
+    net_roi_pct: float = 0.0
     # Per-distance breakdown
     distance_stats: dict[str, dict] = field(default_factory=dict)
     # Error distribution summary
@@ -153,6 +159,25 @@ def _simulate_market_prices(
     return simulated
 
 
+def _compute_taker_fee(price: float, size_usd: float, fee_rate: float = 0.0125) -> float:
+    """Compute Polymarket taker fee for weather markets.
+
+    Fee structure (as of 2026):
+    - Weather category: 1.25% base rate
+    - Fee is probability-weighted: peaks at 50% price, decreases toward extremes
+    - Fee = fee_rate * price * (1 - price) * 2 * size_in_shares
+    - For takers only; makers pay 0%
+
+    We assume all our orders are taker (market/aggressive limit orders).
+    """
+    # Probability-weighted fee: higher at 50/50, lower at extremes
+    # This matches Polymarket's actual fee formula
+    prob_weight = 2.0 * price * (1.0 - price)  # peaks at 0.5
+    shares = size_usd / price if price > 0 else 0
+    fee = fee_rate * prob_weight * shares * price
+    return fee
+
+
 def _run_day(
     city: str,
     day: date,
@@ -162,6 +187,7 @@ def _run_day(
     error_dist: ForecastErrorDistribution | None,
     slot_width: float = 2.0,
     slot_range: float = 30.0,
+    taker_fee_rate: float = 0.0125,
 ) -> DayResult:
     """Simulate one day of trading for one city.
 
@@ -169,6 +195,7 @@ def _run_day(
     2. Simulate market prices (what the market would have priced)
     3. Apply our strategy: buy NO on distant slots
     4. Settle: check if actual temp landed in each slot
+    5. Deduct Polymarket taker fees from P&L
     """
     # Generate slots spanning forecast ± slot_range
     base = int(forecast_high_f - slot_range)
@@ -190,6 +217,7 @@ def _run_day(
     no_losses = 0
     gross_pnl = 0.0
     total_risked = 0.0
+    total_fees = 0.0
     position_size = config.max_position_per_slot_usd
 
     for slot in simulated:
@@ -211,14 +239,19 @@ def _run_day(
             z = distance / sigma
             win_prob = min(0.5 * (1.0 + math.erf(z / math.sqrt(2))), 0.99)
 
-        # EV check
-        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
+        # EV check (include fee estimate in EV calculation)
+        entry_fee = _compute_taker_fee(slot.price_no, position_size, taker_fee_rate)
+        fee_per_dollar = entry_fee / position_size if position_size > 0 else 0
+        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no - fee_per_dollar
         if ev < config.min_no_ev:
             continue
 
         # Trade it
         slots_traded += 1
         total_risked += position_size
+
+        # Entry fee (buying NO)
+        total_fees += entry_fee
 
         # Settlement: did actual land in this slot?
         actual_in_slot = slot.lower_f <= actual_high_f <= slot.upper_f
@@ -232,6 +265,8 @@ def _run_day(
             no_wins += 1
             gross_pnl += profit
 
+    net_pnl = gross_pnl - total_fees
+
     return DayResult(
         city=city,
         day=day,
@@ -243,6 +278,8 @@ def _run_day(
         no_losses=no_losses,
         gross_pnl=round(gross_pnl, 2),
         total_risked=round(total_risked, 2),
+        fees_paid=round(total_fees, 2),
+        net_pnl=round(net_pnl, 2),
     )
 
 
@@ -342,55 +379,61 @@ def print_backtest_report(results: list[BacktestResult]) -> None:
     print("POLYMARKET WEATHER TRADING STRATEGY — BACKTEST REPORT")
     print("=" * 80)
 
-    total_pnl = 0
-    total_risked = 0
+    total_gross = 0.0
+    total_fees = 0.0
+    total_net = 0.0
+    total_risked = 0.0
     total_trades = 0
     total_wins = 0
     total_losses = 0
 
     for r in results:
-        total_pnl += r.gross_pnl
+        total_gross += r.gross_pnl
+        total_fees += r.total_fees
+        total_net += r.net_pnl
         total_risked += r.total_risked
         total_trades += r.total_trades
         total_wins += r.total_wins
         total_losses += r.total_losses
 
         print(f"\n{'─' * 60}")
-        print(f"📍 {r.city}")
+        print(f"  {r.city}")
         print(f"{'─' * 60}")
         print(f"  Days tested:     {r.days_tested}")
         print(f"  Total trades:    {r.total_trades}")
         print(f"  Wins / Losses:   {r.total_wins} / {r.total_losses}")
         print(f"  Win rate:        {r.win_rate * 100:.1f}%")
         print(f"  Gross P&L:       ${r.gross_pnl:+.2f}")
+        print(f"  Fees paid:       ${r.total_fees:.2f}")
+        print(f"  Net P&L:         ${r.net_pnl:+.2f}")
         print(f"  Total risked:    ${r.total_risked:.2f}")
-        print(f"  ROI:             {r.roi_pct:+.2f}%")
-        print(f"  Avg daily P&L:   ${r.avg_daily_pnl:+.2f}")
+        print(f"  Gross ROI:       {r.roi_pct:+.2f}%")
+        print(f"  Net ROI:         {r.net_roi_pct:+.2f}%")
         print(f"  Max daily loss:  ${r.max_daily_loss:.2f}")
-        print(f"  Max daily profit:${r.max_daily_profit:.2f}")
 
         if r.error_dist_summary:
             s = r.error_dist_summary
-            print(f"\n  Forecast Error Distribution ({s.get('samples', 0)} samples):")
-            print(f"    Mean: {s.get('mean_error', 0):+.2f}°F  Std: {s.get('std_error', 0):.2f}°F")
-            print(f"    P5={s.get('p5', 0):+.1f}  P25={s.get('p25', 0):+.1f}  "
-                  f"P50={s.get('p50', 0):+.1f}  P75={s.get('p75', 0):+.1f}  P95={s.get('p95', 0):+.1f}")
+            print(f"  Forecast err:    mean={s.get('mean_error', 0):+.1f}  std={s.get('std_error', 0):.1f}")
 
     print(f"\n{'=' * 80}")
     print("AGGREGATE RESULTS")
     print(f"{'=' * 80}")
     overall_win_rate = total_wins / total_trades * 100 if total_trades > 0 else 0
-    overall_roi = total_pnl / total_risked * 100 if total_risked > 0 else 0
+    gross_roi = total_gross / total_risked * 100 if total_risked > 0 else 0
+    net_roi = total_net / total_risked * 100 if total_risked > 0 else 0
     print(f"  Cities:          {len(results)}")
     print(f"  Total trades:    {total_trades}")
     print(f"  Win rate:        {overall_win_rate:.1f}%")
-    print(f"  Gross P&L:       ${total_pnl:+.2f}")
+    print(f"  Gross P&L:       ${total_gross:+.2f}")
+    print(f"  Fees paid:       ${total_fees:.2f}  ({total_fees/total_gross*100:.1f}% of gross)" if total_gross > 0 else f"  Fees paid:       ${total_fees:.2f}")
+    print(f"  Net P&L:         ${total_net:+.2f}")
     print(f"  Total risked:    ${total_risked:.2f}")
-    print(f"  ROI:             {overall_roi:+.2f}%")
+    print(f"  Gross ROI:       {gross_roi:+.2f}%")
+    print(f"  Net ROI:         {net_roi:+.2f}%")
 
-    verdict = "PROFITABLE" if total_pnl > 0 else "NOT PROFITABLE"
-    color = "✅" if total_pnl > 0 else "❌"
-    print(f"\n  Verdict: {color} Strategy is {verdict} over this period")
+    verdict = "PROFITABLE" if total_net > 0 else "NOT PROFITABLE"
+    symbol = "[OK]" if total_net > 0 else "[!!]"
+    print(f"\n  Verdict: {symbol} Strategy is {verdict} after fees")
     print(f"{'=' * 80}\n")
 
 
