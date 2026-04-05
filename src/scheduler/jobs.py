@@ -22,19 +22,31 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
         minutes=config.scheduling.rebalance_interval_minutes,
         id="rebalance",
         name="Rebalance positions",
-        max_instances=1,  # prevent overlapping runs
+        max_instances=1,
     )
 
-    # Also run immediately on startup
+    # Settlement acceleration: run every 15 min for urgent markets
     scheduler.add_job(
         rebalancer.run,
-        "date",  # run once
+        "interval",
+        minutes=15,
+        id="settlement_check",
+        name="Settlement acceleration check",
+        max_instances=1,
+    )
+
+    # Run initial rebalance 5 seconds after startup (give Flask time to start)
+    from datetime import datetime, timedelta, timezone
+    scheduler.add_job(
+        rebalancer.run,
+        "date",
+        run_date=datetime.now(timezone.utc) + timedelta(seconds=5),
         id="rebalance_startup",
         name="Initial rebalance on startup",
     )
 
     logger.info(
-        "Scheduler configured: rebalance every %d minutes",
+        "Scheduler configured: rebalance every %d min, settlement check every 15 min",
         config.scheduling.rebalance_interval_minutes,
     )
     return scheduler

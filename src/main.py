@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
+import threading
 
 from src.config import load_config
 from src.execution.executor import Executor
@@ -26,23 +27,26 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.INFO)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 async def run(args: argparse.Namespace) -> None:
     config = load_config()
     config.dry_run = args.dry_run
+    config.paper = args.paper
 
     logger = logging.getLogger(__name__)
 
     if config.dry_run:
-        logger.info("*** DRY RUN MODE — no real orders will be placed ***")
+        logger.info("*** DRY RUN MODE — signals only, no positions recorded ***")
+    elif config.paper:
+        logger.info("*** PAPER TRADING MODE — simulated fills, positions tracked ***")
 
-    if not config.dry_run and not config.eth_private_key:
-        logger.error("ETH_PRIVATE_KEY not set. Use --dry-run for paper trading.")
+    if not config.dry_run and not config.paper and not config.eth_private_key:
+        logger.error("ETH_PRIVATE_KEY not set. Use --paper for simulated trading or --dry-run for signal preview.")
         sys.exit(1)
 
     logger.info("Loaded %d cities from config", len(config.cities))
@@ -51,8 +55,6 @@ async def run(args: argparse.Namespace) -> None:
     mismatches = validate_station_config(config.cities)
     for m in mismatches:
         logger.warning("STATION MISMATCH: %s — %s", m.city, m.issue)
-    if mismatches:
-        logger.warning("Fix config.yaml ICAO codes to match Polymarket settlement stations!")
 
     # Initialize components
     store = Store(config.db_path)
@@ -63,7 +65,7 @@ async def run(args: argparse.Namespace) -> None:
     error_dists = await build_all_distributions(config.cities)
     for city_name, dist in error_dists.items():
         if dist._count > 0:
-            logger.info("  %s: %d samples, mean=%.2f°F, std=%.2f°F",
+            logger.info("  %s: %d samples, mean=%.2f\u00b0F, std=%.2f\u00b0F",
                        city_name, dist._count, dist.mean, dist.std)
         else:
             logger.warning("  %s: no historical data, using normal fallback", city_name)
@@ -88,8 +90,22 @@ async def run(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, shutdown_handler)
 
-    # Start
+    # Start scheduler
     scheduler.start()
+
+    # Start web dashboard in background thread (unless --no-web)
+    web_thread = None
+    if not args.no_web:
+        from src.web.app import run_web_server
+        port = args.port
+        web_thread = threading.Thread(
+            target=run_web_server,
+            args=(store, rebalancer, config, port),
+            daemon=True,
+        )
+        web_thread.start()
+        logger.info("Web dashboard: http://localhost:%d", port)
+
     logger.info("Bot started. Press Ctrl+C to stop.")
 
     try:
@@ -102,15 +118,32 @@ async def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Polymarket Weather Trading Bot")
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run in paper trading mode (no real orders)",
+        help="Signal preview only — no positions recorded, no orders placed",
+    )
+    mode_group.add_argument(
+        "--paper",
+        action="store_true",
+        help="Paper trading — simulated fills, positions tracked, P&L computed (no real money)",
     )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="Disable web dashboard",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5001,
+        help="Web dashboard port (default: 5001)",
     )
     args = parser.parse_args()
 

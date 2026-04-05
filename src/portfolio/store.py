@@ -55,10 +55,45 @@ CREATE TABLE IF NOT EXISTS settlements (
     settled_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_at TEXT NOT NULL DEFAULT (datetime('now')),
+    city TEXT NOT NULL,
+    event_id TEXT,
+    signal_type TEXT,
+    slot_label TEXT,
+    forecast_high_f REAL,
+    daily_max_f REAL,
+    trend_state TEXT,
+    win_prob REAL,
+    expected_value REAL,
+    price REAL,
+    size_usd REAL,
+    action TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_event ON positions(event_id);
 CREATE INDEX IF NOT EXISTS idx_positions_city ON positions(city);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE TABLE IF NOT EXISTS edge_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_at TEXT NOT NULL DEFAULT (datetime('now')),
+    city TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    slot_label TEXT NOT NULL,
+    forecast_high_f REAL,
+    price_yes REAL,
+    price_no REAL,
+    win_prob REAL,
+    ev REAL,
+    distance_f REAL,
+    trend_state TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_log_cycle ON decision_log(cycle_at);
+CREATE INDEX IF NOT EXISTS idx_edge_history_cycle ON edge_history(cycle_at);
+CREATE INDEX IF NOT EXISTS idx_edge_history_city ON edge_history(city);
 """
 
 
@@ -176,3 +211,92 @@ class Store:
             (date_str, realized, unrealized, exposure, realized, unrealized, exposure),
         )
         await self.db.commit()
+
+    async def insert_decision_log(
+        self, cycle_at: str, city: str, event_id: str, signal_type: str,
+        slot_label: str, forecast_high_f: float | None, daily_max_f: float | None,
+        trend_state: str, win_prob: float, expected_value: float,
+        price: float, size_usd: float, action: str,
+    ) -> None:
+        await self.db.execute(
+            """INSERT INTO decision_log (cycle_at, city, event_id, signal_type, slot_label,
+               forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cycle_at, city, event_id, signal_type, slot_label,
+             forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action),
+        )
+        await self.db.commit()
+
+    async def get_decision_log(self, limit: int = 50) -> list[dict]:
+        async with self.db.execute(
+            "SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def insert_edge_snapshot(
+        self, cycle_at: str, city: str, market_date: str, slot_label: str,
+        forecast_high_f: float, price_yes: float, price_no: float,
+        win_prob: float, ev: float, distance_f: float, trend_state: str,
+    ) -> None:
+        await self.db.execute(
+            """INSERT INTO edge_history (cycle_at, city, market_date, slot_label,
+               forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cycle_at, city, market_date, slot_label,
+             forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state),
+        )
+
+    async def flush_edge_batch(self) -> None:
+        """Commit pending edge inserts."""
+        await self.db.commit()
+
+    async def get_edge_history(self, city: str | None = None, limit: int = 200) -> list[dict]:
+        if city:
+            query = "SELECT * FROM edge_history WHERE city = ? ORDER BY id DESC LIMIT ?"
+            params = (city, limit)
+        else:
+            query = "SELECT * FROM edge_history ORDER BY id DESC LIMIT ?"
+            params = (limit,)
+        async with self.db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_edge_summary(self) -> list[dict]:
+        """Aggregate edge stats per city: avg EV, max EV, opportunities count."""
+        async with self.db.execute("""
+            SELECT city,
+                   COUNT(*) as total_scans,
+                   SUM(CASE WHEN ev > 0.02 THEN 1 ELSE 0 END) as edge_opportunities,
+                   ROUND(AVG(ev), 4) as avg_ev,
+                   ROUND(MAX(ev), 4) as max_ev,
+                   ROUND(AVG(win_prob), 3) as avg_win_prob,
+                   MIN(cycle_at) as first_scan,
+                   MAX(cycle_at) as last_scan
+            FROM edge_history
+            GROUP BY city
+            ORDER BY edge_opportunities DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_closed_positions(self, limit: int = 20) -> list[dict]:
+        async with self.db.execute(
+            "SELECT * FROM positions WHERE status = 'closed' ORDER BY closed_at DESC LIMIT ?", (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_pnl_history(self) -> list[dict]:
+        async with self.db.execute(
+            "SELECT * FROM daily_pnl ORDER BY date DESC LIMIT 30"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_settlements(self) -> list[dict]:
+        async with self.db.execute(
+            "SELECT * FROM settlements ORDER BY settled_at DESC LIMIT 50"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

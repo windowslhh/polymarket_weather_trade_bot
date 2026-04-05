@@ -28,6 +28,11 @@ class StrategyConfig:
     max_total_exposure_usd: float = 1000.0
     daily_loss_limit_usd: float = 50.0
     kelly_fraction: float = 0.5
+    min_market_volume: float = 500.0
+    max_slot_spread: float = 0.15
+    min_trim_ev: float = 0.005
+    ladder_width: int = 3
+    ladder_min_ev: float = 0.01
 
 
 @dataclass
@@ -48,13 +53,17 @@ class AppConfig:
     # Optional weather API key
     openweathermap_api_key: str = ""
 
+    # Alert webhook URL (Telegram/Discord/Slack)
+    alert_webhook_url: str = ""
+
     # Sub-configs
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
     cities: list[CityConfig] = field(default_factory=list)
 
-    # Runtime flags
+    # Runtime flags: dry_run = print only; paper = simulate fills + track positions
     dry_run: bool = False
+    paper: bool = False
     db_path: Path = field(default_factory=lambda: _ROOT / "data" / "bot.db")
 
 
@@ -76,6 +85,7 @@ def load_config(config_path: str | Path | None = None, env_path: str | Path | No
         polymarket_passphrase=os.getenv("POLYMARKET_PASSPHRASE", ""),
         eth_private_key=os.getenv("ETH_PRIVATE_KEY", ""),
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
+        alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
         strategy=StrategyConfig(**strategy_raw),
         scheduling=SchedulingConfig(**scheduling_raw),
         cities=[CityConfig(**c) for c in cities_raw],

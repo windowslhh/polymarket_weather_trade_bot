@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}P&L History - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">P&L History</div>
+
+{% if pnl_history %}
+<div class="panel" style="margin-bottom:20px;">
+    <div class="panel-header"><h3>Exposure Over Time</h3></div>
+    <div class="panel-body">
+        <div class="chart-container">
+            <canvas id="pnlChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header"><h3>Daily Breakdown</h3></div>
+    <table>
+        <thead><tr><th>Date</th><th>Realized P&L</th><th>Unrealized P&L</th><th>Total Exposure</th><th>Updated</th></tr></thead>
+        <tbody>
+        {% for row in pnl_history %}
+        <tr>
+            <td style="font-weight:500;">{{ row.date }}</td>
+            <td class="td-mono" style="color:{{ 'var(--green-text)' if row.realized_pnl >= 0 else 'var(--red-text)' }}">
+                {{ '+' if row.realized_pnl > 0 else '' }}${{ "%.2f"|format(row.realized_pnl) }}
+            </td>
+            <td class="td-mono" style="color:{{ 'var(--green-text)' if row.unrealized_pnl >= 0 else 'var(--red-text)' }}">
+                {{ '+' if row.unrealized_pnl > 0 else '' }}${{ "%.2f"|format(row.unrealized_pnl) }}
+            </td>
+            <td class="td-mono">${{ "%.2f"|format(row.total_exposure) }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.updated_at[:16] }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const data = {{ pnl_history|tojson }};
+    data.reverse();
+    new Chart(document.getElementById('pnlChart'), {
+        type: 'line',
+        data: {
+            labels: data.map(d => d.date),
+            datasets: [
+                {
+                    label: 'Exposure',
+                    data: data.map(d => d.total_exposure),
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99,102,241,0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    borderWidth: 2,
+                    pointRadius: 3,
+                },
+                {
+                    label: 'Unrealized P&L',
+                    data: data.map(d => d.unrealized_pnl),
+                    borderColor: '#22c55e',
+                    backgroundColor: 'rgba(34,197,94,0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    borderWidth: 2,
+                    pointRadius: 3,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
+            scales: {
+                x: { ticks: { color: '#5e6278', font: { size: 10 } }, grid: { color: 'rgba(42,45,58,0.5)' } },
+                y: { ticks: { color: '#5e6278', font: { size: 10 }, callback: v => '$' + v.toFixed(0) }, grid: { color: 'rgba(42,45,58,0.5)' } }
+            }
+        }
+    });
+});
+</script>
+{% else %}
+<div class="panel">
+    <div class="empty-state">
+        <div class="icon">~</div>
+        <p>No P&L history yet. Data accumulates with each rebalance cycle. Keep the bot running to build up historical performance data.</p>
+    </div>
+</div>
+{% endif %}
+
+{% if settlements %}
+<div class="panel">
+    <div class="panel-header"><h3>Settled Markets</h3></div>
+    <table>
+        <thead><tr><th>City</th><th>Winning Outcome</th><th>P&L</th><th>Settled At</th></tr></thead>
+        <tbody>
+        {% for s in settlements %}
+        <tr>
+            <td style="font-weight:500;">{{ s.city }}</td>
+            <td>{{ s.winning_outcome or '-' }}</td>
+            <td class="td-mono" style="color:{{ 'var(--green-text)' if s.pnl >= 0 else 'var(--red-text)' }}">
+                {{ '+' if s.pnl > 0 else '' }}${{ "%.2f"|format(s.pnl) }}
+            </td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ s.settled_at[:16] }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

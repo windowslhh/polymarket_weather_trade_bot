@@ -74,6 +74,24 @@ class PortfolioTracker:
                 ))
         return slots
 
+    async def close_positions_for_token(self, event_id: str, token_id: str) -> int:
+        """Close all open positions matching event_id and token_id.
+
+        Returns number of positions closed.
+        """
+        positions = await self._store.get_open_positions(event_id=event_id)
+        closed = 0
+        for pos in positions:
+            if pos["token_id"] == token_id and pos["status"] == "open":
+                await self._store.close_position(pos["id"])
+                logger.info("Position closed: id=%d %s %s", pos["id"], pos["slot_label"], pos["token_type"])
+                closed += 1
+        return closed
+
+    async def get_all_open_positions(self) -> list[dict]:
+        """Get all open positions across all cities."""
+        return await self._store.get_open_positions()
+
     async def get_open_positions_for_city(self, city: str) -> list[dict]:
         """Get all open positions for a city."""
         return await self._store.get_open_positions(city=city)
@@ -83,11 +101,30 @@ class PortfolioTracker:
         d = (day or date.today()).isoformat()
         return await self._store.get_daily_pnl(d)
 
-    async def snapshot_pnl(self) -> None:
-        """Take a daily P&L snapshot."""
+    async def compute_unrealized_pnl(self, clob_client=None) -> float:
+        """Compute unrealized P&L across all open positions.
+
+        If clob_client is provided, fetches current market prices.
+        Otherwise uses entry prices (unrealized = 0).
+        """
+        positions = await self._store.get_open_positions()
+        if not positions or clob_client is None:
+            return 0.0
+
+        token_ids = [p["token_id"] for p in positions]
+        current_prices = await clob_client.get_prices_batch(token_ids)
+
+        unrealized = 0.0
+        for pos in positions:
+            current = current_prices.get(pos["token_id"])
+            if current is not None:
+                unrealized += (current - pos["entry_price"]) * pos["shares"]
+        return unrealized
+
+    async def snapshot_pnl(self, clob_client=None) -> None:
+        """Take a daily P&L snapshot with unrealized PnL."""
         today = date.today().isoformat()
         exposure = await self._store.get_total_exposure()
-        # Realized P&L would be computed from closed positions
-        # For now, just record exposure
-        await self._store.upsert_daily_pnl(today, 0, 0, exposure)
-        logger.info("P&L snapshot: exposure=$%.2f", exposure)
+        unrealized = await self.compute_unrealized_pnl(clob_client)
+        await self._store.upsert_daily_pnl(today, 0, unrealized, exposure)
+        logger.info("P&L snapshot: exposure=$%.2f, unrealized=$%.2f", exposure, unrealized)

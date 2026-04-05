@@ -15,6 +15,16 @@ strategy:
   daily_loss_limit_usd: 50.0
   # Kelly fraction multiplier (0.5 = half Kelly)
   kelly_fraction: 0.5
+  # Minimum market volume (USD) to consider
+  min_market_volume: 500
+  # Maximum YES/NO spread to consider a slot liquid
+  max_slot_spread: 0.15
+  # Minimum EV to keep a position; below this → auto-trim
+  min_trim_ev: 0.005
+  # Ladder围网: radius in number of slots around forecast center
+  ladder_width: 3
+  # Ladder围网: minimum EV to enter (lower than standard NO threshold)
+  ladder_min_ev: 0.01
 
 scheduling:
   # How often to discover new markets (minutes)

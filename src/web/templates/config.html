@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Settings - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">Settings</div>
+
+<div class="grid-2">
+    <div class="panel">
+        <div class="panel-header"><h3>Strategy Parameters</h3></div>
+        <table>
+            <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+            <tbody>
+            <tr><td>NO Distance Threshold</td><td class="td-mono">{{ strategy.no_distance_threshold_f }}°F</td></tr>
+            <tr><td>Min NO EV</td><td class="td-mono">{{ strategy.min_no_ev }}</td></tr>
+            <tr><td>YES Confirmation Threshold</td><td class="td-mono">{{ strategy.yes_confirmation_threshold }}</td></tr>
+            <tr><td>Kelly Fraction</td><td class="td-mono">{{ strategy.kelly_fraction }}x</td></tr>
+            <tr><td>Ladder Width</td><td class="td-mono">{{ strategy.ladder_width }} slots</td></tr>
+            <tr><td>Ladder Min EV</td><td class="td-mono">{{ strategy.ladder_min_ev }}</td></tr>
+            <tr><td>Trim EV Threshold</td><td class="td-mono">{{ strategy.min_trim_ev }}</td></tr>
+            <tr><td>Min Market Volume</td><td class="td-mono">${{ "%.0f"|format(strategy.min_market_volume) }}</td></tr>
+            <tr><td>Max Slot Spread</td><td class="td-mono">{{ strategy.max_slot_spread }}</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header"><h3>Risk Limits</h3></div>
+        <table>
+            <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+            <tbody>
+            <tr><td>Max per Slot</td><td class="td-mono">${{ "%.2f"|format(strategy.max_position_per_slot_usd) }}</td></tr>
+            <tr><td>Max per City</td><td class="td-mono">${{ "%.2f"|format(strategy.max_exposure_per_city_usd) }}</td></tr>
+            <tr><td>Max Total Exposure</td><td class="td-mono">${{ "%.2f"|format(strategy.max_total_exposure_usd) }}</td></tr>
+            <tr><td>Daily Loss Limit</td><td class="td-mono" style="color:var(--red-text);">${{ "%.2f"|format(strategy.daily_loss_limit_usd) }}</td></tr>
+            </tbody>
+        </table>
+
+        <div style="padding:16px 16px 0;">
+            <div class="panel-header" style="padding:0 0 12px;border:none;"><h3>Scheduling</h3></div>
+        </div>
+        <table>
+            <tbody>
+            <tr><td>Rebalance Interval</td><td class="td-mono">{{ scheduling.rebalance_interval_minutes }} min</td></tr>
+            <tr><td>Settlement Acceleration</td><td class="td-mono">15 min</td></tr>
+            <tr><td>Discovery Interval</td><td class="td-mono">{{ scheduling.discovery_interval_minutes }} min</td></tr>
+            <tr><td>P&L Snapshot</td><td class="td-mono">{{ scheduling.pnl_snapshot_interval_hours }} hr</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">
+        <h3>Monitored Cities</h3>
+        <span style="font-size:11px;color:var(--text-dim);">{{ cities|length }} configured</span>
+    </div>
+    <table>
+        <thead><tr><th>City</th><th>ICAO</th><th>Latitude</th><th>Longitude</th></tr></thead>
+        <tbody>
+        {% for c in cities %}
+        <tr>
+            <td style="font-weight:500;">{{ c.name }}</td>
+            <td class="td-mono">{{ c.icao }}</td>
+            <td class="td-mono">{{ c.lat }}</td>
+            <td class="td-mono">{{ c.lon }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

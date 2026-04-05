@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - WeatherBot{% endblock %}
+{% block content %}
+<div class="metrics">
+    <div class="metric-card">
+        <div class="metric-label">Total Exposure</div>
+        <div class="metric-value" id="val-exposure">${{ "%.2f"|format(exposure) }}</div>
+        <div class="metric-sub">of ${{ "%.0f"|format(max_exposure) }} limit</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Unrealized P&L</div>
+        <div class="metric-value {{ 'positive' if unrealized >= 0 else 'negative' }}" id="val-pnl">${{ "%.2f"|format(unrealized) }}</div>
+        <div class="metric-sub">mark-to-market</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Active Markets</div>
+        <div class="metric-value" id="val-events">{{ active_events }}</div>
+        <div class="metric-sub">across {{ trends|length }} cities</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Trade Signals</div>
+        <div class="metric-value" id="val-signals">{{ signals|length }}</div>
+        <div class="metric-sub">last cycle</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Open Positions</div>
+        <div class="metric-value">{{ positions|length }}</div>
+        <div class="metric-sub">{{ cities_with_positions }} cities</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Loss Budget</div>
+        <div class="metric-value">${{ "%.2f"|format(daily_loss_remaining) }}</div>
+        <div class="metric-sub">of ${{ "%.0f"|format(daily_loss_limit) }} daily limit</div>
+    </div>
+</div>
+
+<div class="grid-2">
+    <div class="panel">
+        <div class="panel-header">
+            <h3>City Trend States</h3>
+            <span style="font-size:11px;color:var(--text-dim);">Updated each cycle</span>
+        </div>
+        <div class="panel-body">
+            {% if trends %}
+            <div class="trends-row">
+                {% for city, trend in trends.items() %}
+                <span class="tag tag-{{ trend|lower|replace('_','-') }}">{{ city }}: {{ trend }}</span>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div style="color:var(--text-dim);font-size:13px;">Trends will appear after first rebalance cycle.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">
+            <h3>Forecast Snapshot</h3>
+        </div>
+        <div class="panel-body">
+            {% if forecasts %}
+            <table>
+                <thead><tr><th>City</th><th>High</th><th>Confidence</th><th>Source</th></tr></thead>
+                <tbody>
+                {% for city, f in forecasts.items() %}
+                <tr>
+                    <td style="font-weight:500;">{{ city }}</td>
+                    <td class="td-mono">{{ "%.1f"|format(f.high) }}°F</td>
+                    <td class="td-mono">±{{ "%.1f"|format(f.confidence) }}°F</td>
+                    <td style="font-size:11px;color:var(--text-dim);">{{ f.source[:30] }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div style="color:var(--text-dim);font-size:13px;">Waiting for forecast data...</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{% if signals %}
+<div class="panel">
+    <div class="panel-header">
+        <h3>Trade Signals</h3>
+        <span class="tag tag-buy">{{ signals|length }} signals</span>
+    </div>
+    <table>
+        <thead><tr><th>City</th><th>Type</th><th>Side</th><th>Slot</th><th>EV</th><th>Win Prob</th><th>Size</th></tr></thead>
+        <tbody>
+        {% for s in signals[:20] %}
+        <tr>
+            <td style="font-weight:500;">{{ s.city }}</td>
+            <td><span class="tag tag-{{ 'buy' if s.side == 'BUY' else 'sell' }}">{{ s.token_type }}</span></td>
+            <td><span class="tag tag-{{ 'buy' if s.side == 'BUY' else 'sell' }}">{{ s.side }}</span></td>
+            <td class="td-mono">{{ s.slot_label }}</td>
+            <td class="td-mono {{ 'positive' if s.ev > 0 else '' }}">{{ "%.4f"|format(s.ev) }}</td>
+            <td class="td-mono">{{ "%.1f%%"|format(s.win_prob * 100) }}</td>
+            <td class="td-mono">${{ "%.2f"|format(s.size_usd) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="panel">
+    <div class="panel-header"><h3>Trade Signals</h3></div>
+    <div class="empty-state">
+        <div class="icon">~</div>
+        <p>No signals generated. Market pricing is efficient — the bot is patiently waiting for edge opportunities.</p>
+    </div>
+</div>
+{% endif %}
+
+{% if decision_log %}
+<div class="panel">
+    <div class="panel-header">
+        <h3>Recent Decisions</h3>
+        <a href="/analytics" style="font-size:12px;color:var(--accent-light);">View all &rarr;</a>
+    </div>
+    <table>
+        <thead><tr><th>Time</th><th>City</th><th>Slot</th><th>Forecast</th><th>EV</th><th>Action</th></tr></thead>
+        <tbody>
+        {% for d in decision_log[:8] %}
+        <tr>
+            <td style="font-size:11px;color:var(--text-muted);">{{ d.cycle_at[:16] if d.cycle_at else '-' }}</td>
+            <td style="font-weight:500;">{{ d.city }}</td>
+            <td class="td-mono" style="font-size:11px;">{{ d.slot_label[:30] if d.slot_label else '-' }}</td>
+            <td class="td-mono">{{ "%.0f"|format(d.forecast_high_f) if d.forecast_high_f else '-' }}°F</td>
+            <td class="td-mono">{{ "%.4f"|format(d.expected_value) if d.expected_value else '-' }}</td>
+            <td><span class="tag tag-{{ (d.action or 'skip')|lower }}">{{ d.action or '-' }}</span></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Positions - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">Positions</div>
+
+<div class="metrics">
+    <div class="metric-card">
+        <div class="metric-label">Open Positions</div>
+        <div class="metric-value">{{ positions|length }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Total Exposure</div>
+        <div class="metric-value">${{ "%.2f"|format(total_exposure) }}</div>
+        <div class="metric-sub">of ${{ "%.0f"|format(global_limit) }} limit ({{ "%.0f%%"|format(total_exposure / global_limit * 100) if global_limit > 0 else '0%' }})</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Cities Active</div>
+        <div class="metric-value">{{ cities|length }}</div>
+    </div>
+</div>
+
+{% if cities %}
+<div class="panel">
+    <div class="panel-header"><h3>Exposure by City</h3></div>
+    <table>
+        <thead><tr><th>City</th><th>Positions</th><th>Exposure</th><th>Limit</th><th>Usage</th></tr></thead>
+        <tbody>
+        {% for city, data in cities.items() %}
+        <tr>
+            <td style="font-weight:500;">{{ city }}</td>
+            <td>{{ data.count }}</td>
+            <td class="td-mono">${{ "%.2f"|format(data.exposure) }}</td>
+            <td class="td-mono" style="color:var(--text-dim);">${{ "%.0f"|format(city_limit) }}</td>
+            <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="flex:1;height:6px;background:var(--border);border-radius:3px;max-width:120px;">
+                        <div style="height:100%;width:{{ (data.exposure / city_limit * 100) if city_limit > 0 else 0 }}%;background:var(--accent);border-radius:3px;"></div>
+                    </div>
+                    <span class="td-mono" style="font-size:11px;">{{ "%.0f%%"|format(data.exposure / city_limit * 100) if city_limit > 0 else '0%' }}</span>
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if positions %}
+<div class="panel">
+    <div class="panel-header">
+        <h3>Open Positions</h3>
+        <span class="tag tag-buy">{{ positions|length }} active</span>
+    </div>
+    <table>
+        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Side</th><th>Entry</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
+        <tbody>
+        {% for p in positions %}
+        <tr>
+            <td style="font-weight:500;">{{ p.city }}</td>
+            <td class="td-mono" style="font-size:12px;">{{ p.slot_label }}</td>
+            <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
+            <td><span class="tag tag-{{ p.side|lower }}">{{ p.side }}</span></td>
+            <td class="td-mono">{{ "%.4f"|format(p.entry_price) }}</td>
+            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
+            <td class="td-mono">{{ "%.2f"|format(p.shares) }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at[:16] }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="panel">
+    <div class="empty-state">
+        <div class="icon">~</div>
+        <p>No open positions yet. The bot will open positions when it detects profitable edge in weather market pricing.</p>
+    </div>
+</div>
+{% endif %}
+
+{% if closed_positions %}
+<div class="panel">
+    <div class="panel-header">
+        <h3>Recently Closed</h3>
+        <span style="font-size:11px;color:var(--text-dim);">{{ closed_positions|length }} positions</span>
+    </div>
+    <table>
+        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
+        <tbody>
+        {% for p in closed_positions[:20] %}
+        <tr>
+            <td style="font-weight:500;">{{ p.city }}</td>
+            <td class="td-mono" style="font-size:12px;">{{ p.slot_label }}</td>
+            <td>{{ p.token_type }}</td>
+            <td class="td-mono">{{ "%.4f"|format(p.entry_price) }}</td>
+            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ p.closed_at[:16] if p.closed_at else '-' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

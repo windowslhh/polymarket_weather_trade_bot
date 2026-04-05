@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block title %}Analytics - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">Edge Analytics</div>
+
+{% if edge_summary %}
+<div class="panel" style="margin-bottom:20px;">
+    <div class="panel-header"><h3>Edge Opportunities by City</h3><span style="font-size:11px;color:var(--text-dim);">Slots where EV > 2%</span></div>
+    <table>
+        <thead><tr><th>City</th><th>Scans</th><th>Edge Opps</th><th>Hit Rate</th><th>Avg EV</th><th>Max EV</th><th>Avg Win%</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+        <tbody>
+        {% for row in edge_summary %}
+        <tr>
+            <td style="font-weight:500;">{{ row.city }}</td>
+            <td class="td-mono">{{ row.total_scans }}</td>
+            <td class="td-mono" style="{% if row.edge_opportunities > 0 %}color:var(--green-text);font-weight:600;{% endif %}">{{ row.edge_opportunities }}</td>
+            <td class="td-mono">{{ "%.1f%%"|format(row.edge_opportunities / row.total_scans * 100) if row.total_scans > 0 else '0%' }}</td>
+            <td class="td-mono">{{ row.avg_ev }}</td>
+            <td class="td-mono" style="{% if row.max_ev and row.max_ev > 0.02 %}color:var(--green-text);{% endif %}">{{ row.max_ev }}</td>
+            <td class="td-mono">{{ "%.1f%%"|format(row.avg_win_prob * 100) if row.avg_win_prob else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.first_scan[:16] if row.first_scan else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.last_scan[:16] if row.last_scan else '-' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if edge_history %}
+<div class="panel" style="margin-bottom:20px;">
+    <div class="panel-header"><h3>EV Distribution Over Time</h3></div>
+    <div class="panel-body">
+        <div class="chart-container" style="height:250px;">
+            <canvas id="evChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">
+        <h3>Recent Edge Snapshots</h3>
+        <span style="font-size:11px;color:var(--text-dim);">{{ edge_history|length }} records</span>
+    </div>
+    <table>
+        <thead><tr><th>Time</th><th>City</th><th>Date</th><th>Slot</th><th>Forecast</th><th>YES</th><th>NO</th><th>Win%</th><th>EV</th><th>Dist</th><th>Trend</th></tr></thead>
+        <tbody>
+        {% for e in edge_history[:50] %}
+        <tr {% if e.ev and e.ev > 0.02 %}class="row-highlight"{% endif %}>
+            <td style="font-size:11px;color:var(--text-muted);">{{ e.cycle_at[:16] if e.cycle_at else '-' }}</td>
+            <td style="font-weight:500;">{{ e.city }}</td>
+            <td class="td-mono" style="font-size:11px;">{{ e.market_date }}</td>
+            <td style="font-size:11px;">{{ e.slot_label[:35] if e.slot_label else '-' }}</td>
+            <td class="td-mono">{{ "%.1f"|format(e.forecast_high_f) if e.forecast_high_f else '-' }}°F</td>
+            <td class="td-mono">{{ "%.3f"|format(e.price_yes) if e.price_yes else '-' }}</td>
+            <td class="td-mono">{{ "%.3f"|format(e.price_no) if e.price_no else '-' }}</td>
+            <td class="td-mono">{{ "%.1f%%"|format(e.win_prob * 100) if e.win_prob else '-' }}</td>
+            <td class="td-mono" style="{% if e.ev and e.ev > 0.02 %}color:var(--green-text);font-weight:600;{% elif e.ev and e.ev < 0 %}color:var(--red-text);{% endif %}">{{ "%.4f"|format(e.ev) if e.ev is not none else '-' }}</td>
+            <td class="td-mono">{{ "%.1f"|format(e.distance_f) if e.distance_f is not none else '-' }}°F</td>
+            <td><span class="tag tag-{{ (e.trend_state or 'stable')|lower|replace('_','-') }}">{{ e.trend_state or '-' }}</span></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const data = {{ edge_history|tojson }};
+    // Group by cycle and compute avg EV per cycle
+    const cycles = {};
+    data.forEach(e => {
+        const key = (e.cycle_at || '').slice(0, 16);
+        if (!cycles[key]) cycles[key] = { evs: [], count: 0, positive: 0 };
+        cycles[key].evs.push(e.ev || 0);
+        cycles[key].count++;
+        if (e.ev > 0.02) cycles[key].positive++;
+    });
+    const labels = Object.keys(cycles).sort();
+    const avgEvs = labels.map(k => {
+        const evs = cycles[k].evs;
+        return evs.reduce((a,b) => a+b, 0) / evs.length;
+    });
+    const maxEvs = labels.map(k => Math.max(...cycles[k].evs));
+    const edgeCount = labels.map(k => cycles[k].positive);
+
+    new Chart(document.getElementById('evChart'), {
+        type: 'bar',
+        data: {
+            labels: labels.map(l => l.slice(5)),
+            datasets: [
+                {
+                    label: 'Max EV per Cycle',
+                    data: maxEvs,
+                    backgroundColor: 'rgba(99,102,241,0.6)',
+                    borderRadius: 4,
+                    order: 1,
+                },
+                {
+                    label: 'Edge Opportunities',
+                    data: edgeCount,
+                    type: 'line',
+                    borderColor: '#22c55e',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    pointRadius: 3,
+                    yAxisID: 'y1',
+                    order: 0,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
+            scales: {
+                x: { ticks: { color: '#5e6278', font: { size: 10 } }, grid: { color: 'rgba(42,45,58,0.5)' } },
+                y: { position: 'left', title: { display: true, text: 'EV', color: '#5e6278' }, ticks: { color: '#5e6278', font: { size: 10 } }, grid: { color: 'rgba(42,45,58,0.5)' } },
+                y1: { position: 'right', title: { display: true, text: 'Edge Opps', color: '#5e6278' }, ticks: { color: '#5e6278', font: { size: 10 }, stepSize: 1 }, grid: { drawOnChartArea: false } }
+            }
+        }
+    });
+});
+</script>
+{% else %}
+<div class="panel">
+    <div class="empty-state">
+        <div class="icon">~</div>
+        <p>No edge history recorded yet. Data accumulates with each rebalance cycle. The bot records EV for every temperature slot across all active markets.</p>
+    </div>
+</div>
+{% endif %}
+
+{% if decision_log %}
+<div class="panel">
+    <div class="panel-header">
+        <h3>Decision Log</h3>
+        <span style="font-size:11px;color:var(--text-dim);">{{ decision_log|length }} decisions</span>
+    </div>
+    <table>
+        <thead><tr><th>Time</th><th>City</th><th>Type</th><th>Slot</th><th>Forecast</th><th>Max°F</th><th>Trend</th><th>Win%</th><th>EV</th><th>Price</th><th>Size</th><th>Action</th></tr></thead>
+        <tbody>
+        {% for d in decision_log[:30] %}
+        <tr>
+            <td style="font-size:11px;color:var(--text-muted);">{{ d.cycle_at[:16] if d.cycle_at else '-' }}</td>
+            <td style="font-weight:500;">{{ d.city }}</td>
+            <td>{{ d.signal_type }}</td>
+            <td style="font-size:11px;">{{ d.slot_label[:25] if d.slot_label else '-' }}</td>
+            <td class="td-mono">{{ "%.0f"|format(d.forecast_high_f) if d.forecast_high_f else '-' }}°F</td>
+            <td class="td-mono">{{ "%.0f"|format(d.daily_max_f) if d.daily_max_f else '-' }}°F</td>
+            <td><span class="tag tag-{{ (d.trend_state or 'stable')|lower|replace('_','-') }}">{{ d.trend_state or '-' }}</span></td>
+            <td class="td-mono">{{ "%.1f%%"|format(d.win_prob * 100) if d.win_prob else '-' }}</td>
+            <td class="td-mono">{{ "%.4f"|format(d.expected_value) if d.expected_value else '-' }}</td>
+            <td class="td-mono">{{ "%.3f"|format(d.price) if d.price else '-' }}</td>
+            <td class="td-mono">${{ "%.2f"|format(d.size_usd) if d.size_usd else '-' }}</td>
+            <td><span class="tag tag-{{ (d.action or 'skip')|lower }}">{{ d.action or '-' }}</span></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

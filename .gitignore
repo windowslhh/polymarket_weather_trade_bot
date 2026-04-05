@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 dist/
 *.egg-info/
+.DS_Store
+.claude/
+=3.0.0

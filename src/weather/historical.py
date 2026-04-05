@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 
 from src.config import CityConfig
+from src.weather.http_utils import fetch_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ async def fetch_historical_actuals(
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
     try:
-        resp = await client.get(ARCHIVE_URL, params={
+        data = await fetch_with_retry(client, ARCHIVE_URL, {
             "latitude": city.lat,
             "longitude": city.lon,
             "daily": "temperature_2m_max",
@@ -141,8 +142,6 @@ async def fetch_historical_actuals(
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         })
-        resp.raise_for_status()
-        data = resp.json()
         daily = data.get("daily", {})
         times = daily.get("time", [])
         highs = daily.get("temperature_2m_max", [])
@@ -174,7 +173,7 @@ async def fetch_historical_forecasts(
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
     try:
-        resp = await client.get(FORECAST_ARCHIVE_URL, params={
+        data = await fetch_with_retry(client, FORECAST_ARCHIVE_URL, {
             "latitude": city.lat,
             "longitude": city.lon,
             "daily": "temperature_2m_max",
@@ -184,8 +183,6 @@ async def fetch_historical_forecasts(
             "end_date": end_date.isoformat(),
             "past_days": 0,
         })
-        resp.raise_for_status()
-        data = resp.json()
         daily = data.get("daily", {})
         times = daily.get("time", [])
         highs = daily.get("temperature_2m_max", [])
@@ -285,7 +282,7 @@ async def build_all_distributions(
     """Build forecast error distributions for all cities."""
     import asyncio
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         tasks = [build_error_distribution(city, lookback_days, client) for city in cities]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

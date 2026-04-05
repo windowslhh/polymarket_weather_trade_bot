@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Markets - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">Active Weather Markets <span style="font-size:14px;color:var(--text-muted);font-weight:400;">({{ events|length }} events)</span></div>
+
+{% if events %}
+{% for event in events %}
+<details {% if loop.index <= 2 %}open{% endif %}>
+    <summary>
+        <span style="flex:1;">
+            <strong>{{ event.city }}</strong>
+            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">{{ event.market_date }}</span>
+        </span>
+        {% if event.forecast_high %}
+        <span class="td-mono" style="font-size:12px;color:var(--accent-light);margin-right:12px;">Forecast: {{ "%.1f"|format(event.forecast_high) }}°F</span>
+        {% endif %}
+        {% if event.trend and event.trend != 'STABLE' %}
+        <span class="tag tag-{{ event.trend|lower|replace('_','-') }}" style="margin-right:8px;">{{ event.trend }}</span>
+        {% endif %}
+        <span style="font-size:12px;color:var(--text-dim);">{{ event.slots|length }} slots</span>
+    </summary>
+    <div class="detail-body">
+        <table>
+            <thead><tr><th>Temperature Slot</th><th>YES</th><th>NO</th><th>Spread</th><th>Distance</th><th>NO Win%</th><th>EV</th></tr></thead>
+            <tbody>
+            {% for slot in event.slots %}
+            <tr {% if slot.is_forecast_slot %}class="row-highlight"{% endif %}>
+                <td style="font-weight:500;font-size:13px;">{{ slot.label }}</td>
+                <td class="td-mono">{{ "%.3f"|format(slot.price_yes) }}</td>
+                <td class="td-mono">{{ "%.3f"|format(slot.price_no) }}</td>
+                <td class="td-mono" style="color:{{ 'var(--green-text)' if slot.spread is not none and slot.spread < 0.05 else 'var(--text-dim)' }}">{{ "%.3f"|format(slot.spread) if slot.spread is not none else '-' }}</td>
+                <td class="td-mono">{{ "%.1f"|format(slot.distance) if slot.distance is not none else '-' }}°F</td>
+                <td class="td-mono">{{ "%.1f%%"|format(slot.win_prob * 100) if slot.win_prob is not none else '-' }}</td>
+                <td class="td-mono" style="{% if slot.ev is not none and slot.ev > 0.02 %}color:var(--green-text);font-weight:600;{% elif slot.ev is not none and slot.ev < 0 %}color:var(--red-text);{% endif %}">
+                    {{ "%.4f"|format(slot.ev) if slot.ev is not none else '-' }}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
+{% endfor %}
+{% else %}
+<div class="panel">
+    <div class="empty-state">
+        <div class="icon">~</div>
+        <p>No active weather markets discovered. Next scan in {{ next_scan_minutes }} minutes. Markets are typically available for US cities with daily high temperature bets.</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -5,6 +5,8 @@ import logging
 import re
 from datetime import date, datetime, timezone
 
+import json
+
 import httpx
 
 from src.config import CityConfig
@@ -25,7 +27,7 @@ _TEMP_SINGLE_RE = re.compile(r"^(?P<temp>\d+)\s*°?\s*F$", re.IGNORECASE)
 
 # Pattern to extract city name and date from event title
 _TITLE_PATTERN = re.compile(
-    r"(?:highest|high)\s+temperature\s+in\s+(?P<city>.+?)\s+on\s+(?P<date>.+)",
+    r"(?:highest|high)\s+temperature\s+in\s+(?P<city>.+?)\s+on\s+(?P<date>.+?)\??\s*$",
     re.IGNORECASE,
 )
 
@@ -77,6 +79,8 @@ def _match_city(event_city: str, configured_cities: list[CityConfig]) -> CityCon
 async def discover_weather_markets(
     cities: list[CityConfig],
     client: httpx.AsyncClient | None = None,
+    min_volume: float = 0.0,
+    max_spread: float = 1.0,
 ) -> list[WeatherMarketEvent]:
     """Scan Gamma API for active weather temperature markets matching configured cities."""
     should_close = client is None
@@ -90,7 +94,7 @@ async def discover_weather_markets(
             resp = await client.get(
                 f"{GAMMA_API_URL}/events",
                 params={
-                    "tag": "weather",
+                    "tag_slug": "weather",
                     "active": "true",
                     "closed": "false",
                     "limit": limit,
@@ -130,6 +134,17 @@ async def discover_weather_markets(
                     outcome_prices = mkt.get("outcomePrices", [])
                     tokens = mkt.get("clobTokenIds", [])
 
+                    # Gamma API returns these as JSON strings sometimes
+                    if isinstance(outcomes, str):
+                        try: outcomes = json.loads(outcomes)
+                        except (json.JSONDecodeError, TypeError): outcomes = []
+                    if isinstance(outcome_prices, str):
+                        try: outcome_prices = json.loads(outcome_prices)
+                        except (json.JSONDecodeError, TypeError): outcome_prices = []
+                    if isinstance(tokens, str):
+                        try: tokens = json.loads(tokens)
+                        except (json.JSONDecodeError, TypeError): tokens = []
+
                     if len(outcomes) < 2 or len(tokens) < 2:
                         continue
 
@@ -146,17 +161,37 @@ async def discover_weather_markets(
                         except (ValueError, TypeError):
                             prices.append(0.0)
 
+                    price_yes = prices[0] if prices else 0.0
+                    price_no = prices[1] if len(prices) > 1 else 0.0
+                    slot_spread = abs(1.0 - price_yes - price_no) if price_yes and price_no else None
+
+                    # Skip illiquid slots
+                    if slot_spread is not None and slot_spread > max_spread:
+                        logger.debug("Skipping illiquid slot %s (spread=%.3f)", label, slot_spread)
+                        continue
+
                     slots.append(TempSlot(
                         token_id_yes=tokens[0] if tokens else "",
                         token_id_no=tokens[1] if len(tokens) > 1 else "",
                         outcome_label=label,
                         temp_lower_f=lower,
                         temp_upper_f=upper,
-                        price_yes=prices[0] if prices else 0.0,
-                        price_no=prices[1] if len(prices) > 1 else 0.0,
+                        price_yes=price_yes,
+                        price_no=price_no,
+                        spread=slot_spread,
                     ))
 
                 if not slots:
+                    continue
+
+                # Parse volume and filter low-liquidity markets
+                try:
+                    event_volume = float(event_data.get("volume", 0) or 0)
+                except (ValueError, TypeError):
+                    event_volume = 0.0
+
+                if min_volume > 0 and event_volume < min_volume:
+                    logger.debug("Skipping low-volume market %s (vol=$%.0f)", city_cfg.name, event_volume)
                     continue
 
                 end_ts = event_data.get("endDate")
@@ -175,6 +210,7 @@ async def discover_weather_markets(
                     slots=slots,
                     end_timestamp=end_dt,
                     title=title,
+                    volume=event_volume,
                 ))
 
             if len(data) < limit:

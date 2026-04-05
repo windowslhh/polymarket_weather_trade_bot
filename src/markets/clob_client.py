@@ -86,7 +86,14 @@ class ClobClient:
                 "[DRY RUN] Would place %s order: token=%s price=%.4f size=%.2f",
                 side, token_id, price, size,
             )
-            return OrderResult(order_id="dry_run", success=True, message="dry run")
+            return OrderResult(order_id="dry_run", success=False, message="dry run — no positions recorded")
+
+        if self._config.paper:
+            logger.info(
+                "[PAPER] Simulated %s fill: token=%s price=%.4f size=%.2f",
+                side, token_id, price, size,
+            )
+            return OrderResult(order_id=f"paper_{token_id[:8]}", success=True, message="paper trade")
 
         client = self._get_client()
         try:
@@ -123,6 +130,27 @@ class ClobClient:
         except Exception:
             logger.exception("Failed to cancel order %s", order_id)
             return False
+
+    async def get_last_trade_price(self, token_id: str) -> float | None:
+        """Get the last trade price for a token via CLOB API."""
+        if self._config.dry_run:
+            return None  # no real prices in dry-run
+        client = self._get_client()
+        try:
+            result = await asyncio.to_thread(client.get_last_trade_price, token_id)
+            return float(result)
+        except Exception:
+            logger.debug("Failed to get last trade price for %s", token_id)
+            return None
+
+    async def get_prices_batch(self, token_ids: list[str]) -> dict[str, float]:
+        """Get current prices for multiple tokens. Returns available prices."""
+        prices: dict[str, float] = {}
+        for token_id in token_ids:
+            price = await self.get_midpoint(token_id) or await self.get_last_trade_price(token_id)
+            if price is not None:
+                prices[token_id] = price
+        return prices
 
     async def get_positions(self) -> list[Position]:
         """Get all open positions (simplified)."""

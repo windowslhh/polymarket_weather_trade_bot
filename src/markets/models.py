@@ -25,6 +25,7 @@ class TempSlot:
     temp_upper_f: float | None  # None means open-ended (e.g. "90°F or above")
     price_yes: float = 0.0
     price_no: float = 0.0
+    spread: float | None = None  # YES/NO price spread (lower = more liquid)
 
     @property
     def temp_midpoint_f(self) -> float:
@@ -47,6 +48,7 @@ class WeatherMarketEvent:
     slots: list[TempSlot] = field(default_factory=list)
     end_timestamp: datetime | None = None
     title: str = ""
+    volume: float = 0.0  # market volume in USD
 
 
 @dataclass

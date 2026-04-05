@@ -36,8 +36,9 @@ logger = logging.getLogger(__name__)
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
-def _make_config(dry_run: bool = True) -> AppConfig:
+def _make_config(dry_run: bool = True, paper: bool = False) -> AppConfig:
     return AppConfig(
+        paper=paper,
         strategy=StrategyConfig(
             no_distance_threshold_f=8,
             min_no_ev=0.01,
@@ -291,8 +292,8 @@ class TestPortfolioIntegration:
 
     @pytest.mark.asyncio
     async def test_full_flow_discovery_to_portfolio(self, portfolio):
-        """Complete chain: evaluate signals → size → execute (dry run) → record in DB."""
-        config = _make_config(dry_run=True)
+        """Complete chain: evaluate signals → size → execute (paper) → record in DB."""
+        config = _make_config(dry_run=False, paper=True)
         clob = ClobClient(config)
         executor = Executor(clob, portfolio)
 
@@ -324,7 +325,7 @@ class TestPortfolioIntegration:
         logger.info("Sized signals: %d (total exposure: $%.2f)", len(sized_signals), total_exposure)
         assert len(sized_signals) > 0
 
-        # Step 3: Execute (dry run — records in portfolio but doesn't call CLOB)
+        # Step 3: Execute (paper mode — simulates fills, records positions)
         await executor.execute_signals(sized_signals)
 
         # Step 4: Verify portfolio state
@@ -370,7 +371,7 @@ class TestPortfolioIntegration:
     @pytest.mark.asyncio
     async def test_rebalancer_full_cycle_mocked(self, portfolio):
         """Full rebalancer cycle with mocked external APIs."""
-        config = _make_config(dry_run=True)
+        config = _make_config(dry_run=False, paper=True)
         clob = ClobClient(config)
         executor = Executor(clob, portfolio)
         max_tracker = DailyMaxTracker()
