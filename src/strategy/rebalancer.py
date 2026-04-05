@@ -58,6 +58,7 @@ class Rebalancer:
         self._last_events_count: int = 0
         self._last_forecasts: dict = {}
         self._last_markets: list[dict] = []
+        self._last_price_source: str = "gamma"
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
@@ -76,9 +77,10 @@ class Rebalancer:
             "active_events": self._last_events_count,
             "last_signals": self._last_signals,
             "trends": trends,
-            "unrealized": 0.0,  # computed by tracker
+            "unrealized": 0.0,
             "markets": self._last_markets,
             "forecasts": self._last_forecasts,
+            "price_source": self._last_price_source,
         }
 
     async def run(self) -> list[TradeSignal]:
@@ -139,8 +141,10 @@ class Rebalancer:
                     if slot.token_id_no in clob_prices:
                         slot.price_no = clob_prices[slot.token_id_no]
                         refreshed += 1
+            self._last_price_source = "clob"
             logger.info("Refreshed %d slot prices from CLOB", refreshed)
         else:
+            self._last_price_source = "gamma"
             logger.info("Using Gamma API prices (CLOB unavailable in %s mode)",
                         "paper" if self._config.paper else "dry-run" if self._config.dry_run else "live")
 
@@ -222,7 +226,12 @@ class Rebalancer:
                 "city": event.city,
                 "market_date": event.market_date.isoformat(),
                 "forecast_high": forecast.predicted_high_f,
+                "forecast_source": forecast.source,
+                "confidence": forecast.confidence_interval_f,
                 "trend": trend_state.value,
+                "resolution_source": event.resolution_source or "unknown",
+                "volume": event.volume,
+                "hours_to_settle": round(hours_to_settle, 1) if hours_to_settle else None,
                 "slots": market_slots,
             })
 

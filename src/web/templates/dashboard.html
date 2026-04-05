@@ -34,6 +34,24 @@
     </div>
 </div>
 
+<!-- Data Sources -->
+<div class="panel" style="margin-bottom:20px;">
+    <div class="panel-body" style="display:flex;gap:24px;flex-wrap:wrap;padding:12px 20px;">
+        <div style="font-size:12px;">
+            <span style="color:var(--text-dim);">Price Source:</span>
+            <span class="tag {% if price_source == 'clob' %}tag-settling{% else %}tag-stable{% endif %}">{{ price_source|upper }}</span>
+        </div>
+        <div style="font-size:12px;">
+            <span style="color:var(--text-dim);">Forecast Chain:</span>
+            <span style="color:var(--text);">NWS &rarr; Ensemble(GFS/ICON/ECMWF) &rarr; Single &rarr; Cache</span>
+        </div>
+        <div style="font-size:12px;">
+            <span style="color:var(--text-dim);">Schedule:</span>
+            <span style="color:var(--text);">60min rebalance + 15min settlement acceleration</span>
+        </div>
+    </div>
+</div>
+
 <div class="grid-2">
     <div class="panel">
         <div class="panel-header">
@@ -60,14 +78,24 @@
         <div class="panel-body">
             {% if forecasts %}
             <table>
-                <thead><tr><th>City</th><th>High</th><th>Confidence</th><th>Source</th></tr></thead>
+                <thead><tr><th>City</th><th>High</th><th>Conf</th><th>Source</th></tr></thead>
                 <tbody>
                 {% for city, f in forecasts.items() %}
                 <tr>
                     <td style="font-weight:500;">{{ city }}</td>
                     <td class="td-mono">{{ "%.1f"|format(f.high) }}°F</td>
                     <td class="td-mono">±{{ "%.1f"|format(f.confidence) }}°F</td>
-                    <td style="font-size:11px;color:var(--text-dim);">{{ f.source[:30] }}</td>
+                    <td>
+                        {% if 'nws+' in (f.source or '') %}
+                        <span class="tag tag-settling" style="font-size:10px;">NWS+ENS</span>
+                        {% elif 'nws' in (f.source or '') %}
+                        <span class="tag tag-settling" style="font-size:10px;">NWS</span>
+                        {% elif 'ensemble' in (f.source or '') %}
+                        <span class="tag tag-stable" style="font-size:10px;">ENSEMBLE</span>
+                        {% else %}
+                        <span style="font-size:10px;color:var(--text-dim);">{{ f.source[:20] }}</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
                 </tbody>

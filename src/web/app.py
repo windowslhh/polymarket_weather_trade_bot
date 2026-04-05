@@ -129,6 +129,7 @@ def create_app(store, rebalancer, config) -> Flask:
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
+            price_source=d["state"].get("price_source", "gamma"),
         )
 
     @app.route("/positions")

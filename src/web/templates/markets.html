@@ -12,14 +12,31 @@
             <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">{{ event.market_date }}</span>
         </span>
         {% if event.forecast_high %}
-        <span class="td-mono" style="font-size:12px;color:var(--accent-light);margin-right:12px;">Forecast: {{ "%.1f"|format(event.forecast_high) }}°F</span>
+        <span class="td-mono" style="font-size:12px;color:var(--accent-light);margin-right:8px;">{{ "%.1f"|format(event.forecast_high) }}°F ±{{ "%.1f"|format(event.confidence) if event.confidence else '?' }}°F</span>
         {% endif %}
         {% if event.trend and event.trend != 'STABLE' %}
         <span class="tag tag-{{ event.trend|lower|replace('_','-') }}" style="margin-right:8px;">{{ event.trend }}</span>
         {% endif %}
+        {% if event.hours_to_settle is not none and event.hours_to_settle < 12 %}
+        <span class="tag tag-breakout-up" style="margin-right:8px;">{{ "%.0f"|format(event.hours_to_settle) }}h left</span>
+        {% endif %}
         <span style="font-size:12px;color:var(--text-dim);">{{ event.slots|length }} slots</span>
     </summary>
     <div class="detail-body">
+        <div style="display:flex;gap:16px;padding:10px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-muted);">
+            <span>Forecast: <strong style="color:var(--text);">
+                {% if event.forecast_source and 'nws+' in event.forecast_source %}NWS + Ensemble
+                {% elif event.forecast_source and 'nws' in event.forecast_source %}NWS
+                {% elif event.forecast_source and 'ensemble' in event.forecast_source %}Ensemble
+                {% else %}{{ event.forecast_source or 'open-meteo' }}
+                {% endif %}
+            </strong></span>
+            <span>Resolution: <strong style="color:var(--text);">{{ event.resolution_source|upper if event.resolution_source and event.resolution_source != 'unknown' else 'TBD' }}</strong></span>
+            <span>Volume: <strong style="color:var(--text);">${{ "%.0f"|format(event.volume) if event.volume else '?' }}</strong></span>
+            {% if event.hours_to_settle is not none %}
+            <span>Settlement: <strong style="color:{% if event.hours_to_settle < 6 %}var(--red-text){% elif event.hours_to_settle < 24 %}var(--yellow){% else %}var(--text){% endif %};">{{ "%.1f"|format(event.hours_to_settle) }}h</strong></span>
+            {% endif %}
+        </div>
         <table>
             <thead><tr><th>Temperature Slot</th><th>YES</th><th>NO</th><th>Spread</th><th>Distance</th><th>NO Win%</th><th>EV</th></tr></thead>
             <tbody>
@@ -45,7 +62,7 @@
 <div class="panel">
     <div class="empty-state">
         <div class="icon">~</div>
-        <p>No active weather markets discovered. Next scan in {{ next_scan_minutes }} minutes. Markets are typically available for US cities with daily high temperature bets.</p>
+        <p>No active weather markets discovered. Next scan in {{ next_scan_minutes }} minutes.</p>
     </div>
 </div>
 {% endif %}
