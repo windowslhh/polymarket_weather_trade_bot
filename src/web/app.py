@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from datetime import date
 from pathlib import Path
 
@@ -11,14 +12,44 @@ from flask import Flask, jsonify, render_template
 
 logger = logging.getLogger(__name__)
 
+# Persistent event loop running in a background thread
+_bg_loop: asyncio.AbstractEventLoop | None = None
+_bg_thread: threading.Thread | None = None
+
+
+def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
+    """Start a background event loop thread (once) for running async DB queries."""
+    global _bg_loop, _bg_thread
+    if _bg_loop is None or not _bg_thread.is_alive():
+        _bg_loop = asyncio.new_event_loop()
+        _bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True)
+        _bg_thread.start()
+    return _bg_loop
+
 
 def _run_async(coro):
-    """Run an async coroutine from sync Flask context."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run async coroutine on the persistent background loop (fast)."""
+    loop = _ensure_bg_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=10)
+
+
+# Simple TTL cache for dashboard data
+_cache: dict[str, tuple[float, object]] = {}
+_CACHE_TTL = 5  # seconds
+
+
+def _cached(key: str, ttl: float = _CACHE_TTL):
+    """Decorator-like: return cached value if fresh, else None."""
+    if key in _cache:
+        ts, val = _cache[key]
+        if time.time() - ts < ttl:
+            return val
+    return None
+
+
+def _set_cache(key: str, val: object):
+    _cache[key] = (time.time(), val)
 
 
 def create_app(store, rebalancer, config) -> Flask:
@@ -35,22 +66,25 @@ def create_app(store, rebalancer, config) -> Flask:
             return "paper"
         return "live"
 
-    @app.route("/")
-    def dashboard():
+    def _get_dashboard_data():
+        """Fetch all dashboard data with caching."""
+        cached = _cached("dashboard")
+        if cached:
+            return cached
+
         st = app.config["bot_store"]
-        reb = app.config["bot_rebalancer"]
         cfg = app.config["bot_config"]
+        reb = app.config["bot_rebalancer"]
 
         positions = _run_async(st.get_open_positions())
         exposure = _run_async(st.get_total_exposure())
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
-        decision_log = _run_async(st.get_decision_log(limit=20))
+        decision_log = _run_async(st.get_decision_log(limit=8))
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
-        signals = []
-        for s in state.get("last_signals", []):
-            signals.append({
+        signals = [
+            {
                 "city": s.get("city", ""),
                 "token_type": s.get("token_type", ""),
                 "side": s.get("side", ""),
@@ -58,33 +92,49 @@ def create_app(store, rebalancer, config) -> Flask:
                 "ev": s.get("expected_value", 0),
                 "win_prob": s.get("estimated_win_prob", 0),
                 "size_usd": s.get("suggested_size_usd", 0),
-            })
+            }
+            for s in state.get("last_signals", [])
+        ]
 
-        # Count cities with open positions
-        cities_set = set(p["city"] for p in positions)
+        data = {
+            "positions": positions,
+            "exposure": exposure,
+            "daily_pnl_val": daily_pnl_val,
+            "decision_log": decision_log,
+            "state": state,
+            "signals": signals,
+            "cities_with_positions": len(set(p["city"] for p in positions)),
+        }
+        _set_cache("dashboard", data)
+        return data
+
+    @app.route("/")
+    def dashboard():
+        cfg = app.config["bot_config"]
+        d = _get_dashboard_data()
 
         return render_template(
             "dashboard.html",
             active_page="dashboard",
             mode=_mode(),
-            exposure=exposure,
+            exposure=d["exposure"],
             max_exposure=cfg.strategy.max_total_exposure_usd,
-            unrealized=state.get("unrealized", 0.0),
-            active_events=state.get("active_events", 0),
-            signals=signals,
-            positions=positions,
-            cities_with_positions=len(cities_set),
-            trends=state.get("trends", {}),
-            forecasts=state.get("forecasts", {}),
-            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(daily_pnl_val or 0),
+            unrealized=d["state"].get("unrealized", 0.0),
+            active_events=d["state"].get("active_events", 0),
+            signals=d["signals"],
+            positions=d["positions"],
+            cities_with_positions=d["cities_with_positions"],
+            trends=d["state"].get("trends", {}),
+            forecasts=d["state"].get("forecasts", {}),
+            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
-            decision_log=decision_log,
+            decision_log=d["decision_log"],
         )
 
     @app.route("/positions")
     def positions_page():
-        st = app.config["bot_store"]
         cfg = app.config["bot_config"]
+        st = app.config["bot_store"]
 
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=20))
@@ -126,9 +176,14 @@ def create_app(store, rebalancer, config) -> Flask:
     @app.route("/analytics")
     def analytics_page():
         st = app.config["bot_store"]
-        edge_summary = _run_async(st.get_edge_summary())
-        edge_history = _run_async(st.get_edge_history(limit=200))
-        decision_log = _run_async(st.get_decision_log(limit=30))
+        cached = _cached("analytics", ttl=15)
+        if cached:
+            edge_summary, edge_history, decision_log = cached
+        else:
+            edge_summary = _run_async(st.get_edge_summary())
+            edge_history = _run_async(st.get_edge_history(limit=200))
+            decision_log = _run_async(st.get_decision_log(limit=30))
+            _set_cache("analytics", (edge_summary, edge_history, decision_log))
 
         return render_template(
             "analytics.html",
@@ -167,14 +222,19 @@ def create_app(store, rebalancer, config) -> Flask:
 
     @app.route("/api/status")
     def api_status():
-        st = app.config["bot_store"]
+        """Lightweight status endpoint — uses cache, no heavy DB queries."""
         reb = app.config["bot_rebalancer"]
-        exposure = _run_async(st.get_total_exposure())
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
+
+        # Only query exposure if cache is stale
+        cached_exp = _cached("exposure", ttl=10)
+        if cached_exp is None:
+            cached_exp = _run_async(app.config["bot_store"].get_total_exposure())
+            _set_cache("exposure", cached_exp)
 
         return jsonify({
             "mode": _mode(),
-            "exposure": exposure,
+            "exposure": cached_exp,
             "unrealized": state.get("unrealized", 0.0),
             "active_events": state.get("active_events", 0),
             "signal_count": len(state.get("last_signals", [])),
@@ -186,6 +246,7 @@ def create_app(store, rebalancer, config) -> Flask:
     @app.route("/api/trigger", methods=["POST"])
     def api_trigger():
         reb = app.config["bot_rebalancer"]
+        _cache.clear()  # Invalidate all caches
         try:
             signals = _run_async(reb.run())
             return jsonify({"ok": True, "signals": len(signals)})
