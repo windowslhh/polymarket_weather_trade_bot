@@ -49,6 +49,7 @@ class WeatherMarketEvent:
     end_timestamp: datetime | None = None
     title: str = ""
     volume: float = 0.0  # market volume in USD
+    resolution_source: str = ""  # e.g. "nws", "wunderground", "noaa"
 
 
 @dataclass

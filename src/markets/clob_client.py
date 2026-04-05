@@ -144,7 +144,14 @@ class ClobClient:
             return None
 
     async def get_prices_batch(self, token_ids: list[str]) -> dict[str, float]:
-        """Get current prices for multiple tokens. Returns available prices."""
+        """Get current prices for multiple tokens. Returns available prices.
+
+        In dry-run/paper mode, returns empty dict (no CLOB auth available).
+        Callers should fallback to Gamma API prices.
+        """
+        if self._config.dry_run or self._config.paper:
+            return {}
+
         prices: dict[str, float] = {}
         for token_id in token_ids:
             price = await self.get_midpoint(token_id) or await self.get_last_trade_price(token_id)

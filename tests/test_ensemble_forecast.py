@@ -58,31 +58,15 @@ async def test_ensemble_single_model_fallback_confidence():
 
 
 @pytest.mark.asyncio
-async def test_ensemble_fallback_to_single_model():
-    """On ensemble API failure, falls back to single-model forecast."""
-    single_resp = {
-        "daily": {
-            "temperature_2m_max": [68.0],
-            "temperature_2m_min": [55.0],
-        }
-    }
-
-    call_count = 0
-
+async def test_ensemble_returns_none_on_failure():
+    """On ensemble API failure, returns None (caller handles fallback)."""
     async def mock_fetch(client, url, params, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if "ensemble" in url:
-            raise Exception("Ensemble API down")
-        return single_resp
+        raise Exception("Ensemble API down")
 
     with patch("src.weather.forecast.fetch_with_retry", side_effect=mock_fetch):
-        forecast = await get_ensemble_forecast(_city(), date(2026, 4, 5))
+        result = await get_ensemble_forecast(_city(), date(2026, 4, 5))
 
-    assert forecast.source == "open-meteo"
-    assert forecast.predicted_high_f == 68.0
-    assert forecast.model_count == 1
-    assert call_count == 2  # one ensemble attempt, one fallback
+    assert result is None  # Fallback now handled by get_forecast()
 
 
 @pytest.mark.asyncio

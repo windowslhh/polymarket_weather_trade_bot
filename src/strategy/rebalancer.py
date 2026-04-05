@@ -119,6 +119,31 @@ class Rebalancer:
             return []
         logger.info("Found %d active weather events", len(events))
 
+        # 1b. Refresh prices from CLOB (live mode) or keep Gamma prices (paper/dry-run)
+        all_token_ids = []
+        for event in events:
+            for slot in event.slots:
+                if slot.token_id_yes:
+                    all_token_ids.append(slot.token_id_yes)
+                if slot.token_id_no:
+                    all_token_ids.append(slot.token_id_no)
+
+        clob_prices = await self._clob.get_prices_batch(all_token_ids)
+        if clob_prices:
+            refreshed = 0
+            for event in events:
+                for slot in event.slots:
+                    if slot.token_id_yes in clob_prices:
+                        slot.price_yes = clob_prices[slot.token_id_yes]
+                        refreshed += 1
+                    if slot.token_id_no in clob_prices:
+                        slot.price_no = clob_prices[slot.token_id_no]
+                        refreshed += 1
+            logger.info("Refreshed %d slot prices from CLOB", refreshed)
+        else:
+            logger.info("Using Gamma API prices (CLOB unavailable in %s mode)",
+                        "paper" if self._config.paper else "dry-run" if self._config.dry_run else "live")
+
         # 2. Fetch forecasts for all cities with active markets
         active_cities = {e.city for e in events}
         city_configs = [c for c in self._config.cities if c.name in active_cities]

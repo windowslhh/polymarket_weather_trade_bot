@@ -11,6 +11,7 @@ import httpx
 
 from src.config import CityConfig
 from src.markets.models import TempSlot, WeatherMarketEvent
+from src.markets.resolution import parse_resolution_from_event
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,9 @@ async def discover_weather_markets(
                     except (ValueError, TypeError):
                         pass
 
+                # Parse resolution source from event description
+                resolution = parse_resolution_from_event(event_data, city_cfg.name)
+
                 events.append(WeatherMarketEvent(
                     event_id=event_data.get("id", ""),
                     condition_id=event_data.get("conditionId", ""),
@@ -211,6 +215,7 @@ async def discover_weather_markets(
                     end_timestamp=end_dt,
                     title=title,
                     volume=event_volume,
+                    resolution_source=resolution,
                 ))
 
             if len(data) < limit:
