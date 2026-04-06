@@ -57,19 +57,21 @@ class PortfolioTracker:
     async def get_held_no_slots(self, event_id: str) -> list[TempSlot]:
         """Get TempSlot representations of held NO positions for an event.
 
-        Returns simplified TempSlot objects (without full price data)
-        for use in exit signal evaluation.
+        Parses temperature bounds from slot_label for accurate probability estimation.
         """
+        from src.markets.discovery import _parse_temp_bounds
+
         positions = await self._store.get_open_positions(event_id=event_id)
         slots = []
         for pos in positions:
             if pos["token_type"] == "NO" and pos["side"] == "BUY":
+                lower, upper = _parse_temp_bounds(pos["slot_label"])
                 slots.append(TempSlot(
                     token_id_yes="",
                     token_id_no=pos["token_id"],
                     outcome_label=pos["slot_label"],
-                    temp_lower_f=None,  # not stored; evaluator uses label
-                    temp_upper_f=None,
+                    temp_lower_f=lower,
+                    temp_upper_f=upper,
                     price_no=pos["entry_price"],
                 ))
         return slots
