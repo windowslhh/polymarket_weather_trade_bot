@@ -287,14 +287,17 @@ class Rebalancer:
             held_no_slots = await self._portfolio.get_held_no_slots(event.event_id)
             held_token_ids = {s.token_id_no for s in held_no_slots}
 
+            # Calculate days ahead for EV discount
+            days_ahead = (event.market_date - date.today()).days
+
             # Phase 4: NO signals (skip already-held slots)
             no_signals = evaluate_no_signals(
-                event, forecast, self._config.strategy, error_dist, trend_state, held_token_ids,
+                event, forecast, self._config.strategy, error_dist, trend_state, held_token_ids, days_ahead,
             )
 
             # Phase 4b: Ladder signals (skip already-held slots)
             ladder_signals = evaluate_ladder_signals(
-                event, forecast, self._config.strategy, error_dist, held_token_ids,
+                event, forecast, self._config.strategy, error_dist, held_token_ids, days_ahead,
             )
 
             # Phase 5: Exit signals

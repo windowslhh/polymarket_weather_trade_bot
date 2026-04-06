@@ -21,7 +21,7 @@ class CityConfig:
 @dataclass
 class StrategyConfig:
     no_distance_threshold_f: int = 8
-    min_no_ev: float = 0.02
+    min_no_ev: float = 0.03
     yes_confirmation_threshold: float = 0.85
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
@@ -32,7 +32,10 @@ class StrategyConfig:
     max_slot_spread: float = 0.15
     min_trim_ev: float = 0.005
     ladder_width: int = 3
-    ladder_min_ev: float = 0.01
+    ladder_min_ev: float = 0.03
+    ladder_min_distance_f: float = 2.0
+    max_no_price: float = 0.85
+    day_ahead_ev_discount: float = 0.7
     max_days_ahead: int = 2
 
 

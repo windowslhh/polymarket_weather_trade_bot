@@ -64,6 +64,7 @@ def evaluate_no_signals(
     error_dist: ForecastErrorDistribution | None = None,
     trend: TrendState | None = None,
     held_token_ids: set[str] | None = None,
+    days_ahead: int = 0,
 ) -> list[TradeSignal]:
     """Phase 4: Generate BUY NO signals for slots far from forecast.
 
@@ -76,10 +77,13 @@ def evaluate_no_signals(
     """
     signals: list[TradeSignal] = []
 
-    # Adjust EV threshold based on trend
+    # Adjust EV threshold based on trend and days ahead
     ev_threshold = config.min_no_ev
     if trend == TrendState.SETTLING:
-        ev_threshold = config.min_no_ev * 1.5  # more conservative near settlement
+        ev_threshold = config.min_no_ev * 1.5
+    # Require higher EV for future markets (forecast less reliable)
+    if days_ahead > 0:
+        ev_threshold /= (config.day_ahead_ev_discount ** days_ahead)
 
     for slot in event.slots:
         # Skip already-held slots
@@ -92,6 +96,10 @@ def evaluate_no_signals(
             continue
 
         if slot.price_no <= 0 or slot.price_no >= 1:
+            continue
+
+        # Skip overpriced NO — risk/reward too asymmetric at high prices
+        if slot.price_no > config.max_no_price:
             continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
@@ -200,6 +208,7 @@ def evaluate_ladder_signals(
     config: StrategyConfig,
     error_dist: ForecastErrorDistribution | None = None,
     held_token_ids: set[str] | None = None,
+    days_ahead: int = 0,
 ) -> list[TradeSignal]:
     """Generate BUY NO signals for slots near the forecast using ladder/围网 strategy.
 
@@ -230,17 +239,31 @@ def evaluate_ladder_signals(
 
         distance = _slot_distance(slot, forecast.predicted_high_f)
 
+        # Skip center slots — too close to forecast, high risk of loss
+        if distance < config.ladder_min_distance_f:
+            continue
+
         # Skip slots already covered by standard no_signals (far enough)
         if distance >= config.no_distance_threshold_f:
             continue
 
+        # Only buy NO in ladder (not YES)
         if slot.price_no <= 0 or slot.price_no >= 1:
+            continue
+
+        # Skip overpriced NO (risk/reward too asymmetric)
+        if slot.price_no > config.max_no_price:
             continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
         ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
-        if ev < config.ladder_min_ev:
+        # Require higher EV for future markets
+        ladder_ev_threshold = config.ladder_min_ev
+        if days_ahead > 0:
+            ladder_ev_threshold /= (config.day_ahead_ev_discount ** days_ahead)
+
+        if ev < ladder_ev_threshold:
             continue
 
         signals.append(TradeSignal(

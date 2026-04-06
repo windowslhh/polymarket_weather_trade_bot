@@ -162,8 +162,8 @@ class TestEvaluatorWithDistribution:
         from src.strategy.evaluator import evaluate_no_signals
         from src.weather.models import Forecast
 
-        config = StrategyConfig(no_distance_threshold_f=8, min_no_ev=0.01)
-        slot = TempSlot("y1", "n1", "90°F to 92°F", 90, 92, 0.05, 0.95)
+        config = StrategyConfig(no_distance_threshold_f=8, min_no_ev=0.01, max_no_price=0.95)
+        slot = TempSlot("y1", "n1", "90°F to 92°F", 90, 92, 0.15, 0.85)
         event = WeatherMarketEvent("e1", "c1", "NYC", date.today(), [slot], title="t")
         forecast = Forecast("NYC", date.today(), 75.0, 60.0, 4.0, "test",
                            datetime.now(timezone.utc))

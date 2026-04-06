@@ -95,11 +95,11 @@ class TestSlotDistance:
 
 class TestEvaluateNoSignals:
     def test_generates_signals_for_distant_slots(self):
-        config = StrategyConfig(no_distance_threshold_f=8, min_no_ev=0.01)
+        config = StrategyConfig(no_distance_threshold_f=8, min_no_ev=0.01, max_no_price=0.95)
         slots = [
-            _make_slot(73, 77, price_no=0.85),  # close to forecast (75) -> skip
-            _make_slot(85, 89, price_no=0.92),  # 10°F away -> signal
-            _make_slot(90, 94, price_no=0.95),  # 15°F away -> signal
+            _make_slot(73, 77, price_no=0.60),  # close to forecast (75) -> skip (distance)
+            _make_slot(85, 89, price_no=0.80),  # 10°F away -> signal
+            _make_slot(90, 94, price_no=0.85),  # 15°F away -> signal
         ]
         event = _make_event(slots=slots)
         forecast = _make_forecast(75.0)
