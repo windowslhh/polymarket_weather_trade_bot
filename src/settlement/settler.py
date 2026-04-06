@@ -1,7 +1,7 @@
 """Settlement detection and realized P&L computation.
 
-Checks if any open positions' markets have settled (market_date < today),
-fetches settlement outcomes from Gamma API, and computes realized P&L.
+Checks if any open positions' markets have settled (market resolved on Gamma API),
+fetches settlement outcomes, and computes realized P&L.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com"
 class SettlementResult:
     event_id: str
     city: str
-    winning_slot: str  # outcome label of the winning slot
+    winning_slot: str
     positions_settled: int
     total_pnl: float
 
@@ -31,28 +31,37 @@ class SettlementResult:
 async def check_settlements(store: Store) -> list[SettlementResult]:
     """Check and process all settled markets with open positions.
 
-    1. Find open positions with market_date < today
-    2. Query Gamma API for resolved outcomes
-    3. Compute realized P&L
-    4. Update positions to 'settled' + record in settlements table
+    Idempotent: checks settlements table before processing to avoid double-counting.
     """
-    today = date.today()
     open_positions = await store.get_open_positions()
-
     if not open_positions:
         return []
 
-    # Group positions by event_id and extract market dates from slot_label
+    # Group positions by event_id
     event_positions: dict[str, list[dict]] = {}
     for pos in open_positions:
         event_positions.setdefault(pos["event_id"], []).append(pos)
+
+    # Get already-settled event_ids to avoid double-processing
+    existing_settlements = await store.get_settlements()
+    settled_event_ids = {s["event_id"] for s in existing_settlements}
 
     results: list[SettlementResult] = []
 
     async with httpx.AsyncClient(timeout=15) as client:
         for event_id, positions in event_positions.items():
-            # Check if this event should have settled
-            # Parse date from the slot_label (contains "on April 5?" etc)
+            # Idempotency: skip already-settled events
+            if event_id in settled_event_ids:
+                # Just mark positions as settled if not already
+                for pos in positions:
+                    if pos["status"] == "open":
+                        await store.db.execute(
+                            "UPDATE positions SET status = 'settled', closed_at = datetime('now') WHERE id = ?",
+                            (pos["id"],),
+                        )
+                await store.db.commit()
+                continue
+
             city = positions[0]["city"]
 
             try:
@@ -62,12 +71,11 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 continue
 
             if outcome is None:
-                continue  # Market not yet settled
+                continue
 
             winning_slot, settled_prices = outcome
             logger.info("Settlement detected: %s — winning slot: %s", city, winning_slot)
 
-            # Compute P&L for each position
             total_pnl = 0.0
             settled_count = 0
 
@@ -76,13 +84,10 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 total_pnl += pnl
                 settled_count += 1
 
-                # Mark position as settled
-                await store.close_position(pos["id"])
                 await store.db.execute(
-                    "UPDATE positions SET status = 'settled' WHERE id = ?",
+                    "UPDATE positions SET status = 'settled', closed_at = datetime('now') WHERE id = ?",
                     (pos["id"],),
                 )
-
                 logger.info(
                     "  Position %d: %s %s %s → P&L=$%.2f",
                     pos["id"], pos["side"], pos["token_type"],
@@ -90,19 +95,12 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 )
 
             await store.db.commit()
-
-            # Record settlement
             await store.insert_settlement(event_id, city, winning_slot, total_pnl)
-
-            # Update daily realized P&L
-            await _update_realized_pnl(store, today.isoformat(), total_pnl)
+            await _update_realized_pnl(store, date.today().isoformat(), total_pnl)
 
             results.append(SettlementResult(
-                event_id=event_id,
-                city=city,
-                winning_slot=winning_slot,
-                positions_settled=settled_count,
-                total_pnl=total_pnl,
+                event_id=event_id, city=city, winning_slot=winning_slot,
+                positions_settled=settled_count, total_pnl=total_pnl,
             ))
 
     if results:
@@ -120,7 +118,7 @@ async def _fetch_settlement_outcome(
 ) -> tuple[str, dict[str, float]] | None:
     """Fetch resolved outcome for an event from Gamma API.
 
-    Returns (winning_slot_label, {slot_label: resolved_yes_price}) or None if not settled.
+    Returns (winning_slot_label, {question: resolved_yes_price}) or None.
     """
     try:
         resp = await client.get(f"{GAMMA_API_URL}/events/{event_id}")
@@ -132,9 +130,8 @@ async def _fetch_settlement_outcome(
         logger.debug("Gamma API error for event %s", event_id)
         return None
 
-    # Check if event is closed/resolved
-    if event_data.get("active") and not event_data.get("closed"):
-        return None  # Still active
+    # Market is settled if closed=true OR if all outcome prices are 0/1
+    is_closed = event_data.get("closed", False)
 
     markets = event_data.get("markets", [])
     if not markets:
@@ -162,37 +159,35 @@ async def _fetch_settlement_outcome(
 
         settled_prices[question] = yes_price
 
-        # YES=1.0 means this slot won
         if yes_price >= 0.99:
             winning_slot = question
 
     if not settled_prices:
         return None
 
-    # If no slot has YES=1.0, market might not be fully settled yet
+    # Check if market is actually resolved
+    all_resolved = all(p >= 0.99 or p <= 0.01 for p in settled_prices.values())
+
+    if not is_closed and not all_resolved:
+        return None  # Not settled yet
+
+    if winning_slot is None and all_resolved:
+        winning_slot = "none"
+
     if winning_slot is None:
-        # Check if all prices are 0 or 1 (fully resolved)
-        all_resolved = all(p >= 0.99 or p <= 0.01 for p in settled_prices.values())
-        if not all_resolved:
-            return None
-        winning_slot = "none"  # Edge case: no winner determined
+        return None
 
     return winning_slot, settled_prices
 
 
 def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> float:
-    """Compute realized P&L for a single position based on settlement outcome.
-
-    For NO positions:
-    - If the slot's YES resolved to 0 (NO wins): profit = (1.0 - entry_price) * shares
-    - If the slot's YES resolved to 1 (NO loses): loss = -entry_price * shares
-    """
+    """Compute realized P&L for a single position."""
     slot_label = position["slot_label"]
     entry_price = position["entry_price"]
     shares = position["shares"]
     token_type = position["token_type"]
 
-    # Find matching settled price
+    # Match slot to settled outcome
     yes_resolved = None
     for label, price in settled_prices.items():
         if slot_label in label or label in slot_label:
@@ -200,27 +195,23 @@ def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> f
             break
 
     if yes_resolved is None:
-        # Can't find matching slot — assume NO wins (conservative for NO positions)
-        logger.warning("Could not match slot %s to settlement data", slot_label[:30])
+        logger.warning("Could not match slot %s to settlement data, assuming NO wins", slot_label[:30])
         yes_resolved = 0.0
 
     if token_type == "NO":
         if yes_resolved <= 0.01:
-            # NO wins → we get $1 per share
-            return (1.0 - entry_price) * shares
+            return (1.0 - entry_price) * shares  # NO wins
         else:
-            # NO loses → we lose our stake
-            return -entry_price * shares
-    else:
-        # YES position
+            return -entry_price * shares  # NO loses
+    else:  # YES
         if yes_resolved >= 0.99:
-            return (1.0 - entry_price) * shares
+            return (1.0 - entry_price) * shares  # YES wins
         else:
-            return -entry_price * shares
+            return -entry_price * shares  # YES loses
 
 
 async def _update_realized_pnl(store: Store, date_str: str, pnl: float) -> None:
-    """Add realized P&L to the daily total (accumulates across settlements)."""
+    """Add realized P&L to the daily total."""
     current = await store.get_daily_pnl(date_str)
     new_realized = (current or 0.0) + pnl
     exposure = await store.get_total_exposure()

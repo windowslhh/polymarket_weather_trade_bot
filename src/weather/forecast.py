@@ -167,10 +167,12 @@ async def get_forecast(
         ensemble_task = get_ensemble_forecast(city, target, client)
         nws_fc, ensemble_fc = await asyncio.gather(nws_task, ensemble_task, return_exceptions=True)
 
-        # Handle exceptions
+        # Handle exceptions (log before discarding)
         if isinstance(nws_fc, Exception):
+            logger.warning("NWS forecast error for %s: %s", city.name, nws_fc)
             nws_fc = None
         if isinstance(ensemble_fc, Exception):
+            logger.warning("Ensemble forecast error for %s: %s", city.name, ensemble_fc)
             ensemble_fc = None
 
         # Combine available sources

@@ -84,6 +84,19 @@ class Rebalancer:
             "price_source": self._last_price_source,
         }
 
+    async def run_settlement_only(self) -> None:
+        """Lightweight settlement check — runs every 15 min, no trading."""
+        try:
+            settlement_results = await check_settlements(self._portfolio._store)
+            for sr in settlement_results:
+                await self._alerter.send(
+                    "info",
+                    f"Settlement: {sr.city} → {sr.winning_slot[:30]} | "
+                    f"{sr.positions_settled} positions | P&L=${sr.total_pnl:.2f}",
+                )
+        except Exception:
+            logger.exception("Settlement check failed")
+
     async def run(self) -> list[TradeSignal]:
         """Execute one full rebalance cycle."""
         logger.info("=== Starting rebalance cycle ===")
@@ -98,22 +111,15 @@ class Rebalancer:
             self._last_run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     async def _run_cycle(self) -> list[TradeSignal]:
-        # Validate station config on first run
-        mismatches = validate_station_config(self._config.cities)
-        for m in mismatches:
-            logger.warning("Station mismatch: %s — %s", m.city, m.issue)
+        # Validate station config (first run only)
+        if not hasattr(self, '_station_validated'):
+            mismatches = validate_station_config(self._config.cities)
+            for m in mismatches:
+                logger.warning("Station mismatch: %s — %s", m.city, m.issue)
+            self._station_validated = True
 
-        # 0. Check and process settled markets
-        try:
-            settlement_results = await check_settlements(self._portfolio._store)
-            for sr in settlement_results:
-                await self._alerter.send(
-                    "info",
-                    f"Settlement: {sr.city} → {sr.winning_slot[:30]} | "
-                    f"{sr.positions_settled} positions | P&L=${sr.total_pnl:.2f}",
-                )
-        except Exception:
-            logger.exception("Settlement check failed (non-critical)")
+        # 0. Settlement check (also runs independently every 15 min)
+        await self.run_settlement_only()
 
         # Check circuit breaker
         daily_pnl = await self._portfolio.get_daily_pnl(date.today())
@@ -198,6 +204,9 @@ class Rebalancer:
         total_exposure = await self._portfolio.get_total_exposure()
         cycle_at = datetime.now(timezone.utc).isoformat()
 
+        # Track cumulative new exposure per city across all events in this cycle
+        cycle_city_additions: dict[str, float] = {}
+
         # Build market data for dashboard
         self._last_markets = []
 
@@ -206,7 +215,9 @@ class Rebalancer:
             if not forecast:
                 continue
 
-            city_exposure = await self._portfolio.get_city_exposure(event.city)
+            # Use DB exposure + any new exposure added earlier in this cycle
+            db_city_exposure = await self._portfolio.get_city_exposure(event.city)
+            city_exposure = db_city_exposure + cycle_city_additions.get(event.city, 0.0)
             daily_max = daily_maxes.get(event.city)
             observation = city_observations.get(event.city)
             error_dist = self._error_dists.get(event.city)
@@ -308,6 +319,7 @@ class Rebalancer:
                     all_signals.append(signal)
                     city_exposure += size
                     total_exposure += size
+                    cycle_city_additions[event.city] = cycle_city_additions.get(event.city, 0.0) + size
 
             # Exit and trim signals
             all_signals.extend(exit_signals)

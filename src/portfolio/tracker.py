@@ -65,7 +65,10 @@ class PortfolioTracker:
         slots = []
         for pos in positions:
             if pos["token_type"] == "NO" and pos["side"] == "BUY":
-                lower, upper = _parse_temp_bounds(pos["slot_label"])
+                try:
+                    lower, upper = _parse_temp_bounds(pos["slot_label"])
+                except Exception:
+                    lower, upper = None, None
                 slots.append(TempSlot(
                     token_id_yes="",
                     token_id_no=pos["token_id"],

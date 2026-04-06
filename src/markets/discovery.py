@@ -156,7 +156,7 @@ async def discover_weather_markets(
                         continue
 
                     # outcomes[0] = YES label, outcomes[1] = NO label typically
-                    label = mkt.get("question", "") or outcomes[0] if outcomes else ""
+                    label = mkt.get("question", "") or (outcomes[0] if outcomes else "")
                     lower, upper = _parse_temp_bounds(label)
                     if lower is None and upper is None:
                         continue
@@ -170,7 +170,7 @@ async def discover_weather_markets(
 
                     price_yes = prices[0] if prices else 0.0
                     price_no = prices[1] if len(prices) > 1 else 0.0
-                    slot_spread = abs(1.0 - price_yes - price_no) if price_yes and price_no else None
+                    slot_spread = abs(1.0 - price_yes - price_no) if price_yes > 0 and price_no > 0 else None
 
                     # Skip illiquid slots
                     if slot_spread is not None and slot_spread > max_spread:

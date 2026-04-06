@@ -15,7 +15,7 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
     """Configure and return the APScheduler with all jobs."""
     scheduler = AsyncIOScheduler()
 
-    # Main rebalance job
+    # Main rebalance job (full cycle)
     scheduler.add_job(
         rebalancer.run,
         "interval",
@@ -25,17 +25,17 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
         max_instances=1,
     )
 
-    # Settlement acceleration: run every 15 min for urgent markets
+    # Settlement check only (not full rebalance)
     scheduler.add_job(
-        rebalancer.run,
+        rebalancer.run_settlement_only,
         "interval",
         minutes=15,
         id="settlement_check",
-        name="Settlement acceleration check",
+        name="Settlement check",
         max_instances=1,
     )
 
-    # Run initial rebalance 5 seconds after startup (give Flask time to start)
+    # Run initial rebalance 5 seconds after startup
     from datetime import datetime, timedelta, timezone
     scheduler.add_job(
         rebalancer.run,

@@ -15,15 +15,17 @@ logger = logging.getLogger(__name__)
 # Persistent event loop running in a background thread
 _bg_loop: asyncio.AbstractEventLoop | None = None
 _bg_thread: threading.Thread | None = None
+_bg_lock = threading.Lock()
 
 
 def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
     """Start a background event loop thread (once) for running async DB queries."""
     global _bg_loop, _bg_thread
-    if _bg_loop is None or not _bg_thread.is_alive():
-        _bg_loop = asyncio.new_event_loop()
-        _bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True)
-        _bg_thread.start()
+    with _bg_lock:
+        if _bg_loop is None or _bg_thread is None or not _bg_thread.is_alive():
+            _bg_loop = asyncio.new_event_loop()
+            _bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True)
+            _bg_thread.start()
     return _bg_loop
 
 
@@ -171,7 +173,7 @@ def create_app(store, rebalancer, config) -> Flask:
             active_page="markets",
             mode=_mode(),
             events=state.get("markets", []),
-            next_scan_minutes=config.scheduling.rebalance_interval_minutes,
+            next_scan_minutes=app.config["bot_config"].scheduling.rebalance_interval_minutes,
         )
 
     @app.route("/analytics")
