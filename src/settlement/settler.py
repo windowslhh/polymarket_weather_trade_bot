@@ -165,17 +165,15 @@ async def _fetch_settlement_outcome(
     if not settled_prices:
         return None
 
-    # Check if market is actually resolved
-    all_resolved = all(p >= 0.99 or p <= 0.01 for p in settled_prices.values())
-
-    if not is_closed and not all_resolved:
-        return None  # Not settled yet
-
-    if winning_slot is None and all_resolved:
-        winning_slot = "none"
+    # Only settle when the event is officially closed by Polymarket
+    # Note: individual slots may show 0/1 prices early (e.g. temp already exceeded
+    # a low slot), but the overall event is not settled until closed=true
+    if not is_closed:
+        return None
 
     if winning_slot is None:
-        return None
+        # All resolved to 0 but none to 1 — unusual, treat as no winner
+        winning_slot = "none"
 
     return winning_slot, settled_prices
 
