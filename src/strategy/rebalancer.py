@@ -60,6 +60,7 @@ class Rebalancer:
         self._last_forecasts: dict = {}
         self._last_markets: list[dict] = []
         self._last_price_source: str = "gamma"
+        self._last_unrealized: float = 0.0
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
@@ -78,7 +79,7 @@ class Rebalancer:
             "active_events": self._last_events_count,
             "last_signals": self._last_signals,
             "trends": trends,
-            "unrealized": 0.0,
+            "unrealized": self._last_unrealized,
             "markets": self._last_markets,
             "forecasts": self._last_forecasts,
             "price_source": self._last_price_source,
@@ -363,8 +364,18 @@ class Rebalancer:
         else:
             logger.info("No trade signals generated")
 
-        # Update P&L snapshot
-        await self._portfolio.snapshot_pnl(self._clob)
+        # Collect latest Gamma prices for unrealized P&L (works in paper mode)
+        gamma_prices: dict[str, float] = {}
+        for event in events:
+            for slot in event.slots:
+                if slot.token_id_no and slot.price_no > 0:
+                    gamma_prices[slot.token_id_no] = slot.price_no
+                if slot.token_id_yes and slot.price_yes > 0:
+                    gamma_prices[slot.token_id_yes] = slot.price_yes
+
+        # Update P&L snapshot (uses CLOB in live mode, Gamma prices in paper mode)
+        self._last_unrealized = await self._portfolio.compute_unrealized_pnl(self._clob, gamma_prices)
+        await self._portfolio.snapshot_pnl(self._clob, gamma_prices)
 
         # Cleanup old tracking data
         self._max_tracker.cleanup_old()

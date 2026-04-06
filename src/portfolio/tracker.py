@@ -106,18 +106,36 @@ class PortfolioTracker:
         d = (day or date.today()).isoformat()
         return await self._store.get_daily_pnl(d)
 
-    async def compute_unrealized_pnl(self, clob_client=None) -> float:
+    async def compute_unrealized_pnl(
+        self,
+        clob_client=None,
+        gamma_prices: dict[str, float] | None = None,
+    ) -> float:
         """Compute unrealized P&L across all open positions.
 
-        If clob_client is provided, fetches current market prices.
-        Otherwise uses entry prices (unrealized = 0).
+        Price sources (in priority order):
+        1. CLOB real-time prices (live mode)
+        2. Gamma API prices from latest rebalance cycle (paper mode)
+        3. Returns 0 if no prices available
         """
         positions = await self._store.get_open_positions()
-        if not positions or clob_client is None:
+        if not positions:
             return 0.0
 
-        token_ids = [p["token_id"] for p in positions]
-        current_prices = await clob_client.get_prices_batch(token_ids)
+        # Try CLOB first, then Gamma fallback
+        current_prices: dict[str, float] = {}
+        if clob_client:
+            token_ids = [p["token_id"] for p in positions]
+            current_prices = await clob_client.get_prices_batch(token_ids)
+
+        # Merge with Gamma prices as fallback
+        if gamma_prices:
+            for tid, price in gamma_prices.items():
+                if tid not in current_prices:
+                    current_prices[tid] = price
+
+        if not current_prices:
+            return 0.0
 
         unrealized = 0.0
         for pos in positions:
@@ -126,10 +144,20 @@ class PortfolioTracker:
                 unrealized += (current - pos["entry_price"]) * pos["shares"]
         return unrealized
 
-    async def snapshot_pnl(self, clob_client=None) -> None:
+    async def snapshot_pnl(
+        self,
+        clob_client=None,
+        gamma_prices: dict[str, float] | None = None,
+    ) -> None:
         """Take a daily P&L snapshot with unrealized PnL."""
         today = date.today().isoformat()
         exposure = await self._store.get_total_exposure()
-        unrealized = await self.compute_unrealized_pnl(clob_client)
-        await self._store.upsert_daily_pnl(today, 0, unrealized, exposure)
-        logger.info("P&L snapshot: exposure=$%.2f, unrealized=$%.2f", exposure, unrealized)
+        unrealized = await self.compute_unrealized_pnl(clob_client, gamma_prices)
+
+        # Preserve existing realized_pnl (from settlements)
+        existing_realized = await self._store.get_daily_pnl(today)
+        realized = existing_realized or 0.0
+
+        await self._store.upsert_daily_pnl(today, realized, unrealized, exposure)
+        logger.info("P&L snapshot: exposure=$%.2f, unrealized=$%.2f, realized=$%.2f",
+                     exposure, unrealized, realized)
