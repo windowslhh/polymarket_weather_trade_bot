@@ -294,6 +294,16 @@ class Store:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def insert_settlement(
+        self, event_id: str, city: str, winning_outcome: str, pnl: float,
+    ) -> None:
+        await self.db.execute(
+            """INSERT INTO settlements (event_id, city, winning_outcome, pnl)
+               VALUES (?, ?, ?, ?)""",
+            (event_id, city, winning_outcome, pnl),
+        )
+        await self.db.commit()
+
     async def get_settlements(self) -> list[dict]:
         async with self.db.execute(
             "SELECT * FROM settlements ORDER BY settled_at DESC LIMIT 50"

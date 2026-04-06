@@ -25,6 +25,7 @@ from src.strategy.trend import ForecastTrend
 from src.weather.forecast import get_forecasts_batch
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.metar import DailyMaxTracker
+from src.settlement.settler import check_settlements
 from src.weather.settlement import fetch_settlement_temp, validate_station_config
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,18 @@ class Rebalancer:
         for m in mismatches:
             logger.warning("Station mismatch: %s — %s", m.city, m.issue)
 
+        # 0. Check and process settled markets
+        try:
+            settlement_results = await check_settlements(self._portfolio._store)
+            for sr in settlement_results:
+                await self._alerter.send(
+                    "info",
+                    f"Settlement: {sr.city} → {sr.winning_slot[:30]} | "
+                    f"{sr.positions_settled} positions | P&L=${sr.total_pnl:.2f}",
+                )
+        except Exception:
+            logger.exception("Settlement check failed (non-critical)")
+
         # Check circuit breaker
         daily_pnl = await self._portfolio.get_daily_pnl(date.today())
         if daily_pnl is not None and daily_pnl < -self._config.strategy.daily_loss_limit_usd:
@@ -114,6 +127,7 @@ class Rebalancer:
             self._config.cities,
             min_volume=self._config.strategy.min_market_volume,
             max_spread=self._config.strategy.max_slot_spread,
+            max_days_ahead=self._config.strategy.max_days_ahead,
         )
         self._last_events_count = len(events)
         if not events:
@@ -257,18 +271,21 @@ class Rebalancer:
             except Exception:
                 pass
 
-            # Phase 4: NO signals
+            # Get held positions to avoid duplicate buys
+            held_no_slots = await self._portfolio.get_held_no_slots(event.event_id)
+            held_token_ids = {s.token_id_no for s in held_no_slots}
+
+            # Phase 4: NO signals (skip already-held slots)
             no_signals = evaluate_no_signals(
-                event, forecast, self._config.strategy, error_dist, trend_state,
+                event, forecast, self._config.strategy, error_dist, trend_state, held_token_ids,
             )
 
-            # Phase 4b: Ladder signals
+            # Phase 4b: Ladder signals (skip already-held slots)
             ladder_signals = evaluate_ladder_signals(
-                event, forecast, self._config.strategy, error_dist,
+                event, forecast, self._config.strategy, error_dist, held_token_ids,
             )
 
             # Phase 5: Exit signals
-            held_no_slots = await self._portfolio.get_held_no_slots(event.event_id)
             exit_signals = evaluate_exit_signals(
                 event, observation, daily_max, held_no_slots, self._config.strategy, trend_state,
             )

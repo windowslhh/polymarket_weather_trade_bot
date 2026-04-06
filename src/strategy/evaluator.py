@@ -63,6 +63,7 @@ def evaluate_no_signals(
     config: StrategyConfig,
     error_dist: ForecastErrorDistribution | None = None,
     trend: TrendState | None = None,
+    held_token_ids: set[str] | None = None,
 ) -> list[TradeSignal]:
     """Phase 4: Generate BUY NO signals for slots far from forecast.
 
@@ -81,6 +82,10 @@ def evaluate_no_signals(
         ev_threshold = config.min_no_ev * 1.5  # more conservative near settlement
 
     for slot in event.slots:
+        # Skip already-held slots
+        if held_token_ids and slot.token_id_no in held_token_ids:
+            continue
+
         distance = _slot_distance(slot, forecast.predicted_high_f)
 
         if distance < config.no_distance_threshold_f:
@@ -194,6 +199,7 @@ def evaluate_ladder_signals(
     forecast: Forecast,
     config: StrategyConfig,
     error_dist: ForecastErrorDistribution | None = None,
+    held_token_ids: set[str] | None = None,
 ) -> list[TradeSignal]:
     """Generate BUY NO signals for slots near the forecast using ladder/围网 strategy.
 
@@ -218,6 +224,10 @@ def evaluate_ladder_signals(
 
     signals: list[TradeSignal] = []
     for slot in ladder_slots:
+        # Skip already-held slots
+        if held_token_ids and slot.token_id_no in held_token_ids:
+            continue
+
         distance = _slot_distance(slot, forecast.predicted_high_f)
 
         # Skip slots already covered by standard no_signals (far enough)

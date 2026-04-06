@@ -33,6 +33,7 @@ class StrategyConfig:
     min_trim_ev: float = 0.005
     ladder_width: int = 3
     ladder_min_ev: float = 0.01
+    max_days_ahead: int = 2
 
 
 @dataclass

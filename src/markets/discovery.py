@@ -82,6 +82,7 @@ async def discover_weather_markets(
     client: httpx.AsyncClient | None = None,
     min_volume: float = 0.0,
     max_spread: float = 1.0,
+    max_days_ahead: int = 7,
 ) -> list[WeatherMarketEvent]:
     """Scan Gamma API for active weather temperature markets matching configured cities."""
     should_close = client is None
@@ -125,6 +126,11 @@ async def discover_weather_markets(
 
                 # Skip past markets
                 if market_date < date.today():
+                    continue
+
+                # Skip markets too far ahead (forecast accuracy drops)
+                from datetime import timedelta
+                if market_date > date.today() + timedelta(days=max_days_ahead):
                     continue
 
                 # Parse temperature slots from child markets
