@@ -8,6 +8,11 @@
         <div class="metric-sub">of ${{ "%.0f"|format(max_exposure) }} limit</div>
     </div>
     <div class="metric-card">
+        <div class="metric-label">Realized P&L</div>
+        <div class="metric-value {{ 'positive' if realized >= 0 else 'negative' }}">${{ "%.2f"|format(realized) }}</div>
+        <div class="metric-sub">from settled markets</div>
+    </div>
+    <div class="metric-card">
         <div class="metric-label">Unrealized P&L</div>
         <div class="metric-value {{ 'positive' if unrealized >= 0 else 'negative' }}" id="val-pnl">${{ "%.2f"|format(unrealized) }}</div>
         <div class="metric-sub">mark-to-market</div>
