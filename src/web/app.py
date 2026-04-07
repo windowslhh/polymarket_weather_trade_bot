@@ -250,14 +250,24 @@ def create_app(store, rebalancer, config) -> Flask:
         closed_pos = _run_async(st.get_closed_positions(limit=50))
         settlements = _run_async(st.get_settlements())
 
+        # Build lookup: (city, slot_label) → latest BUY decision reason
+        buy_reasons = {}
+        for d in decisions:
+            if d.get("action") == "BUY":
+                key = (d.get("city", ""), d.get("slot_label", ""))
+                if key not in buy_reasons:
+                    buy_reasons[key] = d.get("reason", "") or f"EV={d.get('expected_value', 0):.3f}, win={d.get('win_prob', 0)*100:.0f}%"
+
         # Build unified timeline
         timeline = []
 
-        # 1. Open positions (most important — what we're holding)
+        # 1. Open positions
         for p in open_pos:
             current = gamma_prices.get(p["token_id"])
             entry = p["entry_price"]
             pnl = round((current - entry) * p["shares"], 3) if current else None
+            reason_key = (p["city"], p.get("slot_label", ""))
+            reason = buy_reasons.get(reason_key, "")
             timeline.append({
                 "time": p["created_at"][:16] if p.get("created_at") else "",
                 "city": p["city"],
@@ -270,12 +280,22 @@ def create_app(store, rebalancer, config) -> Flask:
                 "entry": f"{entry:.3f}",
                 "current": f"{current:.3f}" if current else "-",
                 "pnl": f"{'+'if pnl and pnl>0 else ''}${pnl:.3f}" if pnl is not None else "-",
+                "reason": reason,
                 "type": "open",
                 "sort_key": p.get("created_at", ""),
             })
 
         # 2. Settled/closed positions
+        # Build sell reason lookup
+        sell_reasons = {}
+        for d in decisions:
+            if d.get("action") == "SELL":
+                key = (d.get("city", ""), d.get("slot_label", ""))
+                if key not in sell_reasons:
+                    sell_reasons[key] = d.get("reason", "") or "Trim/Exit"
+
         for p in closed_pos:
+            reason_key = (p["city"], p.get("slot_label", ""))
             timeline.append({
                 "time": p.get("closed_at", "")[:16] if p.get("closed_at") else "",
                 "city": p["city"],
@@ -286,12 +306,12 @@ def create_app(store, rebalancer, config) -> Flask:
                 "entry": f"{p['entry_price']:.3f}",
                 "current": "-",
                 "pnl": "-",
+                "reason": sell_reasons.get(reason_key, "Settled" if p.get("status") == "settled" else "Closed"),
                 "type": "settled" if p.get("status") == "settled" else "closed",
                 "sort_key": p.get("closed_at") or p.get("created_at", ""),
             })
 
-        # 3. Recent decisions (BUY/SELL/SKIP that didn't become positions)
-        # Only include SKIP decisions (BUYs are already shown as positions)
+        # 3. SKIP decisions
         for d in decisions:
             if d.get("action") == "SKIP":
                 timeline.append({
@@ -304,6 +324,7 @@ def create_app(store, rebalancer, config) -> Flask:
                     "win_prob": f"{d['win_prob']*100:.0f}%" if d.get("win_prob") else "-",
                     "ev": f"{d['expected_value']:.3f}" if d.get("expected_value") else "-",
                     "entry": "-", "current": "-", "pnl": "-",
+                    "reason": d.get("reason", ""),
                     "type": "decision",
                     "sort_key": d.get("cycle_at", ""),
                 })

@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS decision_log (
     expected_value REAL,
     price REAL,
     size_usd REAL,
-    action TEXT
+    action TEXT,
+    reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_event ON positions(event_id);
@@ -228,14 +229,14 @@ class Store:
         self, cycle_at: str, city: str, event_id: str, signal_type: str,
         slot_label: str, forecast_high_f: float | None, daily_max_f: float | None,
         trend_state: str, win_prob: float, expected_value: float,
-        price: float, size_usd: float, action: str,
+        price: float, size_usd: float, action: str, reason: str = "",
     ) -> None:
         await self.db.execute(
             """INSERT INTO decision_log (cycle_at, city, event_id, signal_type, slot_label,
-               forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cycle_at, city, event_id, signal_type, slot_label,
-             forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action),
+             forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason),
         )
         await self.db.commit()
 

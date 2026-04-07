@@ -345,11 +345,39 @@ class Rebalancer:
                 all_signals.extend(exit_signals)
                 all_signals.extend(trim_signals)
 
-            # Log decisions to DB
+            # Log decisions to DB with reasons
             all_evaluated = no_signals + ladder_signals + exit_signals + trim_signals + yes_signals
             for signal in all_evaluated:
-                action = "BUY" if signal.side.value == "BUY" and signal.suggested_size_usd > 0 else \
-                         "SELL" if signal.side.value == "SELL" else "SKIP"
+                if signal.side.value == "SELL":
+                    action = "SELL"
+                    # Determine sell reason
+                    if signal in exit_signals:
+                        reason = f"EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else "EXIT: temp approaching"
+                    elif signal in trim_signals:
+                        reason = f"TRIM: EV decayed to {signal.expected_value:.3f}"
+                    else:
+                        reason = "SELL"
+                elif signal.side.value == "BUY" and signal.suggested_size_usd > 0:
+                    action = "BUY"
+                    dist = abs(forecast.predicted_high_f - (signal.slot.temp_midpoint_f or 0))
+                    if signal in ladder_signals:
+                        reason = f"LADDER: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
+                    elif signal in no_signals:
+                        reason = f"NO: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
+                    elif signal in yes_signals:
+                        reason = f"YES confirm: daily_max in slot, {hours_to_settle:.0f}h left" if hours_to_settle else "YES confirm"
+                    else:
+                        reason = f"BUY: EV={signal.expected_value:.3f}"
+                else:
+                    action = "SKIP"
+                    # Explain why skipped
+                    if signal.suggested_size_usd <= 0 and signal.expected_value > 0:
+                        reason = "Kelly size < $0.10 (positive EV but too small)"
+                    elif signal.expected_value <= 0:
+                        reason = f"Negative EV ({signal.expected_value:.3f})"
+                    else:
+                        reason = "Size=0 (exposure limit or Kelly too small)"
+
                 try:
                     await self._portfolio._store.insert_decision_log(
                         cycle_at=cycle_at, city=event.city, event_id=event.event_id,
@@ -357,10 +385,10 @@ class Rebalancer:
                         forecast_high_f=forecast.predicted_high_f, daily_max_f=daily_max,
                         trend_state=trend_state.value, win_prob=signal.estimated_win_prob,
                         expected_value=signal.expected_value, price=signal.price,
-                        size_usd=signal.suggested_size_usd, action=action,
+                        size_usd=signal.suggested_size_usd, action=action, reason=reason,
                     )
                 except Exception:
-                    pass  # non-critical
+                    pass
 
         # Save signal summaries for dashboard
         self._last_signals = [

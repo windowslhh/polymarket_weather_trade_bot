@@ -138,7 +138,7 @@ document.addEventListener('DOMContentLoaded', function() {
         <span style="font-size:11px;color:var(--text-dim);">{{ decision_log|length }} decisions</span>
     </div>
     <table>
-        <thead><tr><th>Time</th><th>City</th><th>Type</th><th>Slot</th><th>Forecast</th><th>Max°F</th><th>Trend</th><th>Win%</th><th>EV</th><th>Price</th><th>Size</th><th>Action</th></tr></thead>
+        <thead><tr><th>Time</th><th>City</th><th>Type</th><th>Slot</th><th>Forecast</th><th>Trend</th><th>Win%</th><th>EV</th><th>Price</th><th>Action</th><th>Reason</th></tr></thead>
         <tbody>
         {% for d in decision_log[:30] %}
         <tr>
@@ -147,13 +147,12 @@ document.addEventListener('DOMContentLoaded', function() {
             <td>{{ d.signal_type }}</td>
             <td style="font-size:11px;">{{ d.slot_label[:25] if d.slot_label else '-' }}</td>
             <td class="td-mono">{{ "%.0f"|format(d.forecast_high_f) if d.forecast_high_f else '-' }}°F</td>
-            <td class="td-mono">{{ "%.0f"|format(d.daily_max_f) if d.daily_max_f else '-' }}°F</td>
-            <td><span class="tag tag-{{ (d.trend_state or 'stable')|lower|replace('_','-') }}">{{ d.trend_state or '-' }}</span></td>
-            <td class="td-mono">{{ "%.1f%%"|format(d.win_prob * 100) if d.win_prob else '-' }}</td>
-            <td class="td-mono">{{ "%.4f"|format(d.expected_value) if d.expected_value else '-' }}</td>
+            <td><span class="tag tag-{{ (d.trend_state or 'stable')|lower|replace('_','-') }}" style="font-size:9px;">{{ d.trend_state or '-' }}</span></td>
+            <td class="td-mono">{{ "%.0f%%"|format(d.win_prob * 100) if d.win_prob else '-' }}</td>
+            <td class="td-mono">{{ "%.3f"|format(d.expected_value) if d.expected_value else '-' }}</td>
             <td class="td-mono">{{ "%.3f"|format(d.price) if d.price else '-' }}</td>
-            <td class="td-mono">${{ "%.2f"|format(d.size_usd) if d.size_usd else '-' }}</td>
             <td><span class="tag tag-{{ (d.action or 'skip')|lower }}">{{ d.action or '-' }}</span></td>
+            <td style="font-size:10px;color:var(--text-muted);">{{ d.reason if d.reason else '-' }}</td>
         </tr>
         {% endfor %}
         </tbody>

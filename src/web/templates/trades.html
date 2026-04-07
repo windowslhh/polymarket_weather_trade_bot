@@ -47,6 +47,7 @@
                 <th>Entry</th>
                 <th>Current</th>
                 <th>P&L</th>
+                <th>Reason</th>
                 <th>Status</th>
             </tr>
         </thead>
@@ -70,6 +71,7 @@
             <td class="td-mono">{{ t.entry if t.entry else '-' }}</td>
             <td class="td-mono" style="{% if t.current and t.entry and t.current != '-' and t.entry != '-' %}color:{{ 'var(--green-text)' if t.current|float > t.entry|float else 'var(--red-text)' }}{% endif %}">{{ t.current if t.current else '-' }}</td>
             <td class="td-mono" style="font-weight:600;{% if t.pnl and t.pnl != '-' %}{% set pnl_f = t.pnl|replace('$','')|replace('+','')|float %}color:{{ 'var(--green-text)' if pnl_f >= 0 else 'var(--red-text)' }}{% endif %}">{{ t.pnl if t.pnl else '-' }}</td>
+            <td style="font-size:10px;color:var(--text-muted);max-width:200px;">{{ t.reason if t.reason else '-' }}</td>
             <td>
                 {% if t.type == 'open' %}<span style="color:var(--accent-light);font-size:11px;">OPEN</span>
                 {% elif t.type == 'settled' %}<span style="color:var(--green-text);font-size:11px;">SETTLED</span>
@@ -80,7 +82,7 @@
         </tr>
         {% endfor %}
         {% if not timeline %}
-        <tr><td colspan="12" style="text-align:center;color:var(--text-dim);padding:30px;">No trade activity yet. Data will appear after the first rebalance cycle.</td></tr>
+        <tr><td colspan="13" style="text-align:center;color:var(--text-dim);padding:30px;">No trade activity yet. Data will appear after the first rebalance cycle.</td></tr>
         {% endif %}
         </tbody>
     </table>
