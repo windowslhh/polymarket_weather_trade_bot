@@ -88,22 +88,21 @@
     </div>
 </div>
 
-<!-- Signals -->
-{% if signals %}
+<!-- Quick trade activity -->
 <div class="panel">
     <div class="panel-header">
-        <h3>Trade Signals</h3>
-        <span class="tag tag-buy">{{ signals|length }}</span>
+        <h3>Recent Activity</h3>
+        <a href="/trades" style="font-size:12px;color:var(--accent-light);">Full timeline &rarr;</a>
     </div>
+    {% if signals %}
     <table>
-        <thead><tr><th>City</th><th>Type</th><th>Side</th><th>Slot</th><th>EV</th><th>Win%</th><th>Size</th></tr></thead>
+        <thead><tr><th>City</th><th>Side</th><th>Slot</th><th>EV</th><th>Win%</th><th>Size</th></tr></thead>
         <tbody>
-        {% for s in signals[:15] %}
+        {% for s in signals[:8] %}
         <tr>
             <td style="font-weight:500;font-size:12px;">{{ s.city }}</td>
-            <td><span class="tag tag-{{ 'buy' if s.side == 'BUY' else 'sell' }}" style="font-size:10px;">{{ s.token_type }}</span></td>
-            <td><span class="tag tag-{{ 'buy' if s.side == 'BUY' else 'sell' }}" style="font-size:10px;">{{ s.side }}</span></td>
-            <td style="font-size:11px;">{{ s.slot_label[:35] }}</td>
+            <td><span class="tag tag-{{ 'buy' if s.side == 'BUY' else 'sell' }}" style="font-size:10px;">{{ s.side }} {{ s.token_type }}</span></td>
+            <td style="font-size:11px;">{{ s.slot_label[:30] }}</td>
             <td class="td-mono {{ 'positive' if s.ev > 0 else '' }}">{{ "%.3f"|format(s.ev) }}</td>
             <td class="td-mono">{{ "%.0f%%"|format(s.win_prob * 100) }}</td>
             <td class="td-mono">${{ "%.2f"|format(s.size_usd) }}</td>
@@ -111,39 +110,8 @@
         {% endfor %}
         </tbody>
     </table>
+    {% else %}
+    <div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px;">No signals last cycle. <a href="/trades" style="color:var(--accent-light);">View trade history &rarr;</a></div>
+    {% endif %}
 </div>
-{% else %}
-<div class="panel">
-    <div class="panel-header"><h3>Trade Signals</h3></div>
-    <div class="empty-state">
-        <div class="icon">~</div>
-        <p>No signals. Market pricing efficient — waiting for edge.</p>
-    </div>
-</div>
-{% endif %}
-
-<!-- Recent decisions -->
-{% if decision_log %}
-<div class="panel">
-    <div class="panel-header">
-        <h3>Recent Decisions</h3>
-        <a href="/analytics" style="font-size:12px;color:var(--accent-light);">View all &rarr;</a>
-    </div>
-    <table>
-        <thead><tr><th>Time</th><th>City</th><th>Slot</th><th>Forecast</th><th>EV</th><th>Action</th></tr></thead>
-        <tbody>
-        {% for d in decision_log[:6] %}
-        <tr>
-            <td style="font-size:11px;color:var(--text-muted);">{{ d.cycle_at[:16] if d.cycle_at else '-' }}</td>
-            <td style="font-weight:500;font-size:12px;">{{ d.city }}</td>
-            <td style="font-size:11px;">{{ d.slot_label[:28] if d.slot_label else '-' }}</td>
-            <td class="td-mono">{{ "%.0f"|format(d.forecast_high_f) if d.forecast_high_f else '-' }}°F</td>
-            <td class="td-mono">{{ "%.3f"|format(d.expected_value) if d.expected_value else '-' }}</td>
-            <td><span class="tag tag-{{ (d.action or 'skip')|lower }}">{{ d.action or '-' }}</span></td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
 {% endblock %}

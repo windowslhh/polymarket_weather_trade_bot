@@ -213,6 +213,106 @@ def create_app(store, rebalancer, config) -> Flask:
             next_scan_minutes=app.config["bot_config"].scheduling.rebalance_interval_minutes,
         )
 
+    @app.route("/trades")
+    def trades_page():
+        st = app.config["bot_store"]
+        reb = app.config["bot_rebalancer"]
+        gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
+
+        # Fetch all data sources
+        decisions = _run_async(st.get_decision_log(limit=100))
+        open_pos = _run_async(st.get_open_positions())
+        closed_pos = _run_async(st.get_closed_positions(limit=50))
+        settlements = _run_async(st.get_settlements())
+
+        # Build unified timeline
+        timeline = []
+
+        # 1. Open positions (most important — what we're holding)
+        for p in open_pos:
+            current = gamma_prices.get(p["token_id"])
+            entry = p["entry_price"]
+            pnl = round((current - entry) * p["shares"], 3) if current else None
+            timeline.append({
+                "time": p["created_at"][:16] if p.get("created_at") else "",
+                "city": p["city"],
+                "slot": p["slot_label"][:40] if p.get("slot_label") else "",
+                "strategy": p.get("strategy", "B"),
+                "action": "BUY",
+                "forecast": "",
+                "win_prob": "",
+                "ev": "",
+                "entry": f"{entry:.3f}",
+                "current": f"{current:.3f}" if current else "-",
+                "pnl": f"{'+'if pnl and pnl>0 else ''}${pnl:.3f}" if pnl is not None else "-",
+                "type": "open",
+                "sort_key": p.get("created_at", ""),
+            })
+
+        # 2. Settled/closed positions
+        for p in closed_pos:
+            timeline.append({
+                "time": p.get("closed_at", "")[:16] if p.get("closed_at") else "",
+                "city": p["city"],
+                "slot": p["slot_label"][:40] if p.get("slot_label") else "",
+                "strategy": p.get("strategy", "B"),
+                "action": "SELL",
+                "forecast": "", "win_prob": "", "ev": "",
+                "entry": f"{p['entry_price']:.3f}",
+                "current": "-",
+                "pnl": "-",
+                "type": "settled" if p.get("status") == "settled" else "closed",
+                "sort_key": p.get("closed_at") or p.get("created_at", ""),
+            })
+
+        # 3. Recent decisions (BUY/SELL/SKIP that didn't become positions)
+        # Only include SKIP decisions (BUYs are already shown as positions)
+        for d in decisions:
+            if d.get("action") == "SKIP":
+                timeline.append({
+                    "time": d["cycle_at"][:16] if d.get("cycle_at") else "",
+                    "city": d.get("city", ""),
+                    "slot": d["slot_label"][:40] if d.get("slot_label") else "",
+                    "strategy": "",
+                    "action": "SKIP",
+                    "forecast": f"{d['forecast_high_f']:.0f}°F" if d.get("forecast_high_f") else "-",
+                    "win_prob": f"{d['win_prob']*100:.0f}%" if d.get("win_prob") else "-",
+                    "ev": f"{d['expected_value']:.3f}" if d.get("expected_value") else "-",
+                    "entry": "-", "current": "-", "pnl": "-",
+                    "type": "decision",
+                    "sort_key": d.get("cycle_at", ""),
+                })
+
+        # Sort by time descending
+        timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
+
+        # Compute per-strategy stats
+        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_exposure = {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_counts = {"A": {"open": 0, "settled": 0}, "B": {"open": 0, "settled": 0}, "C": {"open": 0, "settled": 0}}
+        for p in open_pos:
+            s = p.get("strategy", "B")
+            if s in strat_pnl:
+                strat_exposure[s] += p["size_usd"]
+                strat_counts[s]["open"] += 1
+                current = gamma_prices.get(p["token_id"])
+                if current:
+                    strat_pnl[s] += (current - p["entry_price"]) * p["shares"]
+        for p in closed_pos:
+            s = p.get("strategy", "B")
+            if s in strat_counts and p.get("status") == "settled":
+                strat_counts[s]["settled"] += 1
+
+        return render_template(
+            "trades.html",
+            active_page="trades",
+            mode=_mode(),
+            timeline=timeline[:80],  # limit for performance
+            strat_pnl=strat_pnl,
+            strat_exposure=strat_exposure,
+            strat_counts=strat_counts,
+        )
+
     @app.route("/analytics")
     def analytics_page():
         st = app.config["bot_store"]

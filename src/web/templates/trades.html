@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Trades - WeatherBot{% endblock %}
+{% block content %}
+<div class="page-title">Trade Timeline</div>
+
+<!-- Strategy P&L Summary -->
+<div class="metrics">
+    <div class="metric-card">
+        <div class="metric-label">Strategy A <span style="font-size:10px;color:var(--text-dim);">(Conservative)</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.A >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.A) }}</div>
+        <div class="metric-sub">{{ strat_counts.A.open }} open / {{ strat_counts.A.settled }} settled / ${{ "%.1f"|format(strat_exposure.A) }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Strategy B <span style="font-size:10px;color:var(--text-dim);">(Moderate)</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.B >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.B) }}</div>
+        <div class="metric-sub">{{ strat_counts.B.open }} open / {{ strat_counts.B.settled }} settled / ${{ "%.1f"|format(strat_exposure.B) }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Strategy C <span style="font-size:10px;color:var(--text-dim);">(Aggressive)</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.C >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.C) }}</div>
+        <div class="metric-sub">{{ strat_counts.C.open }} open / {{ strat_counts.C.settled }} settled / ${{ "%.1f"|format(strat_exposure.C) }}</div>
+    </div>
+</div>
+
+<!-- Full Trade Timeline: decisions → positions → settlements merged -->
+<div class="panel">
+    <div class="panel-header">
+        <h3>Complete Decision Chain</h3>
+        <div style="display:flex;gap:8px;">
+            <span class="tag tag-buy">BUY</span>
+            <span class="tag tag-sell">SELL</span>
+            <span class="tag tag-skip">SKIP</span>
+            <span class="tag tag-settling">SETTLED</span>
+        </div>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>City</th>
+                <th>Slot</th>
+                <th>Strat</th>
+                <th>Action</th>
+                <th>Forecast</th>
+                <th>Win%</th>
+                <th>EV</th>
+                <th>Entry</th>
+                <th>Current</th>
+                <th>P&L</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for t in timeline %}
+        <tr style="{% if t.type == 'settled' %}background:rgba(34,197,94,0.05);{% elif t.type == 'open' %}{% elif t.type == 'decision' and t.action == 'SKIP' %}opacity:0.5;{% endif %}">
+            <td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">{{ t.time }}</td>
+            <td style="font-weight:500;font-size:12px;">{{ t.city }}</td>
+            <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ t.slot }}</td>
+            <td>
+                {% if t.strategy %}
+                <span class="tag {% if t.strategy == 'A' %}tag-settling{% elif t.strategy == 'B' %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:10px;">{{ t.strategy }}</span>
+                {% else %}-{% endif %}
+            </td>
+            <td>
+                <span class="tag tag-{{ t.action|lower if t.action in ['BUY','SELL','SKIP'] else 'settling' }}">{{ t.action }}</span>
+            </td>
+            <td class="td-mono">{{ t.forecast if t.forecast else '-' }}</td>
+            <td class="td-mono">{{ t.win_prob if t.win_prob else '-' }}</td>
+            <td class="td-mono" style="{% if t.ev and t.ev != '-' %}{% set ev_f = t.ev|float %}{% if ev_f > 0 %}color:var(--green-text);{% elif ev_f < 0 %}color:var(--red-text);{% endif %}{% endif %}">{{ t.ev }}</td>
+            <td class="td-mono">{{ t.entry if t.entry else '-' }}</td>
+            <td class="td-mono" style="{% if t.current and t.entry and t.current != '-' and t.entry != '-' %}color:{{ 'var(--green-text)' if t.current|float > t.entry|float else 'var(--red-text)' }}{% endif %}">{{ t.current if t.current else '-' }}</td>
+            <td class="td-mono" style="font-weight:600;{% if t.pnl and t.pnl != '-' %}{% set pnl_f = t.pnl|replace('$','')|replace('+','')|float %}color:{{ 'var(--green-text)' if pnl_f >= 0 else 'var(--red-text)' }}{% endif %}">{{ t.pnl if t.pnl else '-' }}</td>
+            <td>
+                {% if t.type == 'open' %}<span style="color:var(--accent-light);font-size:11px;">OPEN</span>
+                {% elif t.type == 'settled' %}<span style="color:var(--green-text);font-size:11px;">SETTLED</span>
+                {% elif t.type == 'closed' %}<span style="color:var(--text-dim);font-size:11px;">CLOSED</span>
+                {% elif t.type == 'decision' %}<span style="color:var(--text-dim);font-size:11px;">—</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not timeline %}
+        <tr><td colspan="12" style="text-align:center;color:var(--text-dim);padding:30px;">No trade activity yet. Data will appear after the first rebalance cycle.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
