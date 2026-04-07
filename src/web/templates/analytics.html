@@ -18,8 +18,8 @@
             <td class="td-mono">{{ row.avg_ev }}</td>
             <td class="td-mono" style="{% if row.max_ev and row.max_ev > 0.02 %}color:var(--green-text);{% endif %}">{{ row.max_ev }}</td>
             <td class="td-mono">{{ "%.1f%%"|format(row.avg_win_prob * 100) if row.avg_win_prob else '-' }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ row.first_scan[:16] if row.first_scan else '-' }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ row.last_scan[:16] if row.last_scan else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.first_scan|beijing if row.first_scan else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.last_scan|beijing if row.last_scan else '-' }}</td>
         </tr>
         {% endfor %}
         </tbody>
@@ -47,7 +47,7 @@
         <tbody>
         {% for e in edge_history[:50] %}
         <tr {% if e.ev and e.ev > 0.02 %}class="row-highlight"{% endif %}>
-            <td style="font-size:11px;color:var(--text-muted);">{{ e.cycle_at[:16] if e.cycle_at else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ e.cycle_at|beijing if e.cycle_at else '-' }}</td>
             <td style="font-weight:500;">{{ e.city }}</td>
             <td class="td-mono" style="font-size:11px;">{{ e.market_date }}</td>
             <td style="font-size:11px;">{{ e.slot_label[:35] if e.slot_label else '-' }}</td>
@@ -142,7 +142,7 @@ document.addEventListener('DOMContentLoaded', function() {
         <tbody>
         {% for d in decision_log[:30] %}
         <tr>
-            <td style="font-size:11px;color:var(--text-muted);">{{ d.cycle_at[:16] if d.cycle_at else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ d.cycle_at|beijing if d.cycle_at else '-' }}</td>
             <td style="font-weight:500;">{{ d.city }}</td>
             <td>{{ d.signal_type }}</td>
             <td style="font-size:11px;">{{ d.slot_label[:25] if d.slot_label else '-' }}</td>

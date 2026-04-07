@@ -68,7 +68,7 @@
             </td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
             <td class="td-mono">{{ "%.1f"|format(p.shares) }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at[:16] }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at|beijing }}</td>
         </tr>
         {% endfor %}
         </tbody>
@@ -124,7 +124,7 @@
             <td><span class="tag tag-stable">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ p.closed_at[:16] if p.closed_at else '-' }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ p.closed_at|beijing if p.closed_at else '-' }}</td>
         </tr>
         {% endfor %}
         </tbody>

@@ -28,7 +28,7 @@
                 {{ '+' if row.unrealized_pnl > 0 else '' }}${{ "%.2f"|format(row.unrealized_pnl) }}
             </td>
             <td class="td-mono">${{ "%.2f"|format(row.total_exposure) }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ row.updated_at[:16] }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ row.updated_at|beijing }}</td>
         </tr>
         {% endfor %}
         </tbody>
@@ -100,7 +100,7 @@ document.addEventListener('DOMContentLoaded', function() {
             <td class="td-mono" style="color:{{ 'var(--green-text)' if s.pnl >= 0 else 'var(--red-text)' }}">
                 {{ '+' if s.pnl > 0 else '' }}${{ "%.2f"|format(s.pnl) }}
             </td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ s.settled_at[:16] }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ s.settled_at|beijing }}</td>
         </tr>
         {% endfor %}
         </tbody>

@@ -53,7 +53,7 @@
         <tbody>
         {% for t in timeline %}
         <tr style="{% if t.type == 'settled' %}background:rgba(34,197,94,0.05);{% elif t.type == 'open' %}{% elif t.type == 'decision' and t.action == 'SKIP' %}opacity:0.5;{% endif %}">
-            <td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">{{ t.time }}</td>
+            <td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">{{ t.time|beijing }}</td>
             <td style="font-weight:500;font-size:12px;">{{ t.city }}</td>
             <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ t.slot }}</td>
             <td>

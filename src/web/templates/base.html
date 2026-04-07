@@ -185,6 +185,17 @@
     </div>
 
     <script>
+        function utcToBeijing(utcStr) {
+            if (!utcStr) return '-';
+            try {
+                const d = new Date(utcStr.replace(' ', 'T') + (utcStr.includes('Z') || utcStr.includes('+') ? '' : 'Z'));
+                const bj = new Date(d.getTime() + 8 * 3600000);
+                return (bj.getMonth()+1).toString().padStart(2,'0') + '-' +
+                       bj.getDate().toString().padStart(2,'0') + ' ' +
+                       bj.getHours().toString().padStart(2,'0') + ':' +
+                       bj.getMinutes().toString().padStart(2,'0');
+            } catch(e) { return utcStr; }
+        }
         async function refreshStatus() {
             try {
                 const r = await fetch('/api/status');
@@ -193,7 +204,7 @@
                 const txt = document.getElementById('status-text');
                 dot.className = 'status-dot ' + (d.last_error ? 'err' : 'ok');
                 txt.textContent = d.last_error || 'Operational';
-                document.getElementById('last-run').textContent = d.last_run ? 'Last: ' + d.last_run : '';
+                document.getElementById('last-run').textContent = d.last_run ? 'Last: ' + utcToBeijing(d.last_run) : '';
                 ['exposure','pnl','events','signals'].forEach(k => {
                     const el = document.getElementById('val-' + k);
                     if (el && d[k] !== undefined) el.textContent = typeof d[k] === 'number' ? (k === 'events' || k === 'signals' ? d[k] : '$' + d[k].toFixed(2)) : d[k];

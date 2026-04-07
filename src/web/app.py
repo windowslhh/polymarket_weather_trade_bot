@@ -54,12 +54,37 @@ def _set_cache(key: str, val: object):
     _cache[key] = (time.time(), val)
 
 
+def _utc_to_beijing(utc_str: str) -> str:
+    """Convert UTC datetime string to Beijing time (UTC+8)."""
+    if not utc_str or len(utc_str) < 16:
+        return utc_str or "-"
+    try:
+        from datetime import datetime, timedelta, timezone
+        # Handle various formats
+        clean = utc_str.replace("T", " ").replace("Z", "").split("+")[0].strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(clean[:19], fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return utc_str[:16]
+        beijing = dt + timedelta(hours=8)
+        return beijing.strftime("%m-%d %H:%M")
+    except Exception:
+        return utc_str[:16]
+
+
 def create_app(store, rebalancer, config) -> Flask:
     template_dir = Path(__file__).parent / "templates"
     app = Flask(__name__, template_folder=str(template_dir))
     app.config["bot_store"] = store
     app.config["bot_rebalancer"] = rebalancer
     app.config["bot_config"] = config
+
+    # Register Jinja filter for UTC → Beijing time
+    app.jinja_env.filters["beijing"] = _utc_to_beijing
 
     def _mode():
         if config.dry_run:
