@@ -26,6 +26,7 @@ class PortfolioTracker:
         side: str,
         price: float,
         size_usd: float,
+        strategy: str = "B",
     ) -> int:
         """Record a filled order as a new position."""
         shares = size_usd / price if price > 0 else 0
@@ -39,29 +40,30 @@ class PortfolioTracker:
             entry_price=price,
             size_usd=size_usd,
             shares=shares,
+            strategy=strategy,
         )
         logger.info(
-            "Position opened: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d]",
-            side, token_type.value, slot_label, price, size_usd, shares, position_id,
+            "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d]",
+            strategy, side, token_type.value, slot_label, price, size_usd, shares, position_id,
         )
         return position_id
 
-    async def get_total_exposure(self) -> float:
+    async def get_total_exposure(self, strategy: str | None = None) -> float:
         """Total USD exposure across all open positions."""
-        return await self._store.get_total_exposure()
+        return await self._store.get_total_exposure(strategy)
 
-    async def get_city_exposure(self, city: str) -> float:
+    async def get_city_exposure(self, city: str, strategy: str | None = None) -> float:
         """Total USD exposure for a specific city."""
-        return await self._store.get_city_exposure(city)
+        return await self._store.get_city_exposure(city, strategy)
 
-    async def get_held_no_slots(self, event_id: str) -> list[TempSlot]:
+    async def get_held_no_slots(self, event_id: str, strategy: str | None = None) -> list[TempSlot]:
         """Get TempSlot representations of held NO positions for an event.
 
         Parses temperature bounds from slot_label for accurate probability estimation.
         """
         from src.markets.discovery import _parse_temp_bounds
 
-        positions = await self._store.get_open_positions(event_id=event_id)
+        positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
         slots = []
         for pos in positions:
             if pos["token_type"] == "NO" and pos["side"] == "BUY":

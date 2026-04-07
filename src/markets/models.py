@@ -62,6 +62,7 @@ class TradeSignal:
     expected_value: float
     estimated_win_prob: float
     suggested_size_usd: float = 0.0
+    strategy: str = "B"  # A/B/C strategy group
 
     @property
     def token_id(self) -> str:

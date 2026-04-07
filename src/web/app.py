@@ -82,6 +82,7 @@ def create_app(store, rebalancer, config) -> Flask:
         exposure = _run_async(st.get_total_exposure())
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
         decision_log = _run_async(st.get_decision_log(limit=8))
+        strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
@@ -106,6 +107,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "state": state,
             "signals": signals,
             "cities_with_positions": len(set(p["city"] for p in positions)),
+            "strategy_summary": strategy_summary,
         }
         _set_cache("dashboard", data)
         return data
@@ -129,6 +131,7 @@ def create_app(store, rebalancer, config) -> Flask:
             trends=d["state"].get("trends", {}),
             forecasts=d["state"].get("forecasts", {}),
             realized=d["daily_pnl_val"] or 0.0,
+            strategy_summary=d.get("strategy_summary", []),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],

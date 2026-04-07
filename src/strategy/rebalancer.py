@@ -5,7 +5,8 @@ import logging
 from datetime import date, datetime, timezone
 
 from src.alerts import Alerter
-from src.config import AppConfig
+from dataclasses import replace
+from src.config import AppConfig, StrategyConfig, get_strategy_variants
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.markets.discovery import discover_weather_markets
@@ -283,51 +284,65 @@ class Rebalancer:
             except Exception:
                 pass
 
-            # Get held positions to avoid duplicate buys
-            held_no_slots = await self._portfolio.get_held_no_slots(event.event_id)
-            held_token_ids = {s.token_id_no for s in held_no_slots}
-
-            # Calculate days ahead for EV discount
             days_ahead = (event.market_date - date.today()).days
 
-            # Phase 4: NO signals (skip already-held slots)
-            no_signals = evaluate_no_signals(
-                event, forecast, self._config.strategy, error_dist, trend_state, held_token_ids, days_ahead,
-            )
+            # Run all strategy variants (A/B/C) in parallel
+            variants = get_strategy_variants()
+            for strat_name, overrides in variants.items():
+                # Build strategy config for this variant
+                strat_cfg = replace(self._config.strategy, **overrides)
 
-            # Phase 4b: Ladder signals (skip already-held slots)
-            ladder_signals = evaluate_ladder_signals(
-                event, forecast, self._config.strategy, error_dist, held_token_ids, days_ahead,
-            )
+                # Get held positions for this strategy only
+                held_no_slots = await self._portfolio.get_held_no_slots(
+                    event.event_id, strategy=strat_name,
+                )
+                held_token_ids = {s.token_id_no for s in held_no_slots}
 
-            # Phase 5: Exit signals
-            exit_signals = evaluate_exit_signals(
-                event, observation, daily_max, held_no_slots, self._config.strategy, trend_state,
-            )
+                # Track exposure per strategy
+                db_city_exp = await self._portfolio.get_city_exposure(event.city, strategy=strat_name)
+                strat_city_exp = db_city_exp + cycle_city_additions.get(f"{strat_name}:{event.city}", 0.0)
+                strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
 
-            # Phase 5b: Trim signals
-            trim_signals = evaluate_trim_signals(
-                event, forecast, held_no_slots, self._config.strategy, error_dist,
-            )
+                # Phase 4: NO signals
+                no_signals = evaluate_no_signals(
+                    event, forecast, strat_cfg, error_dist, trend_state, held_token_ids, days_ahead,
+                )
 
-            # Phase 6: YES signals
-            yes_signals = evaluate_yes_signals(
-                event, forecast, observation, daily_max, self._config.strategy,
-            )
+                # Phase 4b: Ladder signals
+                ladder_signals = evaluate_ladder_signals(
+                    event, forecast, strat_cfg, error_dist, held_token_ids, days_ahead,
+                )
 
-            # Size entry signals
-            for signal in no_signals + ladder_signals + yes_signals:
-                size = compute_size(signal, city_exposure, total_exposure, self._config.strategy)
-                if size > 0:
-                    signal.suggested_size_usd = size
-                    all_signals.append(signal)
-                    city_exposure += size
-                    total_exposure += size
-                    cycle_city_additions[event.city] = cycle_city_additions.get(event.city, 0.0) + size
+                # Phase 5: Exit + Trim signals
+                exit_signals = evaluate_exit_signals(
+                    event, observation, daily_max, held_no_slots, strat_cfg, trend_state,
+                )
+                trim_signals = evaluate_trim_signals(
+                    event, forecast, held_no_slots, strat_cfg, error_dist,
+                )
 
-            # Exit and trim signals
-            all_signals.extend(exit_signals)
-            all_signals.extend(trim_signals)
+                # Phase 6: YES signals
+                yes_signals = evaluate_yes_signals(
+                    event, forecast, observation, daily_max, strat_cfg,
+                )
+
+                # Size and tag entry signals with strategy label
+                for signal in no_signals + ladder_signals + yes_signals:
+                    size = compute_size(signal, strat_city_exp, strat_total_exp, strat_cfg)
+                    if size > 0:
+                        signal.suggested_size_usd = size
+                        signal.strategy = strat_name
+                        all_signals.append(signal)
+                        strat_city_exp += size
+                        strat_total_exp += size
+                        key = f"{strat_name}:{event.city}"
+                        cycle_city_additions[key] = cycle_city_additions.get(key, 0.0) + size
+
+                # Tag exit/trim signals
+                for signal in exit_signals + trim_signals:
+                    signal.strategy = strat_name
+                all_signals.extend(exit_signals)
+                all_signals.extend(trim_signals)
 
             # Log decisions to DB
             all_evaluated = no_signals + ladder_signals + exit_signals + trim_signals + yes_signals

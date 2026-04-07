@@ -39,6 +39,50 @@ class StrategyConfig:
     max_days_ahead: int = 2
 
 
+def get_strategy_variants() -> dict[str, dict]:
+    """Three strategy variants running in parallel for A/B testing.
+
+    A = Conservative: NO only on distant slots (>8°F), no ladder
+    B = Moderate (current): Ladder with 2°F min distance, max_no_price 0.85
+    C = Aggressive: Ladder with small positions, wide coverage
+    """
+    return {
+        "A": {
+            "no_distance_threshold_f": 8,
+            "min_no_ev": 0.05,
+            "ladder_width": 0,  # disabled
+            "ladder_min_ev": 1.0,  # effectively disabled
+            "ladder_min_distance_f": 99.0,
+            "max_no_price": 0.80,
+            "max_position_per_slot_usd": 3.0,
+            "max_exposure_per_city_usd": 30.0,
+            "day_ahead_ev_discount": 0.6,
+        },
+        "B": {
+            "no_distance_threshold_f": 8,
+            "min_no_ev": 0.03,
+            "ladder_width": 3,
+            "ladder_min_ev": 0.03,
+            "ladder_min_distance_f": 4.0,  # raised from 2 to 4 based on Apr 6 results
+            "max_no_price": 0.85,
+            "max_position_per_slot_usd": 3.0,
+            "max_exposure_per_city_usd": 30.0,
+            "day_ahead_ev_discount": 0.7,
+        },
+        "C": {
+            "no_distance_threshold_f": 6,
+            "min_no_ev": 0.02,
+            "ladder_width": 4,
+            "ladder_min_ev": 0.02,
+            "ladder_min_distance_f": 2.0,
+            "max_no_price": 0.90,
+            "max_position_per_slot_usd": 1.5,
+            "max_exposure_per_city_usd": 20.0,
+            "day_ahead_ev_discount": 0.8,
+        },
+    }
+
+
 @dataclass
 class SchedulingConfig:
     discovery_interval_minutes: int = 15

@@ -112,6 +112,35 @@
     </div>
 </div>
 
+{% if strategy_summary %}
+<div class="panel" style="margin-bottom:20px;">
+    <div class="panel-header">
+        <h3>Strategy A/B/C Comparison</h3>
+        <span style="font-size:11px;color:var(--text-dim);">Running in parallel</span>
+    </div>
+    <table>
+        <thead><tr><th>Strategy</th><th>Description</th><th>Positions</th><th>Open</th><th>Settled</th><th>Exposure</th></tr></thead>
+        <tbody>
+        {% for s in strategy_summary %}
+        <tr>
+            <td><span class="tag {% if s.strategy == 'A' %}tag-settling{% elif s.strategy == 'B' %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:13px;">{{ s.strategy }}</span></td>
+            <td style="font-size:12px;color:var(--text-muted);">
+                {% if s.strategy == 'A' %}Conservative: NO only, distant slots
+                {% elif s.strategy == 'B' %}Moderate: Ladder 4°F+, max NO 0.85
+                {% else %}Aggressive: Ladder 2°F+, wider coverage
+                {% endif %}
+            </td>
+            <td class="td-mono">{{ s.total_positions }}</td>
+            <td class="td-mono">{{ s.open_positions }}</td>
+            <td class="td-mono">{{ s.settled_positions }}</td>
+            <td class="td-mono">${{ "%.2f"|format(s.exposure) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 {% if signals %}
 <div class="panel">
     <div class="panel-header">

@@ -72,6 +72,7 @@ class Executor:
                     side=signal.side.value,
                     price=price,
                     size_usd=size_usd,
+                    strategy=getattr(signal, 'strategy', 'B'),
                 )
             elif signal.side == Side.SELL:
                 closed = await self._portfolio.close_positions_for_token(

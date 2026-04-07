@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS positions (
     size_usd REAL NOT NULL,
     shares REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',  -- 'open', 'closed', 'settled'
+    strategy TEXT NOT NULL DEFAULT 'B',   -- 'A', 'B', 'C' strategy group
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     closed_at TEXT
 );
@@ -133,11 +134,12 @@ class Store:
         entry_price: float,
         size_usd: float,
         shares: float,
+        strategy: str = "B",
     ) -> int:
         cursor = await self.db.execute(
-            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares),
+            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy),
         )
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
@@ -149,7 +151,7 @@ class Store:
         )
         await self.db.commit()
 
-    async def get_open_positions(self, event_id: str | None = None, city: str | None = None) -> list[dict]:
+    async def get_open_positions(self, event_id: str | None = None, city: str | None = None, strategy: str | None = None) -> list[dict]:
         query = "SELECT * FROM positions WHERE status = 'open'"
         params: list = []
         if event_id:
@@ -158,22 +160,32 @@ class Store:
         if city:
             query += " AND city = ?"
             params.append(city)
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
         async with self.db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_total_exposure(self) -> float:
-        async with self.db.execute(
-            "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open'"
-        ) as cursor:
+    async def get_total_exposure(self, strategy: str | None = None) -> float:
+        if strategy:
+            query = "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open' AND strategy = ?"
+            params = (strategy,)
+        else:
+            query = "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open'"
+            params = ()
+        async with self.db.execute(query, params) as cursor:
             row = await cursor.fetchone()
             return float(row[0]) if row else 0.0
 
-    async def get_city_exposure(self, city: str) -> float:
-        async with self.db.execute(
-            "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open' AND city = ?",
-            (city,),
-        ) as cursor:
+    async def get_city_exposure(self, city: str, strategy: str | None = None) -> float:
+        if strategy:
+            query = "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open' AND city = ? AND strategy = ?"
+            params = (city, strategy)
+        else:
+            query = "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open' AND city = ?"
+            params = (city,)
+        async with self.db.execute(query, params) as cursor:
             row = await cursor.fetchone()
             return float(row[0]) if row else 0.0
 
@@ -276,6 +288,42 @@ class Store:
             FROM edge_history
             GROUP BY city
             ORDER BY edge_opportunities DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_strategy_summary(self) -> list[dict]:
+        """Get P&L and exposure summary per strategy group."""
+        async with self.db.execute("""
+            SELECT strategy,
+                   COUNT(*) as total_positions,
+                   SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_positions,
+                   SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) as settled_positions,
+                   ROUND(SUM(CASE WHEN status = 'open' THEN size_usd ELSE 0 END), 2) as exposure,
+                   ROUND(SUM(CASE WHEN status = 'open' THEN size_usd ELSE 0 END), 2) as open_cost
+            FROM positions
+            GROUP BY strategy
+            ORDER BY strategy
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_strategy_settlements(self) -> list[dict]:
+        """Get settlement P&L per strategy."""
+        async with self.db.execute("""
+            SELECT p.strategy,
+                   COUNT(*) as settled_count,
+                   ROUND(SUM(CASE
+                       WHEN s.winning_outcome IS NOT NULL
+                            AND p.slot_label NOT IN (s.winning_outcome)
+                       THEN (1.0 - p.entry_price) * p.shares
+                       ELSE -(p.entry_price * p.shares)
+                   END), 2) as estimated_pnl
+            FROM positions p
+            LEFT JOIN settlements s ON p.event_id = s.event_id
+            WHERE p.status = 'settled'
+            GROUP BY p.strategy
+            ORDER BY p.strategy
         """) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
