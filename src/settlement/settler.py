@@ -46,13 +46,13 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
     existing_settlements = await store.get_settlements()
     settled_event_ids = {s["event_id"] for s in existing_settlements}
 
+    # Also check positions — if all positions for an event are already settled, skip
     results: list[SettlementResult] = []
 
     async with httpx.AsyncClient(timeout=15) as client:
         for event_id, positions in event_positions.items():
-            # Idempotency: skip already-settled events
+            # Idempotency: skip if already in settlements table
             if event_id in settled_event_ids:
-                # Just mark positions as settled if not already
                 for pos in positions:
                     if pos["status"] == "open":
                         await store.db.execute(
@@ -60,6 +60,11 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                             (pos["id"],),
                         )
                 await store.db.commit()
+                continue
+
+            # Double-check: skip if no open positions left (already settled by another run)
+            open_count = sum(1 for p in positions if p["status"] == "open")
+            if open_count == 0:
                 continue
 
             city = positions[0]["city"]

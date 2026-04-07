@@ -297,6 +297,14 @@ class Store:
     async def insert_settlement(
         self, event_id: str, city: str, winning_outcome: str, pnl: float,
     ) -> None:
+        # Check if already exists to prevent duplicate P&L
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM settlements WHERE event_id = ?", (event_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0] > 0:
+                return  # Already settled, skip
+
         await self.db.execute(
             """INSERT INTO settlements (event_id, city, winning_outcome, pnl)
                VALUES (?, ?, ?, ?)""",
