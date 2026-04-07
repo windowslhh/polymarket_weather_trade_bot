@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-title">Positions</div>
 
+<!-- Top metrics -->
 <div class="metrics">
     <div class="metric-card">
         <div class="metric-label">Open Positions</div>
@@ -11,14 +12,74 @@
     <div class="metric-card">
         <div class="metric-label">Total Exposure</div>
         <div class="metric-value">${{ "%.2f"|format(total_exposure) }}</div>
-        <div class="metric-sub">of ${{ "%.0f"|format(global_limit) }} limit ({{ "%.0f%%"|format(total_exposure / global_limit * 100) if global_limit > 0 else '0%' }})</div>
+        <div class="metric-sub">of ${{ "%.0f"|format(global_limit) }} ({{ "%.0f%%"|format(total_exposure / global_limit * 100) if global_limit > 0 else '0%' }})</div>
     </div>
     <div class="metric-card">
-        <div class="metric-label">Cities Active</div>
-        <div class="metric-value">{{ cities|length }}</div>
+        <div class="metric-label">Strat A P&L</div>
+        <div class="metric-value {{ 'positive' if strat_pnl.A >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.A) }}</div>
+        <div class="metric-sub">{{ strategies.A|length }} pos / ${{ "%.1f"|format(strat_exposure.A) }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Strat B P&L</div>
+        <div class="metric-value {{ 'positive' if strat_pnl.B >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.B) }}</div>
+        <div class="metric-sub">{{ strategies.B|length }} pos / ${{ "%.1f"|format(strat_exposure.B) }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Strat C P&L</div>
+        <div class="metric-value {{ 'positive' if strat_pnl.C >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.C) }}</div>
+        <div class="metric-sub">{{ strategies.C|length }} pos / ${{ "%.1f"|format(strat_exposure.C) }}</div>
     </div>
 </div>
 
+<!-- Positions by Strategy -->
+{% for strat_name, strat_label in [('A','Conservative'), ('B','Moderate'), ('C','Aggressive')] %}
+{% set strat_positions = strategies[strat_name] %}
+<div class="panel" style="margin-bottom:16px;">
+    <div class="panel-header">
+        <h3>
+            <span class="tag {% if strat_name == 'A' %}tag-settling{% elif strat_name == 'B' %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            {{ strat_label }}
+        </h3>
+        <div style="display:flex;gap:16px;font-size:12px;">
+            <span style="color:var(--text-muted);">{{ strat_positions|length }} positions</span>
+            <span style="color:var(--text-muted);">${{ "%.2f"|format(strat_exposure[strat_name]) }}</span>
+            <span class="{{ 'positive' if strat_pnl[strat_name] >= 0 else 'negative' }}" style="font-weight:600;">
+                {{ '+' if strat_pnl[strat_name] > 0 else '' }}${{ "%.2f"|format(strat_pnl[strat_name]) }}
+            </span>
+        </div>
+    </div>
+    {% if strat_positions %}
+    <table>
+        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
+        <tbody>
+        {% for p in strat_positions %}
+        <tr>
+            <td style="font-weight:500;">{{ p.city }}</td>
+            <td style="font-size:11px;">{{ p.slot_label[:40] }}</td>
+            <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
+            <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
+            <td class="td-mono" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > p.entry_price else 'var(--red-text)' if p.current_price < p.entry_price else 'var(--text)' }}{% endif %}">
+                {{ "%.3f"|format(p.current_price) if p.current_price is not none else '-' }}
+            </td>
+            <td class="td-mono" style="font-weight:600;{% if p.unrealized_pnl is not none %}color:{{ 'var(--green-text)' if p.unrealized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">
+                {% if p.unrealized_pnl is not none %}
+                {{ '+' if p.unrealized_pnl > 0 else '' }}${{ "%.3f"|format(p.unrealized_pnl) }}
+                {% else %}-{% endif %}
+            </td>
+            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
+            <td class="td-mono">{{ "%.1f"|format(p.shares) }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at[:16] }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px;">No positions for this strategy</div>
+    {% endif %}
+</div>
+{% endfor %}
+
+<!-- City exposure -->
 {% if cities %}
 <div class="panel">
     <div class="panel-header"><h3>Exposure by City</h3></div>
@@ -34,7 +95,7 @@
             <td>
                 <div style="display:flex;align-items:center;gap:8px;">
                     <div style="flex:1;height:6px;background:var(--border);border-radius:3px;max-width:120px;">
-                        <div style="height:100%;width:{{ (data.exposure / city_limit * 100) if city_limit > 0 else 0 }}%;background:var(--accent);border-radius:3px;"></div>
+                        <div style="height:100%;width:{{ (data.exposure / city_limit * 100) if city_limit > 0 else 0 }}%;background:var(--accent);border-radius:3px;max-width:100%;"></div>
                     </div>
                     <span class="td-mono" style="font-size:11px;">{{ "%.0f%%"|format(data.exposure / city_limit * 100) if city_limit > 0 else '0%' }}</span>
                 </div>
@@ -46,39 +107,7 @@
 </div>
 {% endif %}
 
-{% if positions %}
-<div class="panel">
-    <div class="panel-header">
-        <h3>Open Positions</h3>
-        <span class="tag tag-buy">{{ positions|length }} active</span>
-    </div>
-    <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Side</th><th>Entry</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
-        <tbody>
-        {% for p in positions %}
-        <tr>
-            <td style="font-weight:500;">{{ p.city }}</td>
-            <td class="td-mono" style="font-size:12px;">{{ p.slot_label }}</td>
-            <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
-            <td><span class="tag tag-{{ p.side|lower }}">{{ p.side }}</span></td>
-            <td class="td-mono">{{ "%.4f"|format(p.entry_price) }}</td>
-            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
-            <td class="td-mono">{{ "%.2f"|format(p.shares) }}</td>
-            <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at[:16] }}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% else %}
-<div class="panel">
-    <div class="empty-state">
-        <div class="icon">~</div>
-        <p>No open positions yet. The bot will open positions when it detects profitable edge in weather market pricing.</p>
-    </div>
-</div>
-{% endif %}
-
+<!-- Recently closed -->
 {% if closed_positions %}
 <div class="panel">
     <div class="panel-header">
@@ -86,14 +115,14 @@
         <span style="font-size:11px;color:var(--text-dim);">{{ closed_positions|length }} positions</span>
     </div>
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
         <tbody>
-        {% for p in closed_positions[:20] %}
+        {% for p in closed_positions[:15] %}
         <tr>
             <td style="font-weight:500;">{{ p.city }}</td>
-            <td class="td-mono" style="font-size:12px;">{{ p.slot_label }}</td>
-            <td>{{ p.token_type }}</td>
-            <td class="td-mono">{{ "%.4f"|format(p.entry_price) }}</td>
+            <td style="font-size:11px;">{{ p.slot_label[:35] }}</td>
+            <td><span class="tag tag-stable">{{ p.strategy if p.strategy else 'B' }}</span></td>
+            <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
             <td style="font-size:11px;color:var(--text-muted);">{{ p.closed_at[:16] if p.closed_at else '-' }}</td>
         </tr>

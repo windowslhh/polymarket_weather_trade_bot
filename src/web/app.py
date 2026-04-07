@@ -142,11 +142,40 @@ def create_app(store, rebalancer, config) -> Flask:
     def positions_page():
         cfg = app.config["bot_config"]
         st = app.config["bot_store"]
+        reb = app.config["bot_rebalancer"]
 
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=20))
         exposure = _run_async(st.get_total_exposure())
+        strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
 
+        # Get current prices for P&L calculation
+        gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
+
+        # Enrich positions with current price and unrealized P&L
+        for p in open_pos:
+            current = gamma_prices.get(p["token_id"])
+            if current is not None:
+                p["current_price"] = current
+                p["unrealized_pnl"] = round((current - p["entry_price"]) * p["shares"], 4)
+            else:
+                p["current_price"] = None
+                p["unrealized_pnl"] = None
+            p["strategy"] = p.get("strategy", "B")
+
+        # Group by strategy
+        strategies = {"A": [], "B": [], "C": []}
+        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_exposure = {"A": 0.0, "B": 0.0, "C": 0.0}
+        for p in open_pos:
+            s = p.get("strategy", "B")
+            if s in strategies:
+                strategies[s].append(p)
+                strat_exposure[s] += p["size_usd"]
+                if p["unrealized_pnl"] is not None:
+                    strat_pnl[s] += p["unrealized_pnl"]
+
+        # Group by city
         cities = {}
         for p in open_pos:
             city = p["city"]
@@ -165,6 +194,10 @@ def create_app(store, rebalancer, config) -> Flask:
             global_limit=cfg.strategy.max_total_exposure_usd,
             cities=cities,
             city_limit=cfg.strategy.max_exposure_per_city_usd,
+            strategies=strategies,
+            strat_pnl=strat_pnl,
+            strat_exposure=strat_exposure,
+            strategy_summary=strategy_summary,
         )
 
     @app.route("/markets")
