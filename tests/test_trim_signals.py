@@ -40,17 +40,33 @@ def _make_event_with_slot(lower: float, upper: float, price_no: float = 0.1) -> 
     return event, slot
 
 
-def test_trim_fires_when_ev_below_threshold():
-    """Slot near forecast should have low NO EV and trigger trim."""
-    # Forecast=75, slot=73-77 → forecast is IN the slot → NO win prob is LOW
-    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.5)
+def test_trim_fires_when_ev_clearly_negative():
+    """Slot near forecast with high NO price → negative EV → triggers trim.
+
+    Hold-to-settlement bias: trim only fires when EV < -min_trim_ev (clearly negative),
+    not just below the threshold. This avoids premature exits that lose spread costs.
+    """
+    # Forecast=75, slot=73-77 → forecast IN slot → NO win prob ~0.5
+    # price_no=0.8 → EV = 0.5*(0.2) - 0.5*(0.8) = -0.3 → clearly negative → trim
+    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.8)
     forecast = _make_forecast(75.0)
-    config = StrategyConfig(min_trim_ev=0.005)
+    config = StrategyConfig(min_trim_ev=0.02)
 
     signals = evaluate_trim_signals(event, forecast, [slot], config)
     assert len(signals) == 1
     assert signals[0].side == Side.SELL
     assert signals[0].token_type == TokenType.NO
+
+
+def test_trim_holds_marginal_ev():
+    """Position with EV=0 (at breakeven) should NOT be trimmed — hold to settlement."""
+    # Forecast=75, slot=73-77 → NO win prob ~0.5, price_no=0.5 → EV=0
+    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.5)
+    forecast = _make_forecast(75.0)
+    config = StrategyConfig(min_trim_ev=0.005)
+
+    signals = evaluate_trim_signals(event, forecast, [slot], config)
+    assert len(signals) == 0  # EV=0 is not < -0.005, so hold
 
 
 def test_trim_does_not_fire_when_ev_above_threshold():
@@ -66,16 +82,17 @@ def test_trim_does_not_fire_when_ev_above_threshold():
 
 def test_trim_with_empirical_distribution():
     """Trim uses empirical error distribution when available."""
-    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.5)
+    # Higher NO price to make EV clearly negative
+    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.8)
     forecast = _make_forecast(75.0)
-    config = StrategyConfig(min_trim_ev=0.005)
+    config = StrategyConfig(min_trim_ev=0.02)
 
     # Build distribution with tight errors → high certainty forecast is in slot
     errors = [e * 0.1 for e in range(-20, 21)]  # errors from -2 to +2
     dist = ForecastErrorDistribution("TestCity", errors)
 
     signals = evaluate_trim_signals(event, forecast, [slot], config, error_dist=dist)
-    # Forecast right in slot with tight distribution → NO should lose → trim
+    # Forecast right in slot with tight distribution → NO should lose → EV clearly negative → trim
     assert len(signals) == 1
 
 

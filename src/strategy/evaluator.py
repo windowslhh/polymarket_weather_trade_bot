@@ -289,11 +289,16 @@ def evaluate_trim_signals(
     held_no_slots: list[TempSlot],
     config: StrategyConfig,
     error_dist: ForecastErrorDistribution | None = None,
+    entry_prices: dict[str, float] | None = None,
 ) -> list[TradeSignal]:
     """Generate SELL signals for held NO positions whose EV has decayed.
 
     Unlike exit signals (which trigger on temperature proximity), trim signals
     fire when the expected value drops below min_trim_ev due to forecast changes.
+
+    Hold-to-settlement bias: only trim if EV is negative. Positions with slightly
+    positive EV (between 0 and min_trim_ev) are held since the round-trip spread
+    cost of selling and re-entering is often higher than the EV decay.
     """
     signals: list[TradeSignal] = []
 
@@ -301,7 +306,9 @@ def evaluate_trim_signals(
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
         ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
-        if ev < config.min_trim_ev:
+        # Only trim if EV has gone clearly negative — hold positions with marginal positive EV
+        # to avoid losing round-trip spread costs
+        if ev < -config.min_trim_ev:
             signals.append(TradeSignal(
                 token_type=TokenType.NO,
                 side=Side.SELL,
@@ -311,7 +318,7 @@ def evaluate_trim_signals(
                 estimated_win_prob=win_prob,
             ))
             logger.info(
-                "TRIM signal: %s slot %s EV=%.4f < %.4f (win_prob=%.2f)",
+                "TRIM signal: %s slot %s EV=%.4f < -%.4f (win_prob=%.2f)",
                 event.city, slot.outcome_label, ev, config.min_trim_ev, win_prob,
             )
 
@@ -336,11 +343,13 @@ def evaluate_exit_signals(
         return []
 
     # Adjust exit distance based on trend
-    exit_distance = config.no_distance_threshold_f / 2
+    # Widened thresholds to avoid premature exits (data showed 119/176 positions
+    # were closed before settlement, losing round-trip spread costs)
+    exit_distance = config.no_distance_threshold_f * 0.4
     if trend == TrendState.STABLE:
-        exit_distance = config.no_distance_threshold_f * 0.6  # hold longer
+        exit_distance = config.no_distance_threshold_f * 0.5  # hold longer
     elif trend in (TrendState.BREAKOUT_UP, TrendState.BREAKOUT_DOWN):
-        exit_distance = config.no_distance_threshold_f * 0.35  # exit faster
+        exit_distance = config.no_distance_threshold_f * 0.3  # exit faster but not as aggressively
 
     signals: list[TradeSignal] = []
     for slot in held_no_slots:

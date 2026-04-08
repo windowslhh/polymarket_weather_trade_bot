@@ -107,13 +107,34 @@ class Store:
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        """Create database and tables."""
+        """Create database and tables, applying migrations for missing columns."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.commit()
+
+        # Migrate existing tables: add columns that may be missing
+        await self._migrate_columns()
+
         logger.info("Database initialized at %s", self._db_path)
+
+    async def _migrate_columns(self) -> None:
+        """Add columns to existing tables if they don't exist yet."""
+        migrations = [
+            ("positions", "strategy", "ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
+            ("decision_log", "reason", "ALTER TABLE decision_log ADD COLUMN reason TEXT DEFAULT ''"),
+        ]
+        for table, column, sql in migrations:
+            try:
+                async with self.db.execute(f"PRAGMA table_info({table})") as cursor:
+                    columns = {row[1] async for row in cursor}
+                if column not in columns:
+                    await self.db.execute(sql)
+                    await self.db.commit()
+                    logger.info("Migration: added column '%s' to table '%s'", column, table)
+            except Exception:
+                logger.exception("Migration failed for %s.%s", table, column)
 
     async def close(self) -> None:
         if self._db:

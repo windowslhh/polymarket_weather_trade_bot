@@ -56,10 +56,17 @@ class PortfolioTracker:
         """Total USD exposure for a specific city."""
         return await self._store.get_city_exposure(city, strategy)
 
-    async def get_held_no_slots(self, event_id: str, strategy: str | None = None) -> list[TempSlot]:
+    async def get_held_no_slots(
+        self,
+        event_id: str,
+        strategy: str | None = None,
+        current_prices: dict[str, float] | None = None,
+    ) -> list[TempSlot]:
         """Get TempSlot representations of held NO positions for an event.
 
         Parses temperature bounds from slot_label for accurate probability estimation.
+        Uses current market prices when available (for accurate EV in trim/exit decisions),
+        falling back to entry price if no current price is known.
         """
         from src.markets.discovery import _parse_temp_bounds
 
@@ -71,13 +78,17 @@ class PortfolioTracker:
                     lower, upper = _parse_temp_bounds(pos["slot_label"])
                 except Exception:
                     lower, upper = None, None
+                # Use current market price for EV calculation, fallback to entry price
+                price = pos["entry_price"]
+                if current_prices and pos["token_id"] in current_prices:
+                    price = current_prices[pos["token_id"]]
                 slots.append(TempSlot(
                     token_id_yes="",
                     token_id_no=pos["token_id"],
                     outcome_label=pos["slot_label"],
                     temp_lower_f=lower,
                     temp_upper_f=upper,
-                    price_no=pos["entry_price"],
+                    price_no=price,
                 ))
         return slots
 

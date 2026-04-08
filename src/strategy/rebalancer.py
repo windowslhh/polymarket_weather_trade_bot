@@ -287,15 +287,25 @@ class Rebalancer:
 
             days_ahead = (event.market_date - date.today()).days
 
+            # Collect all evaluated signals across all strategy variants for decision logging
+            all_evaluated_for_event: list[tuple[TradeSignal, str, str]] = []  # (signal, strategy, signal_source)
+
             # Run all strategy variants (A/B/C) in parallel
             variants = get_strategy_variants()
             for strat_name, overrides in variants.items():
                 # Build strategy config for this variant
                 strat_cfg = replace(self._config.strategy, **overrides)
 
-                # Get held positions for this strategy only
+                # Build current prices map from refreshed event slot data
+                current_slot_prices: dict[str, float] = {}
+                for slot in event.slots:
+                    if slot.token_id_no and slot.price_no > 0:
+                        current_slot_prices[slot.token_id_no] = slot.price_no
+
+                # Get held positions for this strategy only (with current prices for EV calc)
                 held_no_slots = await self._portfolio.get_held_no_slots(
                     event.event_id, strategy=strat_name,
+                    current_prices=current_slot_prices,
                 )
                 held_token_ids = {s.token_id_no for s in held_no_slots}
 
@@ -303,6 +313,12 @@ class Rebalancer:
                 db_city_exp = await self._portfolio.get_city_exposure(event.city, strategy=strat_name)
                 strat_city_exp = db_city_exp + cycle_city_additions.get(f"{strat_name}:{event.city}", 0.0)
                 strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
+
+                # Count existing positions for this event+strategy
+                existing_positions = await self._portfolio._store.get_open_positions(
+                    event_id=event.event_id, strategy=strat_name,
+                )
+                event_pos_count = len(existing_positions)
 
                 # Phase 4: NO signals
                 no_signals = evaluate_no_signals(
@@ -328,9 +344,12 @@ class Rebalancer:
                 )
 
                 # Size and tag entry signals with strategy label
+                # Cap new positions per event to avoid over-concentration
+                max_new = max(0, strat_cfg.max_positions_per_event - event_pos_count)
+                new_count = 0
                 for signal in no_signals + ladder_signals + yes_signals:
                     size = compute_size(signal, strat_city_exp, strat_total_exp, strat_cfg)
-                    if size > 0:
+                    if size > 0 and new_count < max_new:
                         signal.suggested_size_usd = size
                         signal.strategy = strat_name
                         all_signals.append(signal)
@@ -338,6 +357,10 @@ class Rebalancer:
                         strat_total_exp += size
                         key = f"{strat_name}:{event.city}"
                         cycle_city_additions[key] = cycle_city_additions.get(key, 0.0) + size
+                        new_count += 1
+                    elif size > 0 and new_count >= max_new:
+                        # Mark as capped for decision log
+                        signal._capped_by_event_limit = True  # type: ignore[attr-defined]
 
                 # Tag exit/trim signals
                 for signal in exit_signals + trim_signals:
@@ -345,38 +368,49 @@ class Rebalancer:
                 all_signals.extend(exit_signals)
                 all_signals.extend(trim_signals)
 
-            # Log decisions to DB with reasons
-            all_evaluated = no_signals + ladder_signals + exit_signals + trim_signals + yes_signals
-            for signal in all_evaluated:
+                # Accumulate all evaluated signals for this strategy (for decision logging)
+                for s in no_signals:
+                    all_evaluated_for_event.append((s, strat_name, "NO"))
+                for s in ladder_signals:
+                    all_evaluated_for_event.append((s, strat_name, "LADDER"))
+                for s in exit_signals:
+                    all_evaluated_for_event.append((s, strat_name, "EXIT"))
+                for s in trim_signals:
+                    all_evaluated_for_event.append((s, strat_name, "TRIM"))
+                for s in yes_signals:
+                    all_evaluated_for_event.append((s, strat_name, "YES"))
+
+            # Log decisions to DB with reasons (all strategies, not just the last)
+            for signal, strat_name, source in all_evaluated_for_event:
                 if signal.side.value == "SELL":
                     action = "SELL"
-                    # Determine sell reason
-                    if signal in exit_signals:
-                        reason = f"EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else "EXIT: temp approaching"
-                    elif signal in trim_signals:
-                        reason = f"TRIM: EV decayed to {signal.expected_value:.3f}"
+                    if source == "EXIT":
+                        reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
+                    elif source == "TRIM":
+                        reason = f"[{strat_name}] TRIM: EV decayed to {signal.expected_value:.3f}"
                     else:
-                        reason = "SELL"
+                        reason = f"[{strat_name}] SELL"
                 elif signal.side.value == "BUY" and signal.suggested_size_usd > 0:
                     action = "BUY"
                     dist = abs(forecast.predicted_high_f - (signal.slot.temp_midpoint_f or 0))
-                    if signal in ladder_signals:
-                        reason = f"LADDER: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
-                    elif signal in no_signals:
-                        reason = f"NO: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
-                    elif signal in yes_signals:
-                        reason = f"YES confirm: daily_max in slot, {hours_to_settle:.0f}h left" if hours_to_settle else "YES confirm"
+                    if source == "LADDER":
+                        reason = f"[{strat_name}] LADDER: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
+                    elif source == "NO":
+                        reason = f"[{strat_name}] NO: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
+                    elif source == "YES":
+                        reason = f"[{strat_name}] YES confirm: daily_max in slot, {hours_to_settle:.0f}h left" if hours_to_settle else f"[{strat_name}] YES confirm"
                     else:
-                        reason = f"BUY: EV={signal.expected_value:.3f}"
+                        reason = f"[{strat_name}] BUY: EV={signal.expected_value:.3f}"
                 else:
                     action = "SKIP"
-                    # Explain why skipped
-                    if signal.suggested_size_usd <= 0 and signal.expected_value > 0:
-                        reason = "Kelly size < $0.10 (positive EV but too small)"
+                    if getattr(signal, '_capped_by_event_limit', False):
+                        reason = f"[{strat_name}] Max positions per event reached ({strat_cfg.max_positions_per_event})"
+                    elif signal.suggested_size_usd <= 0 and signal.expected_value > 0:
+                        reason = f"[{strat_name}] Kelly size < $0.10 (positive EV but too small)"
                     elif signal.expected_value <= 0:
-                        reason = f"Negative EV ({signal.expected_value:.3f})"
+                        reason = f"[{strat_name}] Negative EV ({signal.expected_value:.3f})"
                     else:
-                        reason = "Size=0 (exposure limit or Kelly too small)"
+                        reason = f"[{strat_name}] Size=0 (exposure limit or Kelly too small)"
 
                 try:
                     await self._portfolio._store.insert_decision_log(
