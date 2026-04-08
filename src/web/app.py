@@ -108,6 +108,7 @@ def create_app(store, rebalancer, config) -> Flask:
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0}
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
@@ -133,6 +134,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "signals": signals,
             "cities_with_positions": len(set(p["city"] for p in positions)),
             "strategy_summary": strategy_summary,
+            "strat_realized": strat_realized,
         }
         _set_cache("dashboard", data)
         return data
@@ -157,6 +159,7 @@ def create_app(store, rebalancer, config) -> Flask:
             forecasts=d["state"].get("forecasts", {}),
             realized=d["daily_pnl_val"] or 0.0,
             strategy_summary=d.get("strategy_summary", []),
+            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -173,6 +176,7 @@ def create_app(store, rebalancer, config) -> Flask:
         closed_pos = _run_async(st.get_closed_positions(limit=20))
         exposure = _run_async(st.get_total_exposure())
         strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0}
 
         # Get current prices for P&L calculation
         gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
@@ -190,7 +194,7 @@ def create_app(store, rebalancer, config) -> Flask:
 
         # Group by strategy
         strategies = {"A": [], "B": [], "C": []}
-        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}  # unrealized
         strat_exposure = {"A": 0.0, "B": 0.0, "C": 0.0}
         for p in open_pos:
             s = p.get("strategy", "B")
@@ -221,6 +225,7 @@ def create_app(store, rebalancer, config) -> Flask:
             city_limit=cfg.strategy.max_exposure_per_city_usd,
             strategies=strategies,
             strat_pnl=strat_pnl,
+            strat_realized=strat_realized,
             strat_exposure=strat_exposure,
             strategy_summary=strategy_summary,
         )

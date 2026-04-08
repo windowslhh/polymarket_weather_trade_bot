@@ -14,21 +14,21 @@
         <div class="metric-value">${{ "%.2f"|format(total_exposure) }}</div>
         <div class="metric-sub">of ${{ "%.0f"|format(global_limit) }} ({{ "%.0f%%"|format(total_exposure / global_limit * 100) if global_limit > 0 else '0%' }})</div>
     </div>
+    {% for s in ['A', 'B', 'C'] %}
+    {% set total = strat_realized[s] + strat_pnl[s] %}
     <div class="metric-card">
-        <div class="metric-label">Strat A P&L</div>
-        <div class="metric-value {{ 'positive' if strat_pnl.A >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.A) }}</div>
-        <div class="metric-sub">{{ strategies.A|length }} pos / ${{ "%.1f"|format(strat_exposure.A) }}</div>
+        <div class="metric-label">Strat {{ s }} P&L</div>
+        <div class="metric-value {{ 'positive' if total >= 0 else 'negative' }}">{{ '+' if total > 0 else '' }}${{ "%.2f"|format(total) }}</div>
+        <div class="metric-sub" style="display:flex;flex-direction:column;gap:2px;">
+            <span>{{ strategies[s]|length }} pos / ${{ "%.1f"|format(strat_exposure[s]) }}</span>
+            <span style="font-size:10px;">
+                realized <span class="{{ 'positive' if strat_realized[s] >= 0 else 'negative' }}">{{ '+' if strat_realized[s] > 0 else '' }}${{ "%.2f"|format(strat_realized[s]) }}</span>
+                &nbsp;|&nbsp;
+                unrealized <span class="{{ 'positive' if strat_pnl[s] >= 0 else 'negative' }}">{{ '+' if strat_pnl[s] > 0 else '' }}${{ "%.2f"|format(strat_pnl[s]) }}</span>
+            </span>
+        </div>
     </div>
-    <div class="metric-card">
-        <div class="metric-label">Strat B P&L</div>
-        <div class="metric-value {{ 'positive' if strat_pnl.B >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.B) }}</div>
-        <div class="metric-sub">{{ strategies.B|length }} pos / ${{ "%.1f"|format(strat_exposure.B) }}</div>
-    </div>
-    <div class="metric-card">
-        <div class="metric-label">Strat C P&L</div>
-        <div class="metric-value {{ 'positive' if strat_pnl.C >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.C) }}</div>
-        <div class="metric-sub">{{ strategies.C|length }} pos / ${{ "%.1f"|format(strat_exposure.C) }}</div>
-    </div>
+    {% endfor %}
 </div>
 
 <!-- Positions by Strategy -->
@@ -43,9 +43,11 @@
         <div style="display:flex;gap:16px;font-size:12px;">
             <span style="color:var(--text-muted);">{{ strat_positions|length }} positions</span>
             <span style="color:var(--text-muted);">${{ "%.2f"|format(strat_exposure[strat_name]) }}</span>
-            <span class="{{ 'positive' if strat_pnl[strat_name] >= 0 else 'negative' }}" style="font-weight:600;">
-                {{ '+' if strat_pnl[strat_name] > 0 else '' }}${{ "%.2f"|format(strat_pnl[strat_name]) }}
+            {% set strat_total = strat_realized[strat_name] + strat_pnl[strat_name] %}
+            <span class="{{ 'positive' if strat_total >= 0 else 'negative' }}" style="font-weight:600;">
+                {{ '+' if strat_total > 0 else '' }}${{ "%.2f"|format(strat_total) }}
             </span>
+            <span style="color:var(--text-dim);font-size:11px;">(R:{{ '+' if strat_realized[strat_name] > 0 else '' }}${{ "%.1f"|format(strat_realized[strat_name]) }} / U:{{ '+' if strat_pnl[strat_name] > 0 else '' }}${{ "%.1f"|format(strat_pnl[strat_name]) }})</span>
         </div>
     </div>
     {% if strat_positions %}

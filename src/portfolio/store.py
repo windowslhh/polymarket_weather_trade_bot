@@ -333,24 +333,31 @@ class Store:
             return [dict(row) for row in rows]
 
     async def get_strategy_settlements(self) -> list[dict]:
-        """Get settlement P&L per strategy."""
+        """Get settlement P&L per strategy from the settlements table."""
         async with self.db.execute("""
-            SELECT p.strategy,
+            SELECT strategy,
                    COUNT(*) as settled_count,
-                   ROUND(SUM(CASE
-                       WHEN s.winning_outcome IS NOT NULL
-                            AND p.slot_label NOT IN (s.winning_outcome)
-                       THEN (1.0 - p.entry_price) * p.shares
-                       ELSE -(p.entry_price * p.shares)
-                   END), 2) as estimated_pnl
-            FROM positions p
-            LEFT JOIN settlements s ON p.event_id = s.event_id
-            WHERE p.status = 'settled'
-            GROUP BY p.strategy
-            ORDER BY p.strategy
+                   ROUND(SUM(pnl), 2) as realized_pnl
+            FROM settlements
+            GROUP BY strategy
+            ORDER BY strategy
         """) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def get_strategy_realized_pnl(self) -> dict[str, float]:
+        """Get realized P&L per strategy as a simple dict {A: $X, B: $Y, C: $Z}."""
+        result = {"A": 0.0, "B": 0.0, "C": 0.0}
+        async with self.db.execute("""
+            SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
+            FROM settlements
+            GROUP BY strategy
+        """) as cursor:
+            async for row in cursor:
+                s = row[0]
+                if s in result:
+                    result[s] = float(row[1])
+        return result
 
     async def get_closed_positions(self, limit: int = 20) -> list[dict]:
         async with self.db.execute(

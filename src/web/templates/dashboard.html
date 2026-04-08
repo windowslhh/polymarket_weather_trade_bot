@@ -50,7 +50,7 @@
     <div class="panel">
         <div class="panel-header"><h3>Strategy A/B/C</h3></div>
         <table>
-            <thead><tr><th>Strat</th><th>Style</th><th>Open</th><th>Settled</th><th>Exposure</th></tr></thead>
+            <thead><tr><th>Strat</th><th>Style</th><th>Open</th><th>Settled</th><th>Exposure</th><th>Realized</th></tr></thead>
             <tbody>
             {% for s in strategy_summary %}
             <tr>
@@ -59,6 +59,9 @@
                 <td class="td-mono">{{ s.open_positions }}</td>
                 <td class="td-mono">{{ s.settled_positions }}</td>
                 <td class="td-mono">${{ "%.1f"|format(s.exposure) }}</td>
+                <td class="td-mono {{ 'positive' if strat_realized.get(s.strategy, 0) >= 0 else 'negative' }}" style="font-weight:600;">
+                    {{ '+' if strat_realized.get(s.strategy, 0) > 0 else '' }}${{ "%.2f"|format(strat_realized.get(s.strategy, 0)) }}
+                </td>
             </tr>
             {% endfor %}
             </tbody>
