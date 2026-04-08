@@ -52,12 +52,13 @@
     </div>
     {% if strat_positions %}
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
         <tbody>
         {% for p in strat_positions %}
         <tr>
             <td style="font-weight:500;">{{ p.city }}</td>
-            <td style="font-size:11px;">{{ p.slot_label[:40] }}</td>
+            <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
+            <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > p.entry_price else 'var(--red-text)' if p.current_price < p.entry_price else 'var(--text)' }}{% endif %}">
@@ -117,12 +118,13 @@
         <span style="font-size:11px;color:var(--text-dim);">{{ closed_positions|length }} positions</span>
     </div>
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
         <tbody>
         {% for p in closed_positions[:15] %}
         <tr>
             <td style="font-weight:500;">{{ p.city }}</td>
-            <td style="font-size:11px;">{{ p.slot_label[:35] }}</td>
+            <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
+            <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag tag-stable">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>

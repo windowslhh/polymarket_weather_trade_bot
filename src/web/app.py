@@ -54,6 +54,40 @@ def _set_cache(key: str, val: object):
     _cache[key] = (time.time(), val)
 
 
+def _parse_slot_label(label: str) -> tuple[str, str]:
+    """Extract short slot description and market date from full slot_label.
+
+    'Will the highest temperature in Seattle be between 66-67°F on April 5?'
+    → ('66-67°F', 'Apr 5')
+
+    'Will the highest temperature in Chicago be 56°F or higher on April 5?'
+    → ('≥56°F', 'Apr 5')
+    """
+    import re
+    # Extract temperature part
+    temp = ""
+    m = re.search(r'between (\d+-\d+°F)', label)
+    if m:
+        temp = m.group(1)
+    else:
+        m = re.search(r'be (\d+°F or higher)', label)
+        if m:
+            temp = "≥" + m.group(1).replace(" or higher", "")
+        else:
+            m = re.search(r'be (\d+°F or lower)', label)
+            if m:
+                temp = "≤" + m.group(1).replace(" or lower", "")
+
+    # Extract date
+    market_date = ""
+    m = re.search(r'on (April|March|May|June|July) (\d+)', label)
+    if m:
+        month_short = {"March": "Mar", "April": "Apr", "May": "May", "June": "Jun", "July": "Jul"}
+        market_date = f"{month_short.get(m.group(1), m.group(1))} {m.group(2)}"
+
+    return (temp or label[:25], market_date)
+
+
 def _utc_to_beijing(utc_str: str) -> str:
     """Convert UTC datetime string to Beijing time (UTC+8)."""
     if not utc_str or len(utc_str) < 16:
@@ -181,7 +215,7 @@ def create_app(store, rebalancer, config) -> Flask:
         # Get current prices for P&L calculation
         gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
 
-        # Enrich positions with current price and unrealized P&L
+        # Enrich positions with current price, unrealized P&L, and parsed slot info
         for p in open_pos:
             current = gamma_prices.get(p["token_id"])
             if current is not None:
@@ -191,6 +225,11 @@ def create_app(store, rebalancer, config) -> Flask:
                 p["current_price"] = None
                 p["unrealized_pnl"] = None
             p["strategy"] = p.get("strategy", "B")
+            p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
+
+        # Enrich closed positions with parsed slot info
+        for p in closed_pos:
+            p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
         # Group by strategy
         strategies = {"A": [], "B": [], "C": []}
@@ -273,10 +312,12 @@ def create_app(store, rebalancer, config) -> Flask:
             pnl = round((current - entry) * p["shares"], 3) if current else None
             reason_key = (p["city"], p.get("slot_label", ""))
             reason = buy_reasons.get(reason_key, "")
+            slot_short, market_date = _parse_slot_label(p.get("slot_label", ""))
             timeline.append({
                 "time": p["created_at"][:16] if p.get("created_at") else "",
                 "city": p["city"],
-                "slot": p["slot_label"][:40] if p.get("slot_label") else "",
+                "slot": slot_short,
+                "market_date": market_date,
                 "strategy": p.get("strategy", "B"),
                 "action": "BUY",
                 "forecast": "",
@@ -301,10 +342,12 @@ def create_app(store, rebalancer, config) -> Flask:
 
         for p in closed_pos:
             reason_key = (p["city"], p.get("slot_label", ""))
+            slot_short, market_date = _parse_slot_label(p.get("slot_label", ""))
             timeline.append({
                 "time": p.get("closed_at", "")[:16] if p.get("closed_at") else "",
                 "city": p["city"],
-                "slot": p["slot_label"][:40] if p.get("slot_label") else "",
+                "slot": slot_short,
+                "market_date": market_date,
                 "strategy": p.get("strategy", "B"),
                 "action": "SELL",
                 "forecast": "", "win_prob": "", "ev": "",
@@ -319,10 +362,12 @@ def create_app(store, rebalancer, config) -> Flask:
         # 3. SKIP decisions
         for d in decisions:
             if d.get("action") == "SKIP":
+                skip_slot_short, skip_market_date = _parse_slot_label(d.get("slot_label", ""))
                 timeline.append({
                     "time": d["cycle_at"][:16] if d.get("cycle_at") else "",
                     "city": d.get("city", ""),
-                    "slot": d["slot_label"][:40] if d.get("slot_label") else "",
+                    "slot": skip_slot_short,
+                    "market_date": skip_market_date,
                     "strategy": "",
                     "action": "SKIP",
                     "forecast": f"{d['forecast_high_f']:.0f}°F" if d.get("forecast_high_f") else "-",
