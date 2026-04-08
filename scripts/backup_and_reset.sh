@@ -22,12 +22,15 @@ BACKUP_FILE="$BACKUP_DIR/bot_old_strategy_${TIMESTAMP}.db"
 cp "$DB_PATH" "$BACKUP_FILE"
 echo "Old database backed up to: $BACKUP_FILE"
 
-# 4. Reset database: remove old positions/orders/decisions but keep edge_history for reference
-sqlite3 "$DB_PATH" <<SQL
--- Save settlement summary before clearing
-CREATE TABLE IF NOT EXISTS old_strategy_summary AS
+# 4. Reset database using Python (sqlite3 CLI not available on VPS)
+python3 -c "
+import sqlite3
+db = sqlite3.connect('$DB_PATH')
+
+# Save settlement summary before clearing
+db.execute('''CREATE TABLE IF NOT EXISTS old_strategy_summary AS
 SELECT
-    'old_strategy_apr7_8' as run_label,
+    'old_strategy' as run_label,
     strategy,
     COUNT(*) as total_positions,
     SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_positions,
@@ -37,20 +40,19 @@ SELECT
     MIN(created_at) as first_trade,
     MAX(created_at) as last_trade
 FROM positions
-GROUP BY strategy;
+GROUP BY strategy''')
 
--- Clear trading data for fresh start
-DELETE FROM positions;
-DELETE FROM orders;
-DELETE FROM daily_pnl;
-DELETE FROM settlements;
-DELETE FROM decision_log;
--- Keep edge_history for analytics reference
+# Clear trading data for fresh start
+for t in ['positions', 'orders', 'daily_pnl', 'settlements', 'decision_log']:
+    db.execute(f'DELETE FROM {t}')
 
--- Reset auto-increment counters
-DELETE FROM sqlite_sequence WHERE name IN ('positions', 'orders', 'settlements', 'decision_log');
+# Reset auto-increment counters
+db.execute(\"DELETE FROM sqlite_sequence WHERE name IN ('positions','orders','settlements','decision_log')\")
 
-SQL
+db.commit()
+db.close()
+print('Database reset OK')
+"
 
 echo "Database reset complete. Old strategy summary saved in old_strategy_summary table."
 
