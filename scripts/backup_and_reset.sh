@@ -1,0 +1,68 @@
+#!/bin/bash
+# Backup old database and reset for new strategy run
+# Usage: ssh to VPS, then run this script
+
+set -e
+
+BOT_DIR="/opt/weather-bot"
+DB_PATH="$BOT_DIR/data/bot.db"
+BACKUP_DIR="$BOT_DIR/data/backups"
+
+# 1. Stop the bot
+echo "Stopping bot..."
+cd "$BOT_DIR"
+docker compose stop
+
+# 2. Create backup directory
+mkdir -p "$BACKUP_DIR"
+
+# 3. Backup current database with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/bot_old_strategy_${TIMESTAMP}.db"
+cp "$DB_PATH" "$BACKUP_FILE"
+echo "Old database backed up to: $BACKUP_FILE"
+
+# 4. Reset database: remove old positions/orders/decisions but keep edge_history for reference
+sqlite3 "$DB_PATH" <<SQL
+-- Save settlement summary before clearing
+CREATE TABLE IF NOT EXISTS old_strategy_summary AS
+SELECT
+    'old_strategy_apr7_8' as run_label,
+    strategy,
+    COUNT(*) as total_positions,
+    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_positions,
+    SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_positions,
+    SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) as settled_positions,
+    ROUND(SUM(size_usd), 2) as total_invested,
+    MIN(created_at) as first_trade,
+    MAX(created_at) as last_trade
+FROM positions
+GROUP BY strategy;
+
+-- Clear trading data for fresh start
+DELETE FROM positions;
+DELETE FROM orders;
+DELETE FROM daily_pnl;
+DELETE FROM settlements;
+DELETE FROM decision_log;
+-- Keep edge_history for analytics reference
+
+-- Reset auto-increment counters
+DELETE FROM sqlite_sequence WHERE name IN ('positions', 'orders', 'settlements', 'decision_log');
+
+SQL
+
+echo "Database reset complete. Old strategy summary saved in old_strategy_summary table."
+
+# 5. Restart bot with new strategy
+docker compose up -d --build
+echo "Bot restarted with new strategy."
+
+# 6. Wait and verify
+sleep 10
+echo "Verifying..."
+curl -s http://localhost:5001/api/status | python3 -m json.tool
+
+echo ""
+echo "Done! New strategy is running clean."
+echo "Old data backup: $BACKUP_FILE"
