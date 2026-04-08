@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL,
     city TEXT NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'B',
     winning_outcome TEXT,
     pnl REAL NOT NULL DEFAULT 0,
     settled_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -124,6 +125,7 @@ class Store:
         migrations = [
             ("positions", "strategy", "ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             ("decision_log", "reason", "ALTER TABLE decision_log ADD COLUMN reason TEXT DEFAULT ''"),
+            ("settlements", "strategy", "ALTER TABLE settlements ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
         ]
         for table, column, sql in migrations:
             try:
@@ -366,19 +368,21 @@ class Store:
 
     async def insert_settlement(
         self, event_id: str, city: str, winning_outcome: str, pnl: float,
+        strategy: str = "B",
     ) -> None:
-        # Check if already exists to prevent duplicate P&L
+        # Check if already exists for this event+strategy to prevent duplicate P&L
         async with self.db.execute(
-            "SELECT COUNT(*) FROM settlements WHERE event_id = ?", (event_id,)
+            "SELECT COUNT(*) FROM settlements WHERE event_id = ? AND strategy = ?",
+            (event_id, strategy),
         ) as cursor:
             row = await cursor.fetchone()
             if row and row[0] > 0:
                 return  # Already settled, skip
 
         await self.db.execute(
-            """INSERT INTO settlements (event_id, city, winning_outcome, pnl)
-               VALUES (?, ?, ?, ?)""",
-            (event_id, city, winning_outcome, pnl),
+            """INSERT INTO settlements (event_id, city, strategy, winning_outcome, pnl)
+               VALUES (?, ?, ?, ?, ?)""",
+            (event_id, city, strategy, winning_outcome, pnl),
         )
         await self.db.commit()
 

@@ -81,11 +81,18 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             winning_slot, settled_prices = outcome
             logger.info("Settlement detected: %s — winning slot: %s", city, winning_slot)
 
+            # Compute P&L per strategy for separate tracking
+            from collections import defaultdict
+            strategy_pnl: dict[str, float] = defaultdict(float)
+            strategy_count: dict[str, int] = defaultdict(int)
             total_pnl = 0.0
             settled_count = 0
 
             for pos in positions:
                 pnl = _compute_position_pnl(pos, settled_prices)
+                strat = pos.get("strategy", "B")
+                strategy_pnl[strat] += pnl
+                strategy_count[strat] += 1
                 total_pnl += pnl
                 settled_count += 1
 
@@ -94,13 +101,18 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                     (pos["id"],),
                 )
                 logger.info(
-                    "  Position %d: %s %s %s → P&L=$%.2f",
-                    pos["id"], pos["side"], pos["token_type"],
+                    "  Position %d [%s]: %s %s %s → P&L=$%.2f",
+                    pos["id"], strat, pos["side"], pos["token_type"],
                     pos["slot_label"][:30], pnl,
                 )
 
             await store.db.commit()
-            await store.insert_settlement(event_id, city, winning_slot, total_pnl)
+
+            # Insert one settlement record per strategy (for per-strategy P&L tracking)
+            for strat, pnl in strategy_pnl.items():
+                await store.insert_settlement(event_id, city, winning_slot, pnl, strategy=strat)
+                logger.info("  Strategy %s: %d positions, P&L=$%.2f", strat, strategy_count[strat], pnl)
+
             await _update_realized_pnl(store, date.today().isoformat(), total_pnl)
 
             results.append(SettlementResult(
