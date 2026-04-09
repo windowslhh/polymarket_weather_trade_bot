@@ -41,29 +41,30 @@ class StrategyConfig:
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Three strategy variants running in parallel for A/B testing.
+    """Six strategy variants running in parallel for A/B testing.
 
-    A = Conservative: NO only on distant slots (>8°F), no ladder, low max price
+    NEW strategies (optimized from Apr 5-9 data):
+    A = Conservative: NO only on distant slots, no ladder, strict price cap
     B = Moderate: Ladder with 4°F min distance, balanced EV thresholds
     C = Aggressive: Wider ladder, more trades but capped price
 
-    Key tuning from Apr 5-6 data:
-    - Lowered max_no_price across all variants (0.90→0.80, 0.85→0.75, 0.80→0.70)
-      because 43% of positions at >$0.90 entry had terrible risk/reward
-    - Raised min_no_ev to filter out marginal trades
-    - Added max_positions_per_event to prevent over-concentration (5-8 per event was too many)
-    - Raised min_trim_ev to 0.02 to prevent premature exits (119/176 positions were closed
-      before settlement, losing round-trip spread)
+    OLD strategies (control group, original params from Apr 5-6):
+    D = Old Conservative: original A params
+    E = Old Moderate: original B params
+    F = Old Aggressive: original C params
+
+    All strategies now benefit from EXIT bug fix (no false exits on future markets).
     """
     return {
+        # --- NEW strategies (optimized) ---
         "A": {
             "no_distance_threshold_f": 8,
             "min_no_ev": 0.05,
             "ladder_width": 0,  # disabled — conservative, distant-only NO
             "ladder_min_ev": 1.0,  # effectively disabled
             "ladder_min_distance_f": 99.0,
-            "max_no_price": 0.70,  # lowered from 0.80 — avoid 0.70-0.80 risk zone
-            "max_position_per_slot_usd": 5.0,  # raised from 3.0 — concentrate on fewer, better bets
+            "max_no_price": 0.70,
+            "max_position_per_slot_usd": 5.0,
             "max_exposure_per_city_usd": 30.0,
             "day_ahead_ev_discount": 0.6,
             "min_trim_ev": 0.02,
@@ -71,11 +72,11 @@ def get_strategy_variants() -> dict[str, dict]:
         },
         "B": {
             "no_distance_threshold_f": 8,
-            "min_no_ev": 0.05,  # raised from 0.03 — require higher edge
+            "min_no_ev": 0.05,
             "ladder_width": 3,
-            "ladder_min_ev": 0.05,  # raised from 0.03
+            "ladder_min_ev": 0.05,
             "ladder_min_distance_f": 4.0,
-            "max_no_price": 0.75,  # lowered from 0.85 — the 0.80-0.90 bucket had worst outcomes
+            "max_no_price": 0.75,
             "max_position_per_slot_usd": 3.0,
             "max_exposure_per_city_usd": 30.0,
             "day_ahead_ev_discount": 0.7,
@@ -83,17 +84,57 @@ def get_strategy_variants() -> dict[str, dict]:
             "max_positions_per_event": 4,
         },
         "C": {
-            "no_distance_threshold_f": 8,  # raised from 6 — 6°F threshold let in too much noise
-            "min_no_ev": 0.03,  # raised from 0.02
+            "no_distance_threshold_f": 8,
+            "min_no_ev": 0.03,
             "ladder_width": 4,
-            "ladder_min_ev": 0.03,  # raised from 0.02
-            "ladder_min_distance_f": 3.0,  # raised from 2.0 — avoid center slots
-            "max_no_price": 0.80,  # lowered from 0.90
-            "max_position_per_slot_usd": 2.0,  # raised from 1.5 — slightly larger positions
-            "max_exposure_per_city_usd": 25.0,  # raised from 20 to compensate for fewer trades
+            "ladder_min_ev": 0.03,
+            "ladder_min_distance_f": 3.0,
+            "max_no_price": 0.80,
+            "max_position_per_slot_usd": 2.0,
+            "max_exposure_per_city_usd": 25.0,
             "day_ahead_ev_discount": 0.8,
             "min_trim_ev": 0.02,
             "max_positions_per_event": 4,
+        },
+        # --- OLD strategies (control group) ---
+        "D": {  # Old A: Conservative original
+            "no_distance_threshold_f": 8,
+            "min_no_ev": 0.05,
+            "ladder_width": 0,
+            "ladder_min_ev": 1.0,
+            "ladder_min_distance_f": 99.0,
+            "max_no_price": 0.80,  # original higher cap
+            "max_position_per_slot_usd": 3.0,  # original smaller size
+            "max_exposure_per_city_usd": 30.0,
+            "day_ahead_ev_discount": 0.6,
+            "min_trim_ev": 0.005,  # original low trim threshold
+            "max_positions_per_event": 8,  # original no real cap
+        },
+        "E": {  # Old B: Moderate original
+            "no_distance_threshold_f": 8,
+            "min_no_ev": 0.03,  # original lower threshold
+            "ladder_width": 3,
+            "ladder_min_ev": 0.03,
+            "ladder_min_distance_f": 4.0,
+            "max_no_price": 0.85,  # original higher cap
+            "max_position_per_slot_usd": 3.0,
+            "max_exposure_per_city_usd": 30.0,
+            "day_ahead_ev_discount": 0.7,
+            "min_trim_ev": 0.005,
+            "max_positions_per_event": 8,
+        },
+        "F": {  # Old C: Aggressive original
+            "no_distance_threshold_f": 6,  # original tighter
+            "min_no_ev": 0.02,
+            "ladder_width": 4,
+            "ladder_min_ev": 0.02,
+            "ladder_min_distance_f": 2.0,  # original closer
+            "max_no_price": 0.90,  # original very high cap
+            "max_position_per_slot_usd": 1.5,
+            "max_exposure_per_city_usd": 20.0,
+            "day_ahead_ev_discount": 0.8,
+            "min_trim_ev": 0.005,
+            "max_positions_per_event": 8,
         },
     }
 

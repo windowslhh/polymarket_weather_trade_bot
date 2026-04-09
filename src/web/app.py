@@ -231,10 +231,11 @@ def create_app(store, rebalancer, config) -> Flask:
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
-        # Group by strategy
-        strategies = {"A": [], "B": [], "C": []}
-        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}  # unrealized
-        strat_exposure = {"A": 0.0, "B": 0.0, "C": 0.0}
+        # Group by strategy (dynamic: supports A-F)
+        all_strats = sorted({p.get("strategy", "B") for p in open_pos} | {"A", "B", "C", "D", "E", "F"})
+        strategies = {s: [] for s in all_strats}
+        strat_pnl = {s: 0.0 for s in all_strats}  # unrealized
+        strat_exposure = {s: 0.0 for s in all_strats}
         for p in open_pos:
             s = p.get("strategy", "B")
             if s in strategies:
@@ -382,10 +383,11 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Compute per-strategy stats
-        strat_pnl = {"A": 0.0, "B": 0.0, "C": 0.0}
-        strat_exposure = {"A": 0.0, "B": 0.0, "C": 0.0}
-        strat_counts = {"A": {"open": 0, "settled": 0}, "B": {"open": 0, "settled": 0}, "C": {"open": 0, "settled": 0}}
+        # Compute per-strategy stats (dynamic: supports A-F)
+        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C"})
+        strat_pnl = {s: 0.0 for s in all_strats}
+        strat_exposure = {s: 0.0 for s in all_strats}
+        strat_counts = {s: {"open": 0, "settled": 0} for s in all_strats}
         for p in open_pos:
             s = p.get("strategy", "B")
             if s in strat_pnl:

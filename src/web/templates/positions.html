@@ -14,30 +14,34 @@
         <div class="metric-value">${{ "%.2f"|format(total_exposure) }}</div>
         <div class="metric-sub">of ${{ "%.0f"|format(global_limit) }} ({{ "%.0f%%"|format(total_exposure / global_limit * 100) if global_limit > 0 else '0%' }})</div>
     </div>
-    {% for s in ['A', 'B', 'C'] %}
-    {% set total = strat_realized[s] + strat_pnl[s] %}
+    {% for s in strategies.keys()|sort %}
+    {% set total = strat_realized.get(s, 0) + strat_pnl.get(s, 0) %}
+    {% if strategies[s]|length > 0 or strat_realized.get(s, 0) != 0 %}
     <div class="metric-card">
-        <div class="metric-label">Strat {{ s }} P&L</div>
+        <div class="metric-label">{{ s }}{% if s <= 'C' %} (new){% else %} (old){% endif %} P&L</div>
         <div class="metric-value {{ 'positive' if total >= 0 else 'negative' }}">{{ '+' if total > 0 else '' }}${{ "%.2f"|format(total) }}</div>
         <div class="metric-sub" style="display:flex;flex-direction:column;gap:2px;">
-            <span>{{ strategies[s]|length }} pos / ${{ "%.1f"|format(strat_exposure[s]) }}</span>
+            <span>{{ strategies[s]|length }} pos / ${{ "%.1f"|format(strat_exposure.get(s, 0)) }}</span>
             <span style="font-size:10px;">
-                realized <span class="{{ 'positive' if strat_realized[s] >= 0 else 'negative' }}">{{ '+' if strat_realized[s] > 0 else '' }}${{ "%.2f"|format(strat_realized[s]) }}</span>
+                R:<span class="{{ 'positive' if strat_realized.get(s, 0) >= 0 else 'negative' }}">{{ '+' if strat_realized.get(s, 0) > 0 else '' }}${{ "%.2f"|format(strat_realized.get(s, 0)) }}</span>
                 &nbsp;|&nbsp;
-                unrealized <span class="{{ 'positive' if strat_pnl[s] >= 0 else 'negative' }}">{{ '+' if strat_pnl[s] > 0 else '' }}${{ "%.2f"|format(strat_pnl[s]) }}</span>
+                U:<span class="{{ 'positive' if strat_pnl.get(s, 0) >= 0 else 'negative' }}">{{ '+' if strat_pnl.get(s, 0) > 0 else '' }}${{ "%.2f"|format(strat_pnl.get(s, 0)) }}</span>
             </span>
         </div>
     </div>
+    {% endif %}
     {% endfor %}
 </div>
 
 <!-- Positions by Strategy -->
-{% for strat_name, strat_label in [('A','Conservative'), ('B','Moderate'), ('C','Aggressive')] %}
+{% set strat_labels = {'A':'New Conservative', 'B':'New Moderate', 'C':'New Aggressive', 'D':'Old Conservative', 'E':'Old Moderate', 'F':'Old Aggressive'} %}
+{% for strat_name in strategies.keys()|sort %}
+{% set strat_label = strat_labels.get(strat_name, strat_name) %}
 {% set strat_positions = strategies[strat_name] %}
 <div class="panel" style="margin-bottom:16px;">
     <div class="panel-header">
         <h3>
-            <span class="tag {% if strat_name == 'A' %}tag-settling{% elif strat_name == 'B' %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            <span class="tag {% if strat_name in ('A','D') %}tag-settling{% elif strat_name in ('B','E') %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
             {{ strat_label }}
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">

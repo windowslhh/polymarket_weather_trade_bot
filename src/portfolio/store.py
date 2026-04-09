@@ -346,8 +346,8 @@ class Store:
             return [dict(row) for row in rows]
 
     async def get_strategy_realized_pnl(self) -> dict[str, float]:
-        """Get realized P&L per strategy as a simple dict {A: $X, B: $Y, C: $Z}."""
-        result = {"A": 0.0, "B": 0.0, "C": 0.0}
+        """Get realized P&L per strategy as a simple dict."""
+        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0}
         async with self.db.execute("""
             SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
             FROM settlements
