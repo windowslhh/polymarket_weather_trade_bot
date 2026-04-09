@@ -331,8 +331,10 @@ class Rebalancer:
                 )
 
                 # Phase 5: Exit + Trim signals
+                # EXIT only for same-day markets (today's temp irrelevant for future markets)
                 exit_signals = evaluate_exit_signals(
                     event, observation, daily_max, held_no_slots, strat_cfg, trend_state,
+                    days_ahead=days_ahead,
                 )
                 trim_signals = evaluate_trim_signals(
                     event, forecast, held_no_slots, strat_cfg, error_dist,

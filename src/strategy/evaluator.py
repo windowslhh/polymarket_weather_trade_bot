@@ -332,14 +332,24 @@ def evaluate_exit_signals(
     held_no_slots: list[TempSlot],
     config: StrategyConfig,
     trend: TrendState | None = None,
+    days_ahead: int = 0,
 ) -> list[TradeSignal]:
     """Phase 5: Generate SELL signals when held NO positions are threatened.
 
+    IMPORTANT: Only applies to same-day markets (days_ahead=0).
+    Today's observed temperature is irrelevant for future markets — those
+    depend on future forecasts, not current observations.
+
     Trend state adjusts exit sensitivity:
-    - STABLE: wider exit threshold (hold positions,焦虑溢价)
+    - STABLE: wider exit threshold (hold positions)
     - BREAKOUT: tighter threshold (exit faster when temperature moving)
     """
     if observation is None or daily_max_f is None:
+        return []
+
+    # EXIT signals only make sense for today's market
+    # Today's daily_max is irrelevant for tomorrow's or later markets
+    if days_ahead > 0:
         return []
 
     # Adjust exit distance based on trend
