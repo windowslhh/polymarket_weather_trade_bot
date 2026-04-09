@@ -218,9 +218,6 @@ class Rebalancer:
             if not forecast:
                 continue
 
-            # Use DB exposure + any new exposure added earlier in this cycle
-            db_city_exposure = await self._portfolio.get_city_exposure(event.city)
-            city_exposure = db_city_exposure + cycle_city_additions.get(event.city, 0.0)
             daily_max = daily_maxes.get(event.city)
             observation = city_observations.get(event.city)
             error_dist = self._error_dists.get(event.city)

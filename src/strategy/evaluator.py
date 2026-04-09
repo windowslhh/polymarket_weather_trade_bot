@@ -162,7 +162,7 @@ def evaluate_yes_signals(
     now = datetime.now(timezone.utc)
     hours_remaining = (event.end_timestamp - now).total_seconds() / 3600
 
-    if hours_remaining > 3:
+    if hours_remaining > 3 or hours_remaining <= 0:
         return []
 
     signals: list[TradeSignal] = []

@@ -23,7 +23,7 @@ _TEMP_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 _TEMP_ABOVE_RE = re.compile(r"(?P<temp>\d+)\s*°?\s*F?\s*or\s*(?:above|higher|more)", re.IGNORECASE)
-_TEMP_BELOW_RE = re.compile(r"(?:below|under|less\s*than)\s*(?P<temp>\d+)\s*°?\s*F", re.IGNORECASE)
+_TEMP_BELOW_RE = re.compile(r"(?:(?:below|under|less\s*than)\s*(?P<temp>\d+)\s*°?\s*F|(?P<temp2>\d+)\s*°?\s*F?\s*or\s*(?:below|lower|less))", re.IGNORECASE)
 _TEMP_SINGLE_RE = re.compile(r"^(?P<temp>\d+)\s*°?\s*F$", re.IGNORECASE)
 
 # Pattern to extract city name and date from event title
@@ -45,7 +45,8 @@ def _parse_temp_bounds(label: str) -> tuple[float | None, float | None]:
 
     m = _TEMP_BELOW_RE.search(label)
     if m:
-        return None, float(m.group("temp"))
+        temp_val = m.group("temp") or m.group("temp2")
+        return None, float(temp_val)
 
     m = _TEMP_SINGLE_RE.search(label.strip())
     if m:

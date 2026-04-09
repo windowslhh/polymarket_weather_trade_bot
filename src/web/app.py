@@ -70,13 +70,13 @@ def _parse_slot_label(label: str) -> tuple[str, str]:
     if m:
         temp = m.group(1)
     else:
-        m = re.search(r'be (\d+°F or higher)', label)
+        m = re.search(r'(\d+)°F or (?:higher|above|more)', label)
         if m:
-            temp = "≥" + m.group(1).replace(" or higher", "")
+            temp = "≥" + m.group(1) + "°F"
         else:
-            m = re.search(r'be (\d+°F or lower)', label)
+            m = re.search(r'(\d+)°F or lower', label) or re.search(r'(?:below|under) (\d+)°F', label)
             if m:
-                temp = "≤" + m.group(1).replace(" or lower", "")
+                temp = "≤" + m.group(1) + "°F"
 
     # Extract date
     market_date = ""
@@ -193,7 +193,7 @@ def create_app(store, rebalancer, config) -> Flask:
             forecasts=d["state"].get("forecasts", {}),
             realized=d["daily_pnl_val"] or 0.0,
             strategy_summary=d.get("strategy_summary", []),
-            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0}),
+            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -384,7 +384,7 @@ def create_app(store, rebalancer, config) -> Flask:
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
         # Compute per-strategy stats (dynamic: supports A-F)
-        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C"})
+        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C", "D", "E", "F"})
         strat_pnl = {s: 0.0 for s in all_strats}
         strat_exposure = {s: 0.0 for s in all_strats}
         strat_counts = {s: {"open": 0, "settled": 0} for s in all_strats}
