@@ -78,6 +78,7 @@ class Executor:
                 closed = await self._portfolio.close_positions_for_token(
                     event_id=signal.event.event_id,
                     token_id=signal.token_id,
+                    strategy=getattr(signal, 'strategy', None),
                 )
                 logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
             logger.info("Order executed successfully: %s", result.order_id)

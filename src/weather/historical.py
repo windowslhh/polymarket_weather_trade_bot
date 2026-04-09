@@ -96,11 +96,11 @@ class ForecastErrorDistribution:
         if slot_lower_f is not None and slot_upper_f is not None:
             p_in = self.prob_actual_in_range(slot_lower_f, slot_upper_f, forecast_high_f)
         elif slot_lower_f is not None:
-            # "X°F or above" — NO wins if actual < X
-            p_in = self.prob_actual_above(slot_lower_f, forecast_high_f)
+            # "X°F or above" — YES wins if actual >= X, so p_in = P(actual >= X)
+            p_in = self.prob_actual_above(slot_lower_f - 0.5, forecast_high_f)
         elif slot_upper_f is not None:
-            # "Below X°F" — NO wins if actual >= X
-            p_in = self.prob_actual_below(slot_upper_f, forecast_high_f)
+            # "Below X°F" — YES wins if actual < X, so p_in = P(actual < X)
+            p_in = self.prob_actual_below(slot_upper_f + 0.5, forecast_high_f)
         else:
             return 0.5
 

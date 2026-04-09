@@ -92,17 +92,18 @@ class PortfolioTracker:
                 ))
         return slots
 
-    async def close_positions_for_token(self, event_id: str, token_id: str) -> int:
-        """Close all open positions matching event_id and token_id.
+    async def close_positions_for_token(self, event_id: str, token_id: str, strategy: str | None = None) -> int:
+        """Close open positions matching event_id, token_id, and strategy.
 
-        Returns number of positions closed.
+        When strategy is provided, only closes positions for that strategy.
+        This prevents a SELL signal from strategy A from closing B/C/D/E/F positions.
         """
-        positions = await self._store.get_open_positions(event_id=event_id)
+        positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
         closed = 0
         for pos in positions:
             if pos["token_id"] == token_id and pos["status"] == "open":
                 await self._store.close_position(pos["id"])
-                logger.info("Position closed: id=%d %s %s", pos["id"], pos["slot_label"], pos["token_type"])
+                logger.info("Position closed: id=%d [%s] %s %s", pos["id"], pos.get("strategy", "?"), pos["slot_label"][:30], pos["token_type"])
                 closed += 1
         return closed
 

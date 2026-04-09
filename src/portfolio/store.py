@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS edge_history (
 CREATE INDEX IF NOT EXISTS idx_decision_log_cycle ON decision_log(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_cycle ON edge_history(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_city ON edge_history(city);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_unique ON settlements(event_id, strategy);
 """
 
 
@@ -387,7 +388,7 @@ class Store:
                 return  # Already settled, skip
 
         await self.db.execute(
-            """INSERT INTO settlements (event_id, city, strategy, winning_outcome, pnl)
+            """INSERT OR IGNORE INTO settlements (event_id, city, strategy, winning_outcome, pnl)
                VALUES (?, ?, ?, ?, ?)""",
             (event_id, city, strategy, winning_outcome, pnl),
         )

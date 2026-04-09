@@ -42,25 +42,29 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
     for pos in open_positions:
         event_positions.setdefault(pos["event_id"], []).append(pos)
 
-    # Get already-settled event_ids to avoid double-processing
+    # Get already-settled (event_id, strategy) pairs to avoid double-processing
     existing_settlements = await store.get_settlements()
+    settled_pairs = {(s["event_id"], s.get("strategy", "B")) for s in existing_settlements}
     settled_event_ids = {s["event_id"] for s in existing_settlements}
 
-    # Also check positions — if all positions for an event are already settled, skip
     results: list[SettlementResult] = []
 
     async with httpx.AsyncClient(timeout=15) as client:
         for event_id, positions in event_positions.items():
-            # Idempotency: skip if already in settlements table
+            # Idempotency: mark positions settled only if their strategy has a settlement record
             if event_id in settled_event_ids:
                 for pos in positions:
-                    if pos["status"] == "open":
+                    strat = pos.get("strategy", "B")
+                    if pos["status"] == "open" and (event_id, strat) in settled_pairs:
                         await store.db.execute(
                             "UPDATE positions SET status = 'settled', closed_at = datetime('now') WHERE id = ?",
                             (pos["id"],),
                         )
                 await store.db.commit()
-                continue
+                # Skip if ALL strategies for this event already settled
+                unsettled_strategies = {pos.get("strategy", "B") for pos in positions if pos["status"] == "open"} - {s for eid, s in settled_pairs if eid == event_id}
+                if not unsettled_strategies:
+                    continue
 
             # Double-check: skip if no open positions left (already settled by another run)
             open_count = sum(1 for p in positions if p["status"] == "open")
