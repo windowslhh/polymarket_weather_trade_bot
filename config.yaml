@@ -3,8 +3,6 @@ strategy:
   no_distance_threshold_f: 8
   # Minimum expected value to enter a NO position
   min_no_ev: 0.03
-  # YES confirmation: min probability that current temp stays in slot
-  yes_confirmation_threshold: 0.85
   # Maximum USD per single slot position
   max_position_per_slot_usd: 5.0
   # Maximum USD exposure per city
@@ -21,12 +19,6 @@ strategy:
   max_slot_spread: 0.15
   # Minimum EV to keep a position; below this → auto-trim
   min_trim_ev: 0.005
-  # Ladder围网: radius in number of slots around forecast center
-  ladder_width: 3
-  # Ladder围网: minimum EV to enter
-  ladder_min_ev: 0.03
-  # Ladder: skip slots within this distance of forecast center (too risky)
-  ladder_min_distance_f: 2.0
   # Maximum NO price to buy (avoid asymmetric risk at high prices)
   max_no_price: 0.85
   # EV discount for each day ahead (D+1 × 0.7, D+2 × 0.49)
