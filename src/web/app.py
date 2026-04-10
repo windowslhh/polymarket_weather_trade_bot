@@ -199,6 +199,7 @@ def create_app(store, rebalancer, config) -> Flask:
             cities_with_positions=d["cities_with_positions"],
             trends=d["state"].get("trends", {}),
             forecasts=d["state"].get("forecasts", {}),
+            daily_maxes=d["state"].get("daily_maxes", {}),
             realized=d["daily_pnl_val"] or 0.0,
             strategy_summary=d.get("strategy_summary", []),
             strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}),

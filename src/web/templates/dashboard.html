@@ -70,15 +70,26 @@
     {% endif %}
 
     <div class="panel">
-        <div class="panel-header"><h3>Forecasts</h3></div>
+        <div class="panel-header"><h3>Forecasts & Observations</h3></div>
         {% if forecasts %}
         <table>
-            <thead><tr><th>City</th><th>High</th><th>Source</th><th>Trend</th></tr></thead>
+            <thead><tr>
+                <th>City</th>
+                <th>Observed Max</th>
+                <th>Today</th>
+                <th>+1d</th>
+                <th>+2d</th>
+                <th>Source</th>
+                <th>Trend</th>
+            </tr></thead>
             <tbody>
             {% for city, f in forecasts.items() %}
             <tr>
                 <td style="font-weight:500;font-size:12px;">{{ city }}</td>
-                <td class="td-mono">{{ "%.0f"|format(f.high) }}°F</td>
+                <td class="td-mono">{% if daily_maxes.get(city) is not none %}{{ "%.0f"|format(daily_maxes[city]) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
+                <td class="td-mono" style="font-weight:600;">{{ "%.0f"|format(f.high) }}°F</td>
+                <td class="td-mono">{% if f.high_d1 is defined and f.high_d1 is not none %}{{ "%.0f"|format(f.high_d1) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
+                <td class="td-mono">{% if f.high_d2 is defined and f.high_d2 is not none %}{{ "%.0f"|format(f.high_d2) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
                 <td>{% if 'nws' in (f.source or '') %}<span class="tag tag-settling" style="font-size:9px;">NWS</span>{% else %}<span style="font-size:10px;color:var(--text-dim);">{{ f.source[:15] }}</span>{% endif %}</td>
                 <td><span class="tag tag-{{ (trends.get(city, 'STABLE'))|lower|replace('_','-') }}" style="font-size:9px;">{{ trends.get(city, 'STABLE') }}</span></td>
             </tr>

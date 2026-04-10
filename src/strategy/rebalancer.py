@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from dataclasses import replace
@@ -63,6 +63,7 @@ class Rebalancer:
         self._last_error: str | None = None
         self._last_events_count: int = 0
         self._last_forecasts: dict = {}
+        self._last_daily_maxes: dict[str, float | None] = {}
         self._last_markets: list[dict] = []
 
         # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn
@@ -91,6 +92,7 @@ class Rebalancer:
             "unrealized": self._last_unrealized,
             "markets": self._last_markets,
             "forecasts": self._last_forecasts,
+            "daily_maxes": self._last_daily_maxes,
             "price_source": self._last_price_source,
         }
 
@@ -366,15 +368,40 @@ class Rebalancer:
         forecasts = await get_forecasts_batch(city_configs)
         logger.info("Fetched forecasts for %d cities", len(forecasts))
 
-        # Save forecast state for dashboard
-        self._last_forecasts = {
-            city: {"high": f.predicted_high_f, "low": f.predicted_low_f,
-                   "confidence": f.confidence_interval_f, "source": f.source}
-            for city, f in forecasts.items()
-        }
+        # Fetch +1 / +2 day forecasts for dashboard (best-effort, don't block trading)
+        today = date.today()
+        forecasts_d1: dict = {}
+        forecasts_d2: dict = {}
+        try:
+            import asyncio
+            fc_d1, fc_d2 = await asyncio.gather(
+                get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                get_forecasts_batch(city_configs, today + timedelta(days=2)),
+            )
+            forecasts_d1 = fc_d1
+            forecasts_d2 = fc_d2
+            logger.info("Fetched +1/+2 day forecasts for dashboard")
+        except Exception as exc:
+            logger.warning("Failed to fetch multi-day forecasts: %s", exc)
+
+        # Save forecast state for dashboard (today + 2 days)
+        self._last_forecasts = {}
+        for city, f in forecasts.items():
+            entry: dict = {
+                "high": f.predicted_high_f, "low": f.predicted_low_f,
+                "confidence": f.confidence_interval_f, "source": f.source,
+            }
+            if city in forecasts_d1:
+                entry["high_d1"] = forecasts_d1[city].predicted_high_f
+            if city in forecasts_d2:
+                entry["high_d2"] = forecasts_d2[city].predicted_high_f
+            self._last_forecasts[city] = entry
 
         # 3. Fetch observations from settlement-consistent stations (shared helper)
         daily_maxes, city_observations = await self._fetch_observations(city_configs)
+
+        # Save daily max temps for dashboard
+        self._last_daily_maxes = dict(daily_maxes)
 
         # 4. Evaluate signals for each event
         all_signals: list[TradeSignal] = []
