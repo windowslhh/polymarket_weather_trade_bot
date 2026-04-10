@@ -262,21 +262,33 @@
                 dot.className = 'status-dot ' + (d.last_error ? 'err' : 'ok');
                 txt.textContent = d.last_error || 'Operational';
                 document.getElementById('last-run').textContent = d.last_run ? 'Last: ' + utcToBeijing(d.last_run) : '';
-                ['exposure','pnl','events','signals'].forEach(k => {
-                    const el = document.getElementById('val-' + k);
-                    if (el && d[k] !== undefined) el.textContent = typeof d[k] === 'number' ? (k === 'events' || k === 'signals' ? d[k] : '$' + d[k].toFixed(2)) : d[k];
-                });
-                if (d.active_events !== undefined) { const e = document.getElementById('val-events'); if(e) e.textContent = d.active_events; }
-                if (d.signal_count !== undefined) { const e = document.getElementById('val-signals'); if(e) e.textContent = d.signal_count; }
-                if (d.exposure !== undefined) { const e = document.getElementById('val-exposure'); if(e) e.textContent = '$' + d.exposure.toFixed(2); }
-                if (d.unrealized !== undefined) { const e = document.getElementById('val-pnl'); if(e) e.textContent = '$' + d.unrealized.toFixed(2); }
+                // Update dashboard metric values if present
+                const updates = {
+                    'val-exposure': d.exposure !== undefined ? '$' + d.exposure.toFixed(2) : null,
+                    'val-pnl': d.unrealized !== undefined ? '$' + d.unrealized.toFixed(2) : null,
+                    'val-events': d.active_events !== undefined ? d.active_events : null,
+                    'val-signals': d.signal_count !== undefined ? d.signal_count : null,
+                };
+                for (const [id, val] of Object.entries(updates)) {
+                    if (val !== null) { const el = document.getElementById(id); if (el) el.textContent = val; }
+                }
             } catch(e) {}
         }
         async function triggerRebalance() {
             const btn = document.getElementById('btn-rebalance');
-            btn.disabled = true; btn.innerHTML = '<span style="opacity:0.7">Running...</span>';
-            try { await fetch('/api/trigger', {method:'POST'}); } catch(e) {}
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = '<svg style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>Rebalance Now'; refreshStatus(); location.reload(); }, 8000);
+            btn.disabled = true; btn.innerHTML = '<span style="opacity:0.7">Running rebalance...</span>';
+            try {
+                const r = await fetch('/api/trigger', {method:'POST'});
+                const d = await r.json();
+                if (d.ok) {
+                    btn.innerHTML = '<span style="color:var(--green-text);">' + (d.signals >= 0 ? d.signals + ' signals' : 'Completed') + '</span>';
+                } else {
+                    btn.innerHTML = '<span style="color:var(--red-text);">Failed</span>';
+                }
+            } catch(e) {
+                btn.innerHTML = '<span style="color:var(--red-text);">Error</span>';
+            }
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = '<svg style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>Rebalance Now'; refreshStatus(); location.reload(); }, 3000);
         }
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');

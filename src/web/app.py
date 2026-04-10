@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from datetime import date
@@ -29,11 +30,11 @@ def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
     return _bg_loop
 
 
-def _run_async(coro):
+def _run_async(coro, timeout: float = 10):
     """Run async coroutine on the persistent background loop (fast)."""
     loop = _ensure_bg_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=10)
+    return future.result(timeout=timeout)
 
 
 # Simple TTL cache for dashboard data
@@ -54,6 +55,14 @@ def _set_cache(key: str, val: object):
     _cache[key] = (time.time(), val)
 
 
+_MONTH_SHORT = {
+    "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr",
+    "May": "May", "June": "Jun", "July": "Jul", "August": "Aug",
+    "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec",
+}
+_MONTH_REGEX = "|".join(_MONTH_SHORT.keys())
+
+
 def _parse_slot_label(label: str) -> tuple[str, str]:
     """Extract short slot description and market date from full slot_label.
 
@@ -63,7 +72,6 @@ def _parse_slot_label(label: str) -> tuple[str, str]:
     'Will the highest temperature in Chicago be 56°F or higher on April 5?'
     → ('≥56°F', 'Apr 5')
     """
-    import re
     # Extract temperature part
     temp = ""
     m = re.search(r'between (\d+-\d+°F)', label)
@@ -78,12 +86,11 @@ def _parse_slot_label(label: str) -> tuple[str, str]:
             if m:
                 temp = "≤" + m.group(1) + "°F"
 
-    # Extract date
+    # Extract date — supports all 12 months
     market_date = ""
-    m = re.search(r'on (April|March|May|June|July) (\d+)', label)
+    m = re.search(rf'on ({_MONTH_REGEX}) (\d+)', label)
     if m:
-        month_short = {"March": "Mar", "April": "Apr", "May": "May", "June": "Jun", "July": "Jul"}
-        market_date = f"{month_short.get(m.group(1), m.group(1))} {m.group(2)}"
+        market_date = f"{_MONTH_SHORT.get(m.group(1), m.group(1))} {m.group(2)}"
 
     return (temp or label[:25], market_date)
 
@@ -230,11 +237,14 @@ def create_app(store, rebalancer, config) -> Flask:
             p["buy_reason"] = p.get("buy_reason", "")
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
-        # Enrich closed positions with parsed slot info
+        # Enrich closed positions with parsed slot info + remap legacy strategies
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
             p["buy_reason"] = p.get("buy_reason", "")
             p["exit_reason"] = p.get("exit_reason", "")
+            s = p.get("strategy", "B")
+            if s not in {"A", "B", "C", "D"}:
+                p["strategy"] = "B"
 
         # Group by strategy — only A-D valid; legacy E/F remapped to B
         VALID_STRATS = ["A", "B", "C", "D"]
@@ -299,7 +309,6 @@ def create_app(store, rebalancer, config) -> Flask:
         decisions = _run_async(st.get_decision_log(limit=100))
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=50))
-        settlements = _run_async(st.get_settlements())
 
         # Build lookup: (city, slot_label) → latest BUY decision reason
         buy_reasons = {}
@@ -377,9 +386,9 @@ def create_app(store, rebalancer, config) -> Flask:
                     "market_date": skip_market_date,
                     "strategy": "",
                     "action": "SKIP",
-                    "forecast": f"{d['forecast_high_f']:.0f}°F" if d.get("forecast_high_f") else "-",
-                    "win_prob": f"{d['win_prob']*100:.0f}%" if d.get("win_prob") else "-",
-                    "ev": f"{d['expected_value']:.3f}" if d.get("expected_value") else "-",
+                    "forecast": f"{d['forecast_high_f']:.0f}°F" if d.get("forecast_high_f") is not None else "-",
+                    "win_prob": f"{d['win_prob']*100:.0f}%" if d.get("win_prob") is not None else "-",
+                    "ev": f"{d['expected_value']:.3f}" if d.get("expected_value") is not None else "-",
                     "entry": "-", "current": "-", "pnl": "-",
                     "reason": d.get("reason", ""),
                     "type": "decision",
@@ -495,11 +504,30 @@ def create_app(store, rebalancer, config) -> Flask:
         reb = app.config["bot_rebalancer"]
         _cache.clear()  # Invalidate all caches
         try:
-            signals = _run_async(reb.run())
+            # Rebalance can take 30-60s (NWS/Gamma API calls), use longer timeout
+            signals = _run_async(reb.run(), timeout=120)
             return jsonify({"ok": True, "signals": len(signals)})
+        except TimeoutError:
+            # Rebalance is still running in bg loop — report as accepted
+            logger.warning("Manual rebalance timed out (still running in background)")
+            return jsonify({"ok": True, "signals": -1, "note": "running in background"})
         except Exception as e:
             logger.exception("Manual rebalance trigger failed")
             return jsonify({"ok": False, "error": str(e)}), 500
+
+    # --- Error handlers ---
+    @app.errorhandler(500)
+    def internal_error(e):
+        logger.exception("Internal server error: %s", e)
+        return render_template("error.html", active_page="", mode=_mode(),
+                               code=500, message="Internal Server Error",
+                               detail=str(e)), 500
+
+    @app.errorhandler(404)
+    def not_found(e):
+        return render_template("error.html", active_page="", mode=_mode(),
+                               code=404, message="Page Not Found",
+                               detail="The requested page does not exist."), 404
 
     return app
 

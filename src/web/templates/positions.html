@@ -131,7 +131,7 @@
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
-            <td><span class="tag tag-stable">{{ p.strategy if p.strategy else 'B' }}</span></td>
+            <td><span class="tag {% if p.strategy == 'A' %}tag-settling{% elif p.strategy == 'B' %}tag-stable{% elif p.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
             <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.buy_reason or '' }}">
