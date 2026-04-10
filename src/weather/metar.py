@@ -72,12 +72,16 @@ class DailyMaxTracker:
         # {(icao, date_str): max_temp_f}
         self._maxes: dict[tuple[str, str], float] = defaultdict(lambda: -999.0)
 
-    def update(self, obs: Observation) -> float:
-        """Update with an observation and return the current daily max."""
+    def update(self, obs: Observation) -> tuple[float, bool]:
+        """Update with an observation and return (current_daily_max, is_new_high).
+
+        is_new_high is True when this observation set a new daily maximum.
+        """
         key = (obs.icao, obs.observation_time.date().isoformat())
-        if obs.temp_f > self._maxes[key]:
+        is_new_high = obs.temp_f > self._maxes[key]
+        if is_new_high:
             self._maxes[key] = obs.temp_f
-        return self._maxes[key]
+        return self._maxes[key], is_new_high
 
     def get_max(self, icao: str, day: date | None = None) -> float | None:
         """Get the current daily max. Returns None if no data."""

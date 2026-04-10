@@ -24,7 +24,7 @@ from src.markets.models import Side, TempSlot, TokenType, TradeSignal, WeatherMa
 from src.portfolio.risk import check_circuit_breaker, check_exposure_limits, check_geographic_correlation
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
-from src.strategy.evaluator import evaluate_exit_signals, evaluate_no_signals, evaluate_yes_signals
+from src.strategy.evaluator import evaluate_exit_signals, evaluate_no_signals
 from src.strategy.rebalancer import Rebalancer
 from src.strategy.sizing import compute_size
 from src.weather.metar import DailyMaxTracker
@@ -42,7 +42,6 @@ def _make_config(dry_run: bool = True, paper: bool = False) -> AppConfig:
         strategy=StrategyConfig(
             no_distance_threshold_f=8,
             min_no_ev=0.01,
-            yes_confirmation_threshold=0.80,
             max_position_per_slot_usd=5.0,
             max_exposure_per_city_usd=50.0,
             max_total_exposure_usd=1000.0,
@@ -82,7 +81,7 @@ def _make_slots_for_city(forecast_high: float) -> list[TempSlot]:
         upper = lower + 2
         # Price NO: higher for slots far from forecast, lower for close ones
         distance = abs((lower + upper) / 2 - forecast_high)
-        price_no = min(0.98, 0.50 + distance * 0.03)
+        price_no = min(0.98, 0.40 + distance * 0.02)
         price_yes = round(1.0 - price_no, 4)
         slots.append(TempSlot(
             token_id_yes=f"yes_{lower}_{upper}",
@@ -192,35 +191,6 @@ class TestFullLogicChain:
         exits_safe = evaluate_exit_signals(event, obs_safe, 70.0, [held_slot], config)
         logger.info("Scenario B: daily max = 70°F (safe)   → exits: %d ✓", len(exits_safe))
         assert len(exits_safe) == 0
-
-    def test_step4_yes_signals_late_game(self):
-        """Step 4: YES signals trigger when temp is confirmed near market close."""
-        config = StrategyConfig(yes_confirmation_threshold=0.80)
-
-        # Slot 74-76°F, market closes in 1 hour
-        slot = TempSlot("y1", "n1", "74°F to 76°F", 74, 76, 0.60, 0.40)
-        event = _make_market_event("New York", [slot], hours_until_end=0.8)
-
-        forecast = Forecast("New York", date.today(), 75.0, 60.0, 4.0, "test", datetime.now(timezone.utc))
-        obs = Observation("KLGA", 75.0, datetime.now(timezone.utc))
-
-        signals = evaluate_yes_signals(event, forecast, obs, 75.0, config)
-
-        logger.info("=== Step 4: YES Signals (Late Game) ===")
-        logger.info("Slot: %s, YES price: %.2f, hours left: 0.8", slot.outcome_label, slot.price_yes)
-        logger.info("Daily max: 75°F (in slot range 74-76°F)")
-        logger.info("YES signals: %d", len(signals))
-
-        assert len(signals) == 1, "Should generate YES signal when temp confirmed"
-        assert signals[0].token_type == TokenType.YES
-        assert signals[0].estimated_win_prob >= 0.85
-        logger.info("  → BUY YES %s | prob=%.4f | EV=%.4f ✓", signals[0].slot.outcome_label, signals[0].estimated_win_prob, signals[0].expected_value)
-
-        # Scenario: too early (12 hours left) — no signal
-        event_early = _make_market_event("New York", [slot], hours_until_end=12)
-        signals_early = evaluate_yes_signals(event_early, forecast, obs, 75.0, config)
-        assert len(signals_early) == 0, "Should not signal YES when too much time left"
-        logger.info("12 hours remaining → no YES signal ✓")
 
     def test_step5_risk_management(self):
         """Step 5: Risk checks prevent over-exposure."""
@@ -435,21 +405,21 @@ class TestMetarDailyMaxIntegration:
 
         # Morning: 68°F — safe
         obs1 = Observation("KLGA", 68.0, datetime(2026, 4, 4, 10, 0, tzinfo=timezone.utc))
-        max1 = tracker.update(obs1)
+        max1, _ = tracker.update(obs1)
         exits1 = evaluate_exit_signals(event, obs1, max1, [held_slot], config)
         logger.info("10:00 UTC — temp 68°F, max %.1f°F → exits: %d", max1, len(exits1))
         assert len(exits1) == 0
 
         # Afternoon: 78°F — still safe but warming
         obs2 = Observation("KLGA", 78.0, datetime(2026, 4, 4, 14, 0, tzinfo=timezone.utc))
-        max2 = tracker.update(obs2)
+        max2, _ = tracker.update(obs2)
         exits2 = evaluate_exit_signals(event, obs2, max2, [held_slot], config)
         logger.info("14:00 UTC — temp 78°F, max %.1f°F → exits: %d", max2, len(exits2))
         assert len(exits2) == 0
 
         # Peak: 81°F — danger zone!
         obs3 = Observation("KLGA", 81.0, datetime(2026, 4, 4, 16, 0, tzinfo=timezone.utc))
-        max3 = tracker.update(obs3)
+        max3, _ = tracker.update(obs3)
         exits3 = evaluate_exit_signals(event, obs3, max3, [held_slot], config)
         logger.info("16:00 UTC — temp 81°F, max %.1f°F → exits: %d 🚨", max3, len(exits3))
         assert len(exits3) == 1, "Should exit when daily max approaches slot"

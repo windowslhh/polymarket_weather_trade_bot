@@ -142,7 +142,7 @@ def create_app(store, rebalancer, config) -> Flask:
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
@@ -193,7 +193,7 @@ def create_app(store, rebalancer, config) -> Flask:
             forecasts=d["state"].get("forecasts", {}),
             realized=d["daily_pnl_val"] or 0.0,
             strategy_summary=d.get("strategy_summary", []),
-            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0}),
+            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -210,10 +210,10 @@ def create_app(store, rebalancer, config) -> Flask:
         closed_pos = _run_async(st.get_closed_positions(limit=20))
         exposure = _run_async(st.get_total_exposure())
         strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0}
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
 
         # Get current prices for P&L calculation
-        gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
+        gamma_prices = reb.get_gamma_prices() if hasattr(reb, 'get_gamma_prices') else {}
 
         # Enrich positions with current price, unrealized P&L, and parsed slot info
         for p in open_pos:
@@ -225,14 +225,17 @@ def create_app(store, rebalancer, config) -> Flask:
                 p["current_price"] = None
                 p["unrealized_pnl"] = None
             p["strategy"] = p.get("strategy", "B")
+            p["buy_reason"] = p.get("buy_reason", "")
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
         # Enrich closed positions with parsed slot info
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
+            p["buy_reason"] = p.get("buy_reason", "")
+            p["exit_reason"] = p.get("exit_reason", "")
 
-        # Group by strategy (dynamic: supports A-F)
-        all_strats = sorted({p.get("strategy", "B") for p in open_pos} | {"A", "B", "C", "D", "E", "F"})
+        # Group by strategy (dynamic: supports A-D)
+        all_strats = sorted({p.get("strategy", "B") for p in open_pos} | {"A", "B", "C", "D"})
         strategies = {s: [] for s in all_strats}
         strat_pnl = {s: 0.0 for s in all_strats}  # unrealized
         strat_exposure = {s: 0.0 for s in all_strats}
@@ -287,7 +290,7 @@ def create_app(store, rebalancer, config) -> Flask:
     def trades_page():
         st = app.config["bot_store"]
         reb = app.config["bot_rebalancer"]
-        gamma_prices = reb._last_gamma_prices if hasattr(reb, '_last_gamma_prices') else {}
+        gamma_prices = reb.get_gamma_prices() if hasattr(reb, 'get_gamma_prices') else {}
 
         # Fetch all data sources
         decisions = _run_async(st.get_decision_log(limit=100))
@@ -383,8 +386,8 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Compute per-strategy stats (dynamic: supports A-F)
-        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C", "D", "E", "F"})
+        # Compute per-strategy stats (dynamic: supports A-D)
+        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C", "D"})
         strat_pnl = {s: 0.0 for s in all_strats}
         strat_exposure = {s: 0.0 for s in all_strats}
         strat_counts = {s: {"open": 0, "settled": 0} for s in all_strats}

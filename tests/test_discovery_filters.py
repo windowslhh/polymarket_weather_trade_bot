@@ -15,12 +15,18 @@ def _make_city() -> CityConfig:
 
 
 def _make_gamma_response(volume: float = 5000, yes_price: float = 0.3, no_price: float = 0.7) -> list[dict]:
+    from datetime import date, timedelta
+    # Use tomorrow's date so the market is never in the past
+    future = date.today() + timedelta(days=1)
+    month_name = future.strftime("%B")  # e.g. "April"
+    day_num = future.day
+    end_date = future.isoformat() + "T23:00:00Z"
     return [{
         "id": "event-1",
         "conditionId": "cond-1",
-        "title": "Highest temperature in New York on April 10",
+        "title": f"Highest temperature in New York on {month_name} {day_num}",
         "volume": str(volume),
-        "endDate": "2026-04-10T23:00:00Z",
+        "endDate": end_date,
         "markets": [{
             "question": "78°F to 81°F",
             "outcomes": ["Yes", "No"],

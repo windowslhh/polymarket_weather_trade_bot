@@ -18,7 +18,7 @@
     {% set total = strat_realized.get(s, 0) + strat_pnl.get(s, 0) %}
     {% if strategies[s]|length > 0 or strat_realized.get(s, 0) != 0 %}
     <div class="metric-card">
-        <div class="metric-label">{{ s }}{% if s <= 'C' %} (new){% else %} (old){% endif %} P&L</div>
+        <div class="metric-label">{{ s }} P&L</div>
         <div class="metric-value {{ 'positive' if total >= 0 else 'negative' }}">{{ '+' if total > 0 else '' }}${{ "%.2f"|format(total) }}</div>
         <div class="metric-sub" style="display:flex;flex-direction:column;gap:2px;">
             <span>{{ strategies[s]|length }} pos / ${{ "%.1f"|format(strat_exposure.get(s, 0)) }}</span>
@@ -34,14 +34,14 @@
 </div>
 
 <!-- Positions by Strategy -->
-{% set strat_labels = {'A':'New Conservative', 'B':'New Moderate', 'C':'New Aggressive', 'D':'Old Conservative', 'E':'Old Moderate', 'F':'Old Aggressive'} %}
+{% set strat_labels = {'A':'Conservative Far', 'B':'Locked Aggressor', 'C':'Close Range', 'D':'Quick Exit'} %}
 {% for strat_name in strategies.keys()|sort %}
 {% set strat_label = strat_labels.get(strat_name, strat_name) %}
 {% set strat_positions = strategies[strat_name] %}
 <div class="panel" style="margin-bottom:16px;">
     <div class="panel-header">
         <h3>
-            <span class="tag {% if strat_name in ('A','D') %}tag-settling{% elif strat_name in ('B','E') %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            <span class="tag {% if strat_name == 'A' %}tag-settling{% elif strat_name == 'B' %}tag-stable{% elif strat_name == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
             {{ strat_label }}
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">
@@ -56,7 +56,7 @@
     </div>
     {% if strat_positions %}
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Shares</th><th>Opened</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Reason</th><th>Opened</th></tr></thead>
         <tbody>
         {% for p in strat_positions %}
         <tr>
@@ -74,7 +74,9 @@
                 {% else %}-{% endif %}
             </td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
-            <td class="td-mono">{{ "%.1f"|format(p.shares) }}</td>
+            <td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.buy_reason or '' }}">
+                {{ p.buy_reason[:50] if p.buy_reason else '-' }}
+            </td>
             <td style="font-size:11px;color:var(--text-muted);">{{ p.created_at|beijing }}</td>
         </tr>
         {% endfor %}
@@ -122,7 +124,7 @@
         <span style="font-size:11px;color:var(--text-dim);">{{ closed_positions|length }} positions</span>
     </div>
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Closed</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Buy Reason</th><th>Exit Reason</th><th>Closed</th></tr></thead>
         <tbody>
         {% for p in closed_positions[:15] %}
         <tr>
@@ -132,6 +134,12 @@
             <td><span class="tag tag-stable">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
+            <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.buy_reason or '' }}">
+                {{ p.buy_reason[:40] if p.buy_reason else '-' }}
+            </td>
+            <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.exit_reason or '' }}">
+                {{ p.exit_reason[:40] if p.exit_reason else '-' }}
+            </td>
             <td style="font-size:11px;color:var(--text-muted);">{{ p.closed_at|beijing if p.closed_at else '-' }}</td>
         </tr>
         {% endfor %}

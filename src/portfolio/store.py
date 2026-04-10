@@ -79,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_event ON positions(event_id);
 CREATE INDEX IF NOT EXISTS idx_positions_city ON positions(city);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
 CREATE TABLE IF NOT EXISTS edge_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -111,7 +112,7 @@ class Store:
     async def initialize(self) -> None:
         """Create database and tables, applying migrations for missing columns."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self._db_path))
+        self._db = await aiosqlite.connect(str(self._db_path), timeout=30.0)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.commit()
@@ -127,6 +128,8 @@ class Store:
             ("positions", "strategy", "ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             ("decision_log", "reason", "ALTER TABLE decision_log ADD COLUMN reason TEXT DEFAULT ''"),
             ("settlements", "strategy", "ALTER TABLE settlements ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
+            ("positions", "buy_reason", "ALTER TABLE positions ADD COLUMN buy_reason TEXT DEFAULT ''"),
+            ("positions", "exit_reason", "ALTER TABLE positions ADD COLUMN exit_reason TEXT DEFAULT ''"),
         ]
         for table, column, sql in migrations:
             try:
@@ -160,19 +163,39 @@ class Store:
         size_usd: float,
         shares: float,
         strategy: str = "B",
+        buy_reason: str = "",
     ) -> int:
         cursor = await self.db.execute(
-            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy),
+            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy, buy_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy, buy_reason),
         )
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
-    async def close_position(self, position_id: int) -> None:
+    async def close_position(self, position_id: int, exit_reason: str = "") -> None:
+        """Close a position and optionally set exit reason in a single UPDATE.
+
+        P1-9 FIX: merged close_position + update_exit_reason to avoid
+        two sequential writes for the common case.
+        """
+        if exit_reason:
+            await self.db.execute(
+                "UPDATE positions SET status = 'closed', closed_at = datetime('now'), exit_reason = ? WHERE id = ?",
+                (exit_reason, position_id),
+            )
+        else:
+            await self.db.execute(
+                "UPDATE positions SET status = 'closed', closed_at = datetime('now') WHERE id = ?",
+                (position_id,),
+            )
+        await self.db.commit()
+
+    async def update_exit_reason(self, position_id: int, exit_reason: str) -> None:
+        """Set the exit reason on a position (standalone update, kept for backward compat)."""
         await self.db.execute(
-            "UPDATE positions SET status = 'closed', closed_at = datetime('now') WHERE id = ?",
-            (position_id,),
+            "UPDATE positions SET exit_reason = ? WHERE id = ?",
+            (exit_reason, position_id),
         )
         await self.db.commit()
 
@@ -348,7 +371,7 @@ class Store:
 
     async def get_strategy_realized_pnl(self) -> dict[str, float]:
         """Get realized P&L per strategy as a simple dict."""
-        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0, "E": 0.0, "F": 0.0}
+        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
         async with self.db.execute("""
             SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
             FROM settlements
@@ -378,15 +401,8 @@ class Store:
         self, event_id: str, city: str, winning_outcome: str, pnl: float,
         strategy: str = "B",
     ) -> None:
-        # Check if already exists for this event+strategy to prevent duplicate P&L
-        async with self.db.execute(
-            "SELECT COUNT(*) FROM settlements WHERE event_id = ? AND strategy = ?",
-            (event_id, strategy),
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0] > 0:
-                return  # Already settled, skip
-
+        # P0-2 FIX: idx_settlements_unique enforces (event_id, strategy) uniqueness,
+        # so INSERT OR IGNORE alone prevents duplicates — no need for a prior SELECT.
         await self.db.execute(
             """INSERT OR IGNORE INTO settlements (event_id, city, strategy, winning_outcome, pnl)
                VALUES (?, ?, ?, ?, ?)""",

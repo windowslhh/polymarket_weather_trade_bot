@@ -62,7 +62,9 @@ class TradeSignal:
     expected_value: float
     estimated_win_prob: float
     suggested_size_usd: float = 0.0
-    strategy: str = "B"  # A/B/C strategy group
+    strategy: str = "B"  # A/B/C/D strategy group
+    reason: str = ""  # Human-readable buy/exit reason
+    is_locked_win: bool = False  # True for guaranteed-win signals (daily max > slot upper)
 
     @property
     def token_id(self) -> str:

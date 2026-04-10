@@ -72,13 +72,15 @@ class Executor:
                     side=signal.side.value,
                     price=price,
                     size_usd=size_usd,
-                    strategy=getattr(signal, 'strategy', 'B'),
+                    strategy=signal.strategy,
+                    buy_reason=signal.reason,
                 )
             elif signal.side == Side.SELL:
                 closed = await self._portfolio.close_positions_for_token(
                     event_id=signal.event.event_id,
                     token_id=signal.token_id,
-                    strategy=getattr(signal, 'strategy', None),
+                    strategy=signal.strategy,
+                    exit_reason=signal.reason,
                 )
                 logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
             logger.info("Order executed successfully: %s", result.order_id)

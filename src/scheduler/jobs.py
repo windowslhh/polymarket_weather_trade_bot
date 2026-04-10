@@ -25,13 +25,17 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
         max_instances=1,
     )
 
-    # Settlement check only (not full rebalance)
+    # Settlement check + lightweight position check (every 15 min)
+    async def settlement_and_position_check():
+        await rebalancer.run_settlement_only()
+        await rebalancer.run_position_check()
+
     scheduler.add_job(
-        rebalancer.run_settlement_only,
+        settlement_and_position_check,
         "interval",
         minutes=15,
         id="settlement_check",
-        name="Settlement check",
+        name="Settlement + position check",
         max_instances=1,
     )
 

@@ -16,6 +16,11 @@ class PortfolioTracker:
     def __init__(self, store: Store) -> None:
         self._store = store
 
+    @property
+    def store(self) -> Store:
+        """Public accessor for the underlying store."""
+        return self._store
+
     async def record_fill(
         self,
         event_id: str,
@@ -27,6 +32,7 @@ class PortfolioTracker:
         price: float,
         size_usd: float,
         strategy: str = "B",
+        buy_reason: str = "",
     ) -> int:
         """Record a filled order as a new position."""
         shares = size_usd / price if price > 0 else 0
@@ -41,6 +47,7 @@ class PortfolioTracker:
             size_usd=size_usd,
             shares=shares,
             strategy=strategy,
+            buy_reason=buy_reason,
         )
         logger.info(
             "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d]",
@@ -92,17 +99,24 @@ class PortfolioTracker:
                 ))
         return slots
 
-    async def close_positions_for_token(self, event_id: str, token_id: str, strategy: str | None = None) -> int:
+    async def close_positions_for_token(
+        self,
+        event_id: str,
+        token_id: str,
+        strategy: str | None = None,
+        exit_reason: str = "",
+    ) -> int:
         """Close open positions matching event_id, token_id, and strategy.
 
         When strategy is provided, only closes positions for that strategy.
-        This prevents a SELL signal from strategy A from closing B/C/D/E/F positions.
+        This prevents a SELL signal from strategy A from closing B/C/D positions.
         """
         positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
         closed = 0
         for pos in positions:
             if pos["token_id"] == token_id and pos["status"] == "open":
-                await self._store.close_position(pos["id"])
+                # P1-9: single SQL call for close + exit_reason
+                await self._store.close_position(pos["id"], exit_reason=exit_reason)
                 logger.info("Position closed: id=%d [%s] %s %s", pos["id"], pos.get("strategy", "?"), pos["slot_label"][:30], pos["token_type"])
                 closed += 1
         return closed
@@ -114,6 +128,26 @@ class PortfolioTracker:
     async def get_open_positions_for_city(self, city: str) -> list[dict]:
         """Get all open positions for a city."""
         return await self._store.get_open_positions(city=city)
+
+    async def get_open_positions_for_event(
+        self, event_id: str, strategy: str | None = None,
+    ) -> list[dict]:
+        """Get open positions for a specific event (optionally filtered by strategy)."""
+        return await self._store.get_open_positions(event_id=event_id, strategy=strategy)
+
+    # ── Delegate methods for store operations ───────────────────────
+
+    async def insert_edge_snapshot(self, **kwargs) -> None:
+        """Delegate to store.insert_edge_snapshot()."""
+        await self._store.insert_edge_snapshot(**kwargs)
+
+    async def flush_edge_batch(self) -> None:
+        """Delegate to store.flush_edge_batch()."""
+        await self._store.flush_edge_batch()
+
+    async def insert_decision_log(self, **kwargs) -> None:
+        """Delegate to store.insert_decision_log()."""
+        await self._store.insert_decision_log(**kwargs)
 
     async def get_daily_pnl(self, day: date | None = None) -> float | None:
         """Get the realized P&L for a given day."""

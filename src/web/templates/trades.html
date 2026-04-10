@@ -4,22 +4,15 @@
 <div class="page-title">Trade Timeline</div>
 
 <!-- Strategy P&L Summary -->
+{% set strat_meta = {'A': 'Conservative Far', 'B': 'Locked Aggressor', 'C': 'Close Range', 'D': 'Quick Exit'} %}
 <div class="metrics">
+    {% for sk in ['A', 'B', 'C', 'D'] %}
     <div class="metric-card">
-        <div class="metric-label">Strategy A <span style="font-size:10px;color:var(--text-dim);">(Conservative)</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl.A >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.A) }}</div>
-        <div class="metric-sub">{{ strat_counts.A.open }} open / {{ strat_counts.A.settled }} settled / ${{ "%.1f"|format(strat_exposure.A) }}</div>
+        <div class="metric-label">Strategy {{ sk }} <span style="font-size:10px;color:var(--text-dim);">({{ strat_meta[sk] }})</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl[sk] >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl[sk]) }}</div>
+        <div class="metric-sub">{{ strat_counts[sk].open }} open / {{ strat_counts[sk].settled }} settled / ${{ "%.1f"|format(strat_exposure[sk]) }}</div>
     </div>
-    <div class="metric-card">
-        <div class="metric-label">Strategy B <span style="font-size:10px;color:var(--text-dim);">(Moderate)</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl.B >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.B) }}</div>
-        <div class="metric-sub">{{ strat_counts.B.open }} open / {{ strat_counts.B.settled }} settled / ${{ "%.1f"|format(strat_exposure.B) }}</div>
-    </div>
-    <div class="metric-card">
-        <div class="metric-label">Strategy C <span style="font-size:10px;color:var(--text-dim);">(Aggressive)</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl.C >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.C) }}</div>
-        <div class="metric-sub">{{ strat_counts.C.open }} open / {{ strat_counts.C.settled }} settled / ${{ "%.1f"|format(strat_exposure.C) }}</div>
-    </div>
+    {% endfor %}
 </div>
 
 <!-- Full Trade Timeline: decisions → positions → settlements merged -->
@@ -61,7 +54,7 @@
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ t.market_date if t.market_date else '-' }}</td>
             <td>
                 {% if t.strategy %}
-                <span class="tag {% if t.strategy == 'A' %}tag-settling{% elif t.strategy == 'B' %}tag-stable{% else %}tag-breakout-up{% endif %}" style="font-size:10px;">{{ t.strategy }}</span>
+                <span class="tag {% if t.strategy == 'A' %}tag-settling{% elif t.strategy == 'B' %}tag-stable{% elif t.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:10px;">{{ t.strategy }}</span>
                 {% else %}-{% endif %}
             </td>
             <td>

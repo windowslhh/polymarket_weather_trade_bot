@@ -22,7 +22,6 @@ class CityConfig:
 class StrategyConfig:
     no_distance_threshold_f: int = 8
     min_no_ev: float = 0.03
-    yes_confirmation_threshold: float = 0.85
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
     max_total_exposure_usd: float = 1000.0
@@ -31,110 +30,82 @@ class StrategyConfig:
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
     min_trim_ev: float = 0.02
-    ladder_width: int = 3
-    ladder_min_ev: float = 0.03
-    ladder_min_distance_f: float = 2.0
     max_no_price: float = 0.85
     day_ahead_ev_discount: float = 0.7
     max_days_ahead: int = 2
     max_positions_per_event: int = 4
+    # Auto-calibrate distance threshold from historical forecast error data
+    auto_calibrate_distance: bool = True
+    calibration_confidence: float = 0.90
+    # Locked-win signals: buy NO on slots where daily max already exceeded upper bound
+    enable_locked_wins: bool = True
+    locked_win_kelly_fraction: float = 1.0
+    max_locked_win_per_slot_usd: float = 10.0
+    # Hybrid exit: force-sell within N hours of settlement when distance is close
+    force_exit_hours: float = 1.0
+    # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
+    exit_cooldown_hours: float = 4.0
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Six strategy variants running in parallel for A/B testing.
+    """Four strategy variants testing different dimensions.
 
-    NEW strategies (optimized from Apr 5-9 data):
-    A = Conservative: NO only on distant slots, no ladder, strict price cap
-    B = Moderate: Ladder with 4°F min distance, balanced EV thresholds
-    C = Aggressive: Wider ladder, more trades but capped price
+    All strategies share:
+    - Auto-calibrated distance threshold (per-city)
+    - Locked-win signals enabled
+    - Hybrid exit mode (EV + distance + pre-settlement force)
+    - Exit cooldown to prevent BUY→EXIT→BUY churn
+    - NO-only signals (no YES, no LADDER)
 
-    OLD strategies (control group, original params from Apr 5-6):
-    D = Old Conservative: original A params
-    E = Old Moderate: original B params
-    F = Old Aggressive: original C params
-
-    All strategies now benefit from EXIT bug fix (no false exits on future markets).
+    A = Conservative Far:  only distant NO, strict price cap, half Kelly
+    B = Locked Aggressor:  same entry as A, but full Kelly on locked wins
+    C = Close Range:       tighter distance (75% confidence), higher EV bar
+    D = Quick Exit:        aggressive risk management, earlier force exit
     """
     return {
-        # --- NEW strategies (optimized) ---
         "A": {
-            "no_distance_threshold_f": 8,
-            "min_no_ev": 0.05,
-            "ladder_width": 0,  # disabled — conservative, distant-only NO
-            "ladder_min_ev": 1.0,  # effectively disabled
-            "ladder_min_distance_f": 99.0,
+            # Conservative far-distance: fewest trades, highest safety margin
             "max_no_price": 0.70,
+            "kelly_fraction": 0.5,
+            "max_positions_per_event": 3,
+            "calibration_confidence": 0.90,
+            "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
             "max_exposure_per_city_usd": 30.0,
-            "day_ahead_ev_discount": 0.6,
-            "min_trim_ev": 0.02,
-            "max_positions_per_event": 3,
         },
         "B": {
-            "no_distance_threshold_f": 8,
+            # Locked aggressor: same entry as A, but full Kelly on locked wins
+            "max_no_price": 0.70,
+            "kelly_fraction": 0.5,
+            "max_positions_per_event": 6,
+            "calibration_confidence": 0.90,
             "min_no_ev": 0.05,
-            "ladder_width": 3,
-            "ladder_min_ev": 0.05,
-            "ladder_min_distance_f": 4.0,
-            "max_no_price": 0.75,
-            "max_position_per_slot_usd": 3.0,
+            "max_position_per_slot_usd": 5.0,
             "max_exposure_per_city_usd": 30.0,
-            "day_ahead_ev_discount": 0.7,
-            "min_trim_ev": 0.02,
-            "max_positions_per_event": 4,
+            "locked_win_kelly_fraction": 1.0,
+            "max_locked_win_per_slot_usd": 10.0,
         },
         "C": {
-            "no_distance_threshold_f": 8,
-            "min_no_ev": 0.03,
-            "ladder_width": 4,
-            "ladder_min_ev": 0.03,
-            "ladder_min_distance_f": 3.0,
-            "max_no_price": 0.80,
-            "max_position_per_slot_usd": 2.0,
-            "max_exposure_per_city_usd": 25.0,
-            "day_ahead_ev_discount": 0.8,
-            "min_trim_ev": 0.02,
+            # Close range: enters closer slots (75% confidence), demands higher EV
+            "max_no_price": 0.75,
+            "kelly_fraction": 0.3,
             "max_positions_per_event": 4,
-        },
-        # --- OLD strategies (control group) ---
-        "D": {  # Old A: Conservative original
-            "no_distance_threshold_f": 8,
-            "min_no_ev": 0.05,
-            "ladder_width": 0,
-            "ladder_min_ev": 1.0,
-            "ladder_min_distance_f": 99.0,
-            "max_no_price": 0.80,  # original higher cap
-            "max_position_per_slot_usd": 3.0,  # original smaller size
-            "max_exposure_per_city_usd": 30.0,
-            "day_ahead_ev_discount": 0.6,
-            "min_trim_ev": 0.005,  # original low trim threshold
-            "max_positions_per_event": 8,  # original no real cap
-        },
-        "E": {  # Old B: Moderate original
-            "no_distance_threshold_f": 8,
-            "min_no_ev": 0.03,  # original lower threshold
-            "ladder_width": 3,
-            "ladder_min_ev": 0.03,
-            "ladder_min_distance_f": 4.0,
-            "max_no_price": 0.85,  # original higher cap
+            "calibration_confidence": 0.75,
+            "min_no_ev": 0.06,
             "max_position_per_slot_usd": 3.0,
-            "max_exposure_per_city_usd": 30.0,
-            "day_ahead_ev_discount": 0.7,
-            "min_trim_ev": 0.005,
-            "max_positions_per_event": 8,
+            "max_exposure_per_city_usd": 25.0,
         },
-        "F": {  # Old C: Aggressive original
-            "no_distance_threshold_f": 6,  # original tighter
-            "min_no_ev": 0.02,
-            "ladder_width": 4,
-            "ladder_min_ev": 0.02,
-            "ladder_min_distance_f": 2.0,  # original closer
-            "max_no_price": 0.90,  # original very high cap
-            "max_position_per_slot_usd": 1.5,
-            "max_exposure_per_city_usd": 20.0,
-            "day_ahead_ev_discount": 0.8,
-            "min_trim_ev": 0.005,
-            "max_positions_per_event": 8,
+        "D": {
+            # Quick exit: most aggressive risk management
+            "max_no_price": 0.65,
+            "kelly_fraction": 0.5,
+            "max_positions_per_event": 4,
+            "calibration_confidence": 0.90,
+            "min_no_ev": 0.05,
+            "max_position_per_slot_usd": 5.0,
+            "max_exposure_per_city_usd": 30.0,
+            "force_exit_hours": 2.0,
+            "exit_cooldown_hours": 2.0,
         },
     }
 
