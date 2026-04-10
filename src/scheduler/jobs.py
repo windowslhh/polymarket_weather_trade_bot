@@ -39,6 +39,17 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
         max_instances=1,
     )
 
+    # METAR temperature refresh — synced to station reporting times
+    # Routine METAR issued at :51-:53, poll at :57 and :03 to catch updates
+    scheduler.add_job(
+        rebalancer.refresh_metar,
+        "cron",
+        minute="57,3",
+        id="metar_refresh",
+        name="METAR temperature sync",
+        max_instances=1,
+    )
+
     # Run initial rebalance 5 seconds after startup
     from datetime import datetime, timedelta, timezone
     scheduler.add_job(
@@ -50,7 +61,8 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
     )
 
     logger.info(
-        "Scheduler configured: rebalance every %d min, settlement check every 15 min",
+        "Scheduler configured: rebalance every %d min, settlement check every 15 min, "
+        "METAR sync at :57/:03",
         config.scheduling.rebalance_interval_minutes,
     )
     return scheduler

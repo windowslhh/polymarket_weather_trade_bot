@@ -125,6 +125,22 @@ class Rebalancer:
                     city_observations[city_cfg.name] = metar_obs
         return daily_maxes, city_observations
 
+    async def refresh_metar(self) -> None:
+        """Lightweight METAR-only refresh — synced to station reporting times.
+
+        Runs at :57 and :03 past each hour to align with routine METAR reports
+        (issued ~:51-:53). Only updates DailyMaxTracker and dashboard state;
+        does NOT evaluate signals or execute trades.
+        """
+        try:
+            city_configs = self._config.cities
+            daily_maxes, _ = await self._fetch_observations(city_configs)
+            self._last_daily_maxes = dict(daily_maxes)
+            updated = sum(1 for v in daily_maxes.values() if v is not None)
+            logger.info("METAR refresh: %d/%d cities updated", updated, len(city_configs))
+        except Exception:
+            logger.exception("METAR refresh failed")
+
     # ── Settlement + position check ──────────────────────────────────
 
     async def run_settlement_only(self) -> None:
