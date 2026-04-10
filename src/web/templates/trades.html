@@ -8,9 +8,9 @@
 <div class="metrics">
     {% for sk in ['A', 'B', 'C', 'D'] %}
     <div class="metric-card">
-        <div class="metric-label">Strategy {{ sk }} <span style="font-size:10px;color:var(--text-dim);">({{ strat_meta[sk] }})</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl[sk] >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl[sk]) }}</div>
-        <div class="metric-sub">{{ strat_counts[sk].open }} open / {{ strat_counts[sk].settled }} settled / ${{ "%.1f"|format(strat_exposure[sk]) }}</div>
+        <div class="metric-label">Strategy {{ sk }} <span style="font-size:10px;color:var(--text-dim);">({{ strat_meta.get(sk, sk) }})</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.get(sk, 0) >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.get(sk, 0)) }}</div>
+        <div class="metric-sub">{{ strat_counts.get(sk, {}).get('open', 0) }} open / {{ strat_counts.get(sk, {}).get('settled', 0) }} settled / ${{ "%.1f"|format(strat_exposure.get(sk, 0)) }}</div>
     </div>
     {% endfor %}
 </div>
@@ -77,7 +77,7 @@
         </tr>
         {% endfor %}
         {% if not timeline %}
-        <tr><td colspan="13" style="text-align:center;color:var(--text-dim);padding:30px;">No trade activity yet. Data will appear after the first rebalance cycle.</td></tr>
+        <tr><td colspan="14" style="text-align:center;color:var(--text-dim);padding:30px;">No trade activity yet. Data will appear after the first rebalance cycle.</td></tr>
         {% endif %}
         </tbody>
     </table>

@@ -16,6 +16,11 @@
             <tr><td>Trim EV Threshold</td><td class="td-mono">{{ strategy.min_trim_ev }}</td></tr>
             <tr><td>Min Market Volume</td><td class="td-mono">${{ "%.0f"|format(strategy.min_market_volume) }}</td></tr>
             <tr><td>Max Slot Spread</td><td class="td-mono">{{ strategy.max_slot_spread }}</td></tr>
+            <tr><td>Locked Wins</td><td class="td-mono">{{ "ON" if strategy.enable_locked_wins else "OFF" }}</td></tr>
+            <tr><td>Locked Win Kelly</td><td class="td-mono">{{ strategy.locked_win_kelly_fraction }}x</td></tr>
+            <tr><td>Max Locked Win/Slot</td><td class="td-mono">${{ "%.2f"|format(strategy.max_locked_win_per_slot_usd) }}</td></tr>
+            <tr><td>Force Exit Hours</td><td class="td-mono">{{ strategy.force_exit_hours }}h before settle</td></tr>
+            <tr><td>Exit Cooldown</td><td class="td-mono">{{ strategy.exit_cooldown_hours }}h</td></tr>
             </tbody>
         </table>
     </div>
@@ -44,6 +49,19 @@
             </tbody>
         </table>
     </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header"><h3>Strategy Variants (A-D)</h3></div>
+    <table>
+        <thead><tr><th>Strat</th><th>Name</th><th>Max NO Price</th><th>Kelly</th><th>Cal. Conf.</th><th>Max Pos/Event</th><th>Force Exit</th></tr></thead>
+        <tbody>
+        <tr><td><span class="tag tag-settling">A</span></td><td>Conservative Far</td><td class="td-mono">0.70</td><td class="td-mono">0.5x</td><td class="td-mono">90%</td><td class="td-mono">3</td><td class="td-mono">1.0h</td></tr>
+        <tr><td><span class="tag tag-stable">B</span></td><td>Locked Aggressor</td><td class="td-mono">0.70</td><td class="td-mono">0.5x / 1.0x locked</td><td class="td-mono">90%</td><td class="td-mono">6</td><td class="td-mono">1.0h</td></tr>
+        <tr><td><span class="tag tag-breakout-up">C</span></td><td>Close Range</td><td class="td-mono">0.75</td><td class="td-mono">0.3x</td><td class="td-mono">75%</td><td class="td-mono">4</td><td class="td-mono">1.0h</td></tr>
+        <tr><td><span class="tag tag-breakout-down">D</span></td><td>Quick Exit</td><td class="td-mono">0.65</td><td class="td-mono">0.5x</td><td class="td-mono">90%</td><td class="td-mono">4</td><td class="td-mono">2.0h</td></tr>
+        </tbody>
+    </table>
 </div>
 
 <div class="panel">

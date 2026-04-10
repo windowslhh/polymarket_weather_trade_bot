@@ -141,7 +141,8 @@ def create_app(store, rebalancer, config) -> Flask:
         exposure = _run_async(st.get_total_exposure())
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
         decision_log = _run_async(st.get_decision_log(limit=8))
-        strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
         strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
@@ -209,7 +210,8 @@ def create_app(store, rebalancer, config) -> Flask:
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=20))
         exposure = _run_async(st.get_total_exposure())
-        strategy_summary = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
         strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
 
         # Get current prices for P&L calculation
@@ -234,18 +236,19 @@ def create_app(store, rebalancer, config) -> Flask:
             p["buy_reason"] = p.get("buy_reason", "")
             p["exit_reason"] = p.get("exit_reason", "")
 
-        # Group by strategy (dynamic: supports A-D)
-        all_strats = sorted({p.get("strategy", "B") for p in open_pos} | {"A", "B", "C", "D"})
-        strategies = {s: [] for s in all_strats}
-        strat_pnl = {s: 0.0 for s in all_strats}  # unrealized
-        strat_exposure = {s: 0.0 for s in all_strats}
+        # Group by strategy — only A-D valid; legacy E/F remapped to B
+        VALID_STRATS = ["A", "B", "C", "D"]
+        strategies = {s: [] for s in VALID_STRATS}
+        strat_pnl = {s: 0.0 for s in VALID_STRATS}  # unrealized
+        strat_exposure = {s: 0.0 for s in VALID_STRATS}
         for p in open_pos:
             s = p.get("strategy", "B")
-            if s in strategies:
-                strategies[s].append(p)
-                strat_exposure[s] += p["size_usd"]
-                if p["unrealized_pnl"] is not None:
-                    strat_pnl[s] += p["unrealized_pnl"]
+            if s not in strategies:
+                s = "B"  # remap legacy strategies (E/F) to B
+            strategies[s].append(p)
+            strat_exposure[s] += p["size_usd"]
+            if p["unrealized_pnl"] is not None:
+                strat_pnl[s] += p["unrealized_pnl"]
 
         # Group by city
         cities = {}
@@ -386,22 +389,25 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Compute per-strategy stats (dynamic: supports A-D)
-        all_strats = sorted({p.get("strategy", "B") for p in open_pos + closed_pos} | {"A", "B", "C", "D"})
-        strat_pnl = {s: 0.0 for s in all_strats}
-        strat_exposure = {s: 0.0 for s in all_strats}
-        strat_counts = {s: {"open": 0, "settled": 0} for s in all_strats}
+        # Per-strategy stats — only A-D valid; legacy E/F remapped to B
+        VALID_STRATS = ["A", "B", "C", "D"]
+        strat_pnl = {s: 0.0 for s in VALID_STRATS}
+        strat_exposure = {s: 0.0 for s in VALID_STRATS}
+        strat_counts = {s: {"open": 0, "settled": 0} for s in VALID_STRATS}
         for p in open_pos:
             s = p.get("strategy", "B")
-            if s in strat_pnl:
-                strat_exposure[s] += p["size_usd"]
-                strat_counts[s]["open"] += 1
-                current = gamma_prices.get(p["token_id"])
-                if current:
-                    strat_pnl[s] += (current - p["entry_price"]) * p["shares"]
+            if s not in strat_pnl:
+                s = "B"  # remap legacy
+            strat_exposure[s] += p["size_usd"]
+            strat_counts[s]["open"] += 1
+            current = gamma_prices.get(p["token_id"])
+            if current:
+                strat_pnl[s] += (current - p["entry_price"]) * p["shares"]
         for p in closed_pos:
             s = p.get("strategy", "B")
-            if s in strat_counts and p.get("status") == "settled":
+            if s not in strat_counts:
+                s = "B"
+            if p.get("status") == "settled":
                 strat_counts[s]["settled"] += 1
 
         return render_template(

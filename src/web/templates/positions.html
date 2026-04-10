@@ -46,12 +46,12 @@
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">
             <span style="color:var(--text-muted);">{{ strat_positions|length }} positions</span>
-            <span style="color:var(--text-muted);">${{ "%.2f"|format(strat_exposure[strat_name]) }}</span>
-            {% set strat_total = strat_realized[strat_name] + strat_pnl[strat_name] %}
+            <span style="color:var(--text-muted);">${{ "%.2f"|format(strat_exposure.get(strat_name, 0)) }}</span>
+            {% set strat_total = strat_realized.get(strat_name, 0) + strat_pnl.get(strat_name, 0) %}
             <span class="{{ 'positive' if strat_total >= 0 else 'negative' }}" style="font-weight:600;">
                 {{ '+' if strat_total > 0 else '' }}${{ "%.2f"|format(strat_total) }}
             </span>
-            <span style="color:var(--text-dim);font-size:11px;">(R:{{ '+' if strat_realized[strat_name] > 0 else '' }}${{ "%.1f"|format(strat_realized[strat_name]) }} / U:{{ '+' if strat_pnl[strat_name] > 0 else '' }}${{ "%.1f"|format(strat_pnl[strat_name]) }})</span>
+            <span style="color:var(--text-dim);font-size:11px;">(R:{{ '+' if strat_realized.get(strat_name, 0) > 0 else '' }}${{ "%.1f"|format(strat_realized.get(strat_name, 0)) }} / U:{{ '+' if strat_pnl.get(strat_name, 0) > 0 else '' }}${{ "%.1f"|format(strat_pnl.get(strat_name, 0)) }})</span>
         </div>
     </div>
     {% if strat_positions %}
