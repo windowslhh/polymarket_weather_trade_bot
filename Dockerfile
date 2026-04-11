@@ -11,8 +11,9 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir . && \
     apt-get purge -y gcc && apt-get autoremove -y
 
-# Copy source code
+# Copy source code + scripts
 COPY src/ src/
+COPY scripts/ scripts/
 COPY config.yaml .
 
 # Data directory (mount as volume for persistence)
