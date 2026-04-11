@@ -22,9 +22,9 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
 ENSEMBLE_MODELS = [
-    "gfs_seamless_ensemble",
-    "icon_seamless_ensemble",
-    "ecmwf_ifs025_ensemble",
+    "gfs_seamless",
+    "icon_seamless",
+    "ecmwf_ifs025",
 ]
 
 DEFAULT_CONFIDENCE_F = 4.0
@@ -57,6 +57,12 @@ async def get_ensemble_forecast(
         data = await fetch_with_retry(client, ENSEMBLE_URL, params)
         daily = data.get("daily", {})
 
+        # Collect all member highs for ensemble statistics.
+        # API returns keys like:
+        #   temperature_2m_max_ncep_gefs_seamless          (model mean)
+        #   temperature_2m_max_member01_ncep_gefs_seamless  (member value)
+        # We use ALL values (means + members) for the overall ensemble mean,
+        # but only non-member keys for model_count and inter-model spread.
         all_highs: list[float] = []
         model_count = 0
         for key, values in daily.items():
@@ -64,7 +70,8 @@ async def get_ensemble_forecast(
                 for v in values:
                     if v is not None:
                         all_highs.append(float(v))
-                if values:
+                # Only count non-member keys as distinct models
+                if values and "member" not in key:
                     model_count += 1
 
         if not all_highs:
@@ -75,10 +82,12 @@ async def get_ensemble_forecast(
             sum((h - ensemble_mean) ** 2 for h in all_highs) / len(all_highs)
         ) if len(all_highs) > 1 else DEFAULT_CONFIDENCE_F
 
-        # Inter-model spread
+        # Inter-model spread — only from model mean keys (not individual members)
         model_means: list[float] = []
         for key, values in daily.items():
-            if key.startswith("temperature_2m_max") and isinstance(values, list):
+            if (key.startswith("temperature_2m_max")
+                    and isinstance(values, list)
+                    and "member" not in key):
                 valid = [float(v) for v in values if v is not None]
                 if valid:
                     model_means.append(sum(valid) / len(valid))
