@@ -73,6 +73,11 @@ class Rebalancer:
         self._last_unrealized: float = 0.0
         self._last_gamma_prices: dict[str, float] = {}
 
+        # Cached Forecast objects — refreshed every 15 min (position check)
+        # and every 60 min (full rebalance).  Used by position check for
+        # better exit/trim decisions.
+        self._cached_forecasts: dict[str, "Forecast"] = {}
+
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
 
@@ -142,6 +147,39 @@ class Rebalancer:
         except Exception:
             logger.exception("METAR refresh failed")
 
+    async def refresh_forecasts(self) -> None:
+        """Lightweight forecast refresh for cities with open positions.
+
+        Runs every 15 min alongside position check to reduce forecast latency
+        from 60 min (rebalance-only) to 15 min.  Only fetches for cities
+        with active positions to minimise API calls.
+        """
+        try:
+            all_positions = await self._portfolio.get_all_open_positions()
+            if not all_positions:
+                logger.debug("Forecast refresh: no open positions, skipping")
+                return
+
+            cities_with_positions = {p["city"] for p in all_positions}
+            city_configs = [
+                c for c in self._config.cities if c.name in cities_with_positions
+            ]
+            if not city_configs:
+                return
+
+            forecasts = await get_forecasts_batch(city_configs)
+            if forecasts:
+                self._cached_forecasts.update(forecasts)
+                logger.info(
+                    "Forecast refresh: %d cities updated (%s)",
+                    len(forecasts),
+                    ", ".join(f"{c}: {f.predicted_high_f:.0f}°F" for c, f in forecasts.items()),
+                )
+            else:
+                logger.warning("Forecast refresh: no forecasts returned")
+        except Exception:
+            logger.exception("Forecast refresh failed")
+
     # ── Settlement + position check ──────────────────────────────────
 
     async def run_settlement_only(self) -> None:
@@ -162,15 +200,15 @@ class Rebalancer:
 
         Unlike a full rebalance cycle, this does NOT:
         - Discover new markets
-        - Fetch forecasts
         - Generate new entry (NO) signals
 
-        It ONLY:
-        - Fetches latest METAR observations
-        - Updates DailyMaxTracker
-        - Evaluates locked-win BUY signals for existing events
-        - Evaluates EXIT signals for threatened held positions
-        - Executes urgent trades (locked wins + exits)
+        It DOES:
+        - Refresh forecasts for cities with open positions (15-min latency)
+        - Fetch latest METAR observations
+        - Update DailyMaxTracker
+        - Evaluate locked-win BUY signals for existing events
+        - Evaluate EXIT signals for threatened held positions (with forecast)
+        - Execute urgent trades (locked wins + exits)
         """
         logger.info("--- Position check start ---")
         signals: list[TradeSignal] = []
@@ -189,8 +227,13 @@ class Rebalancer:
             if not city_configs:
                 return []
 
-            # Fetch fresh METAR observations (shared helper)
-            daily_maxes, city_observations = await self._fetch_observations(city_configs)
+            # Refresh forecasts + METAR in parallel for minimum latency
+            import asyncio
+            forecast_task = self.refresh_forecasts()
+            metar_task = self._fetch_observations(city_configs)
+            _, (daily_maxes, city_observations) = await asyncio.gather(
+                forecast_task, metar_task,
+            )
 
             # Group positions by (event_id, strategy)
             event_strat_positions: dict[tuple[str, str], list[dict]] = defaultdict(list)
@@ -276,10 +319,13 @@ class Rebalancer:
                     event_obj, daily_max, strat_cfg, held_token_ids, days_ahead=days_ahead,
                 )
 
+                # Use cached forecast for better exit decisions
+                forecast = self._cached_forecasts.get(city)
+
                 # Evaluate exit signals (urgent sells) — only same-day markets
                 exit_signals = evaluate_exit_signals(
                     event_obj, observation, daily_max, held_no_slots, strat_cfg,
-                    days_ahead=days_ahead, error_dist=error_dist,
+                    days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
                 )
 
                 # P0-3 FIX: Query exposure once before loop, accumulate in-memory
@@ -397,6 +443,7 @@ class Rebalancer:
         active_cities = {e.city for e in events}
         city_configs = [c for c in self._config.cities if c.name in active_cities]
         forecasts = await get_forecasts_batch(city_configs)
+        self._cached_forecasts.update(forecasts)  # keep cache fresh
         logger.info("Fetched forecasts for %d cities", len(forecasts))
 
         # Fetch +1 / +2 day forecasts for dashboard (best-effort, don't block trading)

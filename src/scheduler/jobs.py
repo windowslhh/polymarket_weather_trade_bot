@@ -61,7 +61,7 @@ def setup_scheduler(config: AppConfig, rebalancer: Rebalancer) -> AsyncIOSchedul
     )
 
     logger.info(
-        "Scheduler configured: rebalance every %d min, settlement check every 15 min, "
+        "Scheduler configured: rebalance every %d min, settlement+forecast check every 15 min, "
         "METAR sync at :57/:03",
         config.scheduling.rebalance_interval_minutes,
     )
