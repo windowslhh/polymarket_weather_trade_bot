@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -214,6 +215,20 @@ class Rebalancer:
                 if not observation or daily_max is None:
                     continue
 
+                # Infer market_date from slot_label (e.g. "...on April 11?")
+                # to correctly compute days_ahead for exit logic.
+                market_date = date.today()
+                sample_label = positions[0].get("slot_label", "")
+                m = re.search(r'on (\w+ \d+)\??$', sample_label)
+                if m:
+                    try:
+                        market_date = datetime.strptime(
+                            f"{m.group(1)} {date.today().year}", "%B %d %Y"
+                        ).date()
+                    except ValueError:
+                        pass
+                days_ahead = (market_date - date.today()).days
+
                 # Build held NO slots from positions
                 held_no_slots: list[TempSlot] = []
                 held_token_ids: set[str] = set()
@@ -252,19 +267,19 @@ class Rebalancer:
                     event_id=event_id,
                     condition_id="",
                     city=city,
-                    market_date=date.today(),
+                    market_date=market_date,
                     slots=held_no_slots,
                 )
 
                 # Evaluate locked-win signals (new BUY opportunities)
                 locked_signals = evaluate_locked_win_signals(
-                    event_obj, daily_max, strat_cfg, held_token_ids, days_ahead=0,
+                    event_obj, daily_max, strat_cfg, held_token_ids, days_ahead=days_ahead,
                 )
 
-                # Evaluate exit signals (urgent sells)
+                # Evaluate exit signals (urgent sells) — only same-day markets
                 exit_signals = evaluate_exit_signals(
                     event_obj, observation, daily_max, held_no_slots, strat_cfg,
-                    days_ahead=0, error_dist=error_dist,
+                    days_ahead=days_ahead, error_dist=error_dist,
                 )
 
                 # P0-3 FIX: Query exposure once before loop, accumulate in-memory

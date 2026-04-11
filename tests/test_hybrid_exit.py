@@ -236,12 +236,12 @@ class TestLayer3ForceExit:
     def test_force_exit_within_threshold(self):
         """Close distance + near settlement → force exit even if EV positive."""
         config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
-        # exit_distance = 4.0, slot [85,89], daily_max=82, distance=3 < 4
+        # exit_distance = 10*0.25=2.5, slot [85,89], daily_max=84, distance=1 < 2.5
         # price_no=0.50 → positive EV normally → but hours_to_settlement=0.5 → force exit
         held = _slot(85, 89, price_no=0.50)
         event = _event([held])
         sigs = evaluate_exit_signals(
-            event, _obs(82.0), 82.0, [held], config,
+            event, _obs(84.0), 84.0, [held], config,
             forecast=_forecast(75.0),
             hours_to_settlement=0.5,
         )
@@ -263,10 +263,11 @@ class TestLayer3ForceExit:
     def test_force_exit_exactly_at_threshold(self):
         """hours_to_settlement == force_exit_hours → force exit (<=)."""
         config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        # exit_distance = 10*0.25=2.5, daily_max=84, distance=1 < 2.5
         held = _slot(85, 89, price_no=0.50)
         event = _event([held])
         sigs = evaluate_exit_signals(
-            event, _obs(82.0), 82.0, [held], config,
+            event, _obs(84.0), 84.0, [held], config,
             forecast=_forecast(75.0),
             hours_to_settlement=1.0,
         )
@@ -301,11 +302,12 @@ class TestLayer3ForceExit:
     def test_custom_force_exit_hours(self):
         """force_exit_hours=2.0 → force exit within 2 hours."""
         config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=2.0)
+        # exit_distance = 10*0.25=2.5, daily_max=84, distance=1 < 2.5
         held = _slot(85, 89, price_no=0.85)
         event = _event([held])
         # 1.5h to settlement, within 2h threshold
         sigs = evaluate_exit_signals(
-            event, _obs(82.0), 82.0, [held], config,
+            event, _obs(84.0), 84.0, [held], config,
             forecast=_forecast(75.0),
             hours_to_settlement=1.5,
         )
@@ -322,10 +324,10 @@ class TestBackwardCompatibility:
     def test_old_style_call_no_new_params(self):
         """Call without forecast/error_dist/hours_to_settlement → old behavior."""
         config = StrategyConfig(no_distance_threshold_f=8)
-        # exit_distance = 8 * 0.4 = 3.2
+        # exit_distance = 8 * 0.25 = 2.0
         held = _slot(80, 84)
         event = _event([held])
-        # daily_max=81, distance=0 < 3.2 → should exit
+        # daily_max=81, distance=0 < 2.0 → should exit
         sigs = evaluate_exit_signals(
             event, _obs(81.0), 81.0, [held], config,
         )
@@ -346,17 +348,20 @@ class TestBackwardCompatibility:
     def test_trend_adjustment_still_works(self):
         """Trend-based exit distance adjustment preserved."""
         config = StrategyConfig(no_distance_threshold_f=10)
-        # STABLE: exit_distance = 5.0, BREAKOUT: 3.0
+        # New multipliers: default=0.25→2.5, STABLE=0.3→3.0
         held = _slot(80, 84)
         event = _event([held])
-        # daily_max=76, distance=4
-        # STABLE: 4 < 5 → exit; default: 4 >= 4 → no exit
+        # daily_max=78, distance=2
+        # STABLE: exit_distance=3.0 → 2 < 3 → exit
+        # default: exit_distance=2.5 → 2 < 2.5 → exit
+        # daily_max=77.5, distance=2.5
+        # default: 2.5 < 2.5 is False → no exit; STABLE: 2.5 < 3 → exit
         sig_stable = evaluate_exit_signals(
-            event, _obs(76.0), 76.0, [held], config,
+            event, _obs(77.5), 77.5, [held], config,
             trend=TrendState.STABLE,
         )
         sig_default = evaluate_exit_signals(
-            event, _obs(76.0), 76.0, [held], config,
+            event, _obs(77.5), 77.5, [held], config,
         )
         assert len(sig_stable) == 1
         assert len(sig_default) == 0
@@ -369,9 +374,9 @@ class TestBackwardCompatibility:
 class TestExitBoundary:
 
     def test_distance_exactly_at_exit_threshold(self):
-        """distance == exit_distance → no exit (uses '<' not '<=')."""
+        """distance > exit_distance → no exit."""
         config = StrategyConfig(no_distance_threshold_f=10)
-        # exit_distance = 4.0, slot [80,84], daily_max=76, distance=4.0
+        # exit_distance = 2.5, slot [80,84], daily_max=76, distance=4.0 > 2.5
         held = _slot(80, 84)
         event = _event([held])
         sigs = evaluate_exit_signals(event, _obs(76.0), 76.0, [held], config)

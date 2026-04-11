@@ -294,11 +294,14 @@ def evaluate_exit_signals(
         return []
 
     # Compute exit distance threshold based on trend
-    exit_distance = config.no_distance_threshold_f * 0.4
+    # Use tighter multipliers to avoid premature exits on NO positions.
+    # NO wins when temp does NOT land in the slot, so even 3-4°F distance
+    # is still a safe position — only exit when truly threatened.
+    exit_distance = config.no_distance_threshold_f * 0.25
     if trend == TrendState.STABLE:
-        exit_distance = config.no_distance_threshold_f * 0.5
-    elif trend in (TrendState.BREAKOUT_UP, TrendState.BREAKOUT_DOWN):
         exit_distance = config.no_distance_threshold_f * 0.3
+    elif trend in (TrendState.BREAKOUT_UP, TrendState.BREAKOUT_DOWN):
+        exit_distance = config.no_distance_threshold_f * 0.2
 
     signals: list[TradeSignal] = []
     for slot in held_no_slots:

@@ -553,36 +553,36 @@ class TestEvaluateExitSignalsAdvanced:
         assert evaluate_exit_signals(event, obs, 80.0, [held_slot], config, days_ahead=2) == []
 
     def test_stable_trend_wider_exit_threshold(self):
-        """STABLE uses 0.5x threshold = wider → harder to exit."""
+        """STABLE uses 0.3x threshold = wider → harder to exit."""
         config = StrategyConfig(no_distance_threshold_f=10)
-        # exit_distance: default=10*0.4=4, STABLE=10*0.5=5
-        # slot [80,84], daily_max=76 → distance to lower=4
+        # exit_distance: default=10*0.25=2.5, STABLE=10*0.3=3.0
+        # slot [80,84], daily_max=77.5 → distance to lower=2.5
         held_slot = _make_slot(80, 84, price_no=0.92)
         event = _make_event(slots=[held_slot])
-        obs = Observation(icao="KLGA", temp_f=76.0, observation_time=datetime.now(timezone.utc))
+        obs = Observation(icao="KLGA", temp_f=77.5, observation_time=datetime.now(timezone.utc))
 
-        # Default: distance=4, exit_distance=4 → 4 < 4 is False → NO exit
-        sig_default = evaluate_exit_signals(event, obs, 76.0, [held_slot], config)
-        # STABLE: distance=4, exit_distance=5 → 4 < 5 → EXIT
-        sig_stable = evaluate_exit_signals(event, obs, 76.0, [held_slot], config, trend=TrendState.STABLE)
+        # Default: distance=2.5, exit_distance=2.5 → 2.5 < 2.5 is False → NO exit
+        sig_default = evaluate_exit_signals(event, obs, 77.5, [held_slot], config)
+        # STABLE: distance=2.5, exit_distance=3.0 → 2.5 < 3.0 → EXIT
+        sig_stable = evaluate_exit_signals(event, obs, 77.5, [held_slot], config, trend=TrendState.STABLE)
 
         assert len(sig_default) == 0
         assert len(sig_stable) == 1
 
     def test_breakout_trend_tighter_exit_threshold(self):
-        """BREAKOUT uses 0.3x threshold → tighter → exits sooner."""
+        """BREAKOUT uses 0.2x threshold → tighter → exits sooner."""
         config = StrategyConfig(no_distance_threshold_f=10)
-        # exit_distance: BREAKOUT_UP=10*0.3=3
-        # slot [80,84], daily_max=78 → distance to lower=2
+        # exit_distance: BREAKOUT_UP=10*0.2=2.0
+        # slot [80,84], daily_max=79 → distance to lower=1
         held_slot = _make_slot(80, 84, price_no=0.92)
         event = _make_event(slots=[held_slot])
-        obs = Observation(icao="KLGA", temp_f=78.0, observation_time=datetime.now(timezone.utc))
+        obs = Observation(icao="KLGA", temp_f=79.0, observation_time=datetime.now(timezone.utc))
 
-        # BREAKOUT_UP: distance=2, exit_distance=3 → 2 < 3 → EXIT
-        sig = evaluate_exit_signals(event, obs, 78.0, [held_slot], config, trend=TrendState.BREAKOUT_UP)
+        # BREAKOUT_UP: distance=1, exit_distance=2.0 → 1 < 2 → EXIT
+        sig = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_UP)
         assert len(sig) == 1
         # BREAKOUT_DOWN same multiplier
-        sig2 = evaluate_exit_signals(event, obs, 78.0, [held_slot], config, trend=TrendState.BREAKOUT_DOWN)
+        sig2 = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_DOWN)
         assert len(sig2) == 1
 
     def test_exit_signal_has_zero_ev_and_wp(self):
