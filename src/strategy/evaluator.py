@@ -162,6 +162,7 @@ def evaluate_trim_signals(
     """
     signals: list[TradeSignal] = []
     locked_ids = locked_win_token_ids or set()
+    ep = entry_prices or {}
 
     for slot in held_no_slots:
         # NEVER trim locked wins — daily_max already exceeded slot upper,
@@ -185,7 +186,14 @@ def evaluate_trim_signals(
                 continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
-        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
+
+        # Use ENTRY price for EV calculation, not current market price.
+        # When the market moves in our favor (NO price rises because market
+        # agrees NO will win), current-price EV goes negative even though
+        # holding to settlement is still highly profitable at our entry cost.
+        # Entry-price EV answers: "is this position still a good hold?"
+        price_for_ev = ep.get(slot.token_id_no, slot.price_no)
+        ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
 
         # Only trim if EV has gone clearly negative — hold positions with marginal positive EV
         # to avoid losing round-trip spread costs
@@ -199,8 +207,8 @@ def evaluate_trim_signals(
                 estimated_win_prob=win_prob,
             ))
             logger.info(
-                "TRIM signal: %s slot %s EV=%.4f < -%.4f (win_prob=%.2f)",
-                event.city, slot.outcome_label, ev, config.min_trim_ev, win_prob,
+                "TRIM signal: %s slot %s EV=%.4f < -%.4f (win_prob=%.2f, entry_price=%.3f)",
+                event.city, slot.outcome_label, ev, config.min_trim_ev, win_prob, price_for_ev,
             )
 
     return signals
