@@ -573,6 +573,12 @@ class Rebalancer:
                     event, daily_max, strat_cfg, held_token_ids, days_ahead,
                 )
 
+                # Identify locked-win positions (bought as locked wins, from DB)
+                locked_win_token_ids: set[str] = set()
+                for pos in existing_positions:
+                    if "LOCKED WIN" in (pos.get("buy_reason") or ""):
+                        locked_win_token_ids.add(pos["token_id"])
+
                 # Phase 5: Exit + Trim signals
                 exit_signals = evaluate_exit_signals(
                     event, observation, daily_max, held_no_slots, strat_cfg, trend_state,
@@ -582,6 +588,8 @@ class Rebalancer:
                 )
                 trim_signals = evaluate_trim_signals(
                     event, forecast, held_no_slots, strat_cfg, error_dist,
+                    locked_win_token_ids=locked_win_token_ids,
+                    daily_max_f=daily_max,
                 )
 
                 # Size and tag entry signals with strategy label

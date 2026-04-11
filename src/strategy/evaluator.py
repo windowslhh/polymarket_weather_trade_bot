@@ -145,19 +145,45 @@ def evaluate_trim_signals(
     config: StrategyConfig,
     error_dist: ForecastErrorDistribution | None = None,
     entry_prices: dict[str, float] | None = None,
+    locked_win_token_ids: set[str] | None = None,
+    daily_max_f: float | None = None,
 ) -> list[TradeSignal]:
     """Generate SELL signals for held NO positions whose EV has decayed.
 
     Unlike exit signals (which trigger on temperature proximity), trim signals
     fire when the expected value drops below min_trim_ev due to forecast changes.
 
+    NEVER trims locked-win positions — these are guaranteed winners where the
+    forecast-based EV is misleading (daily_max already exceeded slot upper).
+
     Hold-to-settlement bias: only trim if EV is negative. Positions with slightly
     positive EV (between 0 and min_trim_ev) are held since the round-trip spread
     cost of selling and re-entering is often higher than the EV decay.
     """
     signals: list[TradeSignal] = []
+    locked_ids = locked_win_token_ids or set()
 
     for slot in held_no_slots:
+        # NEVER trim locked wins — daily_max already exceeded slot upper,
+        # NO is guaranteed to win.  Forecast-based EV is misleading here
+        # because it doesn't account for the observed daily maximum.
+        if slot.token_id_no in locked_ids:
+            logger.debug(
+                "TRIM skip (locked win): %s slot %s",
+                event.city, slot.outcome_label,
+            )
+            continue
+
+        # Also protect slots where daily_max currently exceeds upper bound
+        # (locked-win condition is true NOW, even if not bought as locked win)
+        if daily_max_f is not None and slot.temp_upper_f is not None:
+            if daily_max_f > slot.temp_upper_f:
+                logger.debug(
+                    "TRIM skip (daily_max %.1f > upper %.1f): %s slot %s",
+                    daily_max_f, slot.temp_upper_f, event.city, slot.outcome_label,
+                )
+                continue
+
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
         ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
@@ -230,6 +256,16 @@ def evaluate_locked_win_signals(
         # → no locked win either way for open-upper slots
 
         if not is_locked:
+            continue
+
+        # Reject locked wins where NO price is too high — thin margin gets
+        # eaten by fees.  E.g. $0.97 → only $0.03 profit per share, ~1% ROI
+        # after fees.  Cap at 0.90 to ensure at least ~10% gross return.
+        if slot.price_no > 0.90:
+            logger.debug(
+                "LOCKED WIN skip (price %.3f > 0.90): %s slot %s — margin too thin",
+                slot.price_no, event.city, slot.outcome_label,
+            )
             continue
 
         # Locked win: near-certain probability (0.99), compute EV
