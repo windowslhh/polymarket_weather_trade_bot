@@ -311,11 +311,11 @@ def create_app(store, rebalancer, config) -> Flask:
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=50))
 
-        # Build lookup: (city, slot_label) → latest BUY decision reason
+        # Build lookup: (city, slot_label, strategy) → latest BUY decision reason
         buy_reasons = {}
         for d in decisions:
             if d.get("action") == "BUY":
-                key = (d.get("city", ""), d.get("slot_label", ""))
+                key = (d.get("city", ""), d.get("slot_label", ""), d.get("strategy", "B"))
                 if key not in buy_reasons:
                     buy_reasons[key] = d.get("reason", "") or f"EV={d.get('expected_value', 0):.3f}, win={d.get('win_prob', 0)*100:.0f}%"
 
@@ -327,8 +327,10 @@ def create_app(store, rebalancer, config) -> Flask:
             current = gamma_prices.get(p["token_id"])
             entry = p["entry_price"]
             pnl = round((current - entry) * p["shares"], 3) if current else None
-            reason_key = (p["city"], p.get("slot_label", ""))
-            reason = buy_reasons.get(reason_key, "")
+            reason = p.get("buy_reason") or ""
+            if not reason:
+                reason_key = (p["city"], p.get("slot_label", ""), p.get("strategy", "B"))
+                reason = buy_reasons.get(reason_key, "")
             slot_short, market_date = _parse_slot_label(p.get("slot_label", ""))
             timeline.append({
                 "time": p["created_at"][:16] if p.get("created_at") else "",
@@ -353,13 +355,16 @@ def create_app(store, rebalancer, config) -> Flask:
         sell_reasons = {}
         for d in decisions:
             if d.get("action") == "SELL":
-                key = (d.get("city", ""), d.get("slot_label", ""))
+                key = (d.get("city", ""), d.get("slot_label", ""), d.get("strategy", "B"))
                 if key not in sell_reasons:
                     sell_reasons[key] = d.get("reason", "") or "Trim/Exit"
 
         for p in closed_pos:
-            reason_key = (p["city"], p.get("slot_label", ""))
             slot_short, market_date = _parse_slot_label(p.get("slot_label", ""))
+            exit_reason = p.get("exit_reason") or ""
+            if not exit_reason:
+                reason_key = (p["city"], p.get("slot_label", ""), p.get("strategy", "B"))
+                exit_reason = sell_reasons.get(reason_key, "Settled" if p.get("status") == "settled" else "Closed")
             timeline.append({
                 "time": p.get("closed_at", "")[:16] if p.get("closed_at") else "",
                 "city": p["city"],
@@ -371,7 +376,7 @@ def create_app(store, rebalancer, config) -> Flask:
                 "entry": f"{p['entry_price']:.3f}",
                 "current": "-",
                 "pnl": "-",
-                "reason": sell_reasons.get(reason_key, "Settled" if p.get("status") == "settled" else "Closed"),
+                "reason": exit_reason,
                 "type": "settled" if p.get("status") == "settled" else "closed",
                 "sort_key": p.get("closed_at") or p.get("created_at", ""),
             })

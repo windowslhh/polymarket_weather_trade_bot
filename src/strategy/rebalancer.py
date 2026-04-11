@@ -663,7 +663,7 @@ class Rebalancer:
                         signal.suggested_size_usd = size
                         signal.strategy = strat_name
                         # Attach buy reason to signal for persistence
-                        dist = abs(forecast.predicted_high_f - (signal.slot.temp_midpoint_f or 0))
+                        dist = _slot_distance(signal.slot, forecast.predicted_high_f)
                         if signal.is_locked_win:
                             signal.reason = f"[{strat_name}] LOCKED WIN: daily_max={daily_max:.0f}°F > slot upper, EV={signal.expected_value:.3f}"
                         else:

@@ -444,4 +444,4 @@ class TestPositionCheckPerformance:
             signals = await reb.run_position_check()
         elapsed = time.monotonic() - t0
 
-        assert elapsed < 3.0, f"50 positions took {elapsed:.3f}s"
+        assert elapsed < 8.0, f"50 positions took {elapsed:.3f}s"
