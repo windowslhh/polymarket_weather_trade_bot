@@ -343,11 +343,11 @@ def create_app(store, rebalancer, config) -> Flask:
         # Build unified timeline
         timeline = []
 
-        # 1. Open positions
+        # 1. Open positions (BUY rows)
         for p in open_pos:
             current = gamma_prices.get(p["token_id"])
             entry = p["entry_price"]
-            pnl = round((current - entry) * p["shares"], 3) if current else None
+            unrealized = round((current - entry) * p["shares"], 3) if current else None
             reason = p.get("buy_reason") or ""
             if not reason:
                 reason_key = (p["city"], p.get("slot_label", ""), p.get("strategy", "B"))
@@ -360,18 +360,17 @@ def create_app(store, rebalancer, config) -> Flask:
                 "market_date": market_date,
                 "strategy": p.get("strategy", "B"),
                 "action": "BUY",
-                "forecast": "",
-                "win_prob": "",
-                "ev": "",
+                "size": f"${p['size_usd']:.1f}",
                 "entry": f"{entry:.3f}",
+                "exit": "-",
                 "current": f"{current:.3f}" if current else "-",
-                "pnl": f"{'+'if pnl>0 else ''}${pnl:.3f}" if pnl is not None else "-",
+                "pnl": f"{'+'if unrealized>0 else ''}${unrealized:.3f}" if unrealized is not None else "-",
                 "reason": reason,
                 "type": "open",
                 "sort_key": p.get("created_at", ""),
             })
 
-        # 2. Settled/closed positions
+        # 2. Closed/settled positions (SELL rows)
         # Build sell reason lookup
         sell_reasons = {}
         for d in decisions:
@@ -393,9 +392,10 @@ def create_app(store, rebalancer, config) -> Flask:
                 "market_date": market_date,
                 "strategy": p.get("strategy", "B"),
                 "action": "SELL",
-                "forecast": "", "win_prob": "", "ev": "",
+                "size": f"${p['size_usd']:.1f}",
                 "entry": f"{p['entry_price']:.3f}",
-                "current": f"{p['exit_price']:.3f}" if p.get("exit_price") is not None else "-",
+                "exit": f"{p['exit_price']:.3f}" if p.get("exit_price") is not None else "-",
+                "current": "-",
                 "pnl": f"{'+'if p.get('realized_pnl',0)>0 else ''}${p['realized_pnl']:.3f}" if p.get("realized_pnl") is not None else "-",
                 "reason": exit_reason,
                 "type": "settled" if p.get("status") == "settled" else "closed",
@@ -411,12 +411,13 @@ def create_app(store, rebalancer, config) -> Flask:
                     "city": d.get("city", ""),
                     "slot": skip_slot_short,
                     "market_date": skip_market_date,
-                    "strategy": "",
+                    "strategy": d.get("strategy", ""),
                     "action": "SKIP",
-                    "forecast": f"{d['forecast_high_f']:.0f}°F" if d.get("forecast_high_f") is not None else "-",
-                    "win_prob": f"{d['win_prob']*100:.0f}%" if d.get("win_prob") is not None else "-",
-                    "ev": f"{d['expected_value']:.3f}" if d.get("expected_value") is not None else "-",
-                    "entry": "-", "current": "-", "pnl": "-",
+                    "size": "-",
+                    "entry": f"{d['price']:.3f}" if d.get("price") else "-",
+                    "exit": "-",
+                    "current": "-",
+                    "pnl": "-",
                     "reason": d.get("reason", ""),
                     "type": "decision",
                     "sort_key": d.get("cycle_at", ""),
