@@ -30,7 +30,7 @@ from src.strategy.sizing import compute_size
 from src.strategy.trend import ForecastTrend
 from src.weather.forecast import get_forecasts_batch
 from src.weather.historical import ForecastErrorDistribution
-from src.weather.metar import DailyMaxTracker
+from src.weather.metar import DailyMaxTracker, get_today_metar_history
 from src.weather.models import Observation
 from src.settlement.settler import check_settlements
 from src.weather.settlement import fetch_settlement_temp, validate_station_config
@@ -89,6 +89,33 @@ class Rebalancer:
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
+
+    async def backfill_today_observations(self) -> None:
+        """Backfill today's METAR history for all cities on startup.
+
+        Fetches up to 24h of historical METAR data and replays it into
+        DailyMaxTracker so temperature curves show the full day, not just
+        from the moment the bot started.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                for city_cfg in self._config.cities:
+                    if not city_cfg.tz:
+                        continue
+                    observations = await get_today_metar_history(
+                        city_cfg.icao, city_cfg.tz, client,
+                    )
+                    for obs in observations:
+                        self._max_tracker.update(obs)
+                    if observations:
+                        self._last_daily_maxes[city_cfg.name] = self._max_tracker.get_max(city_cfg.icao)
+            total = sum(
+                len(self._max_tracker.get_observations(c.icao))
+                for c in self._config.cities
+            )
+            logger.info("Backfilled %d total observations across %d cities", total, len(self._config.cities))
+        except Exception:
+            logger.exception("Failed to backfill METAR history")
 
     def get_dashboard_state(self) -> dict:
         """Return snapshot of current state for web UI."""

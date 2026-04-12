@@ -76,6 +76,10 @@ async def run(args: argparse.Namespace) -> None:
     max_tracker = DailyMaxTracker()
     rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
 
+    # Backfill today's METAR history so temperature curves show the full day
+    logger.info("Backfilling today's METAR observations...")
+    asyncio.get_event_loop().run_until_complete(rebalancer.backfill_today_observations())
+
     # Setup scheduler
     scheduler = setup_scheduler(config, rebalancer)
 

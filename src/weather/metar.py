@@ -66,6 +66,66 @@ async def get_latest_metar(
             await client.aclose()
 
 
+async def get_today_metar_history(
+    icao: str,
+    tz_name: str,
+    client: httpx.AsyncClient | None = None,
+) -> list[Observation]:
+    """Fetch all METAR observations for today (local date) from aviationweather.gov.
+
+    Uses the `hours` parameter to request up to 24 hours of history, then filters
+    to only observations that fall on today's local date.
+    """
+    params = {"ids": icao, "format": "json", "hours": 24}
+
+    should_close = client is None
+    client = client or httpx.AsyncClient(timeout=15)
+    try:
+        resp = await client.get(METAR_URL, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data:
+            return []
+
+        tz = ZoneInfo(tz_name)
+        today_local = datetime.now(tz).date()
+        observations: list[Observation] = []
+
+        for entry in data:
+            temp_c = entry.get("temp")
+            if temp_c is None:
+                continue
+
+            obs_time_str = entry.get("reportTime", "")
+            try:
+                obs_time = datetime.fromisoformat(obs_time_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+
+            # Filter: only include observations from today's local date
+            if obs_time.astimezone(tz).date() != today_local:
+                continue
+
+            observations.append(Observation(
+                icao=icao,
+                temp_f=_celsius_to_fahrenheit(float(temp_c)),
+                observation_time=obs_time,
+                raw_metar=entry.get("rawOb", ""),
+            ))
+
+        # API returns newest first — reverse to chronological order
+        observations.sort(key=lambda o: o.observation_time)
+        logger.info("METAR history for %s: %d observations for %s", icao, len(observations), today_local)
+        return observations
+    except Exception:
+        logger.exception("Failed to fetch METAR history for %s", icao)
+        return []
+    finally:
+        if should_close:
+            await client.aclose()
+
+
 class DailyMaxTracker:
     """Track the running daily maximum temperature per station.
 
