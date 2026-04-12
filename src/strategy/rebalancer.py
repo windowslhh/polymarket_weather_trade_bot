@@ -5,6 +5,7 @@ import logging
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from dataclasses import replace
@@ -55,9 +56,12 @@ class Rebalancer:
         self._executor = executor
         self._max_tracker = max_tracker or DailyMaxTracker()
         # Register local timezones so DailyMaxTracker groups by local date
+        # Also build city_name → ZoneInfo map for post-peak evaluator logic
+        self._city_tz: dict[str, ZoneInfo] = {}
         for city_cfg in config.cities:
             if city_cfg.tz:
                 self._max_tracker.register_timezone(city_cfg.icao, city_cfg.tz)
+                self._city_tz[city_cfg.name] = ZoneInfo(city_cfg.tz)
         self._error_dists = error_distributions or {}
         self._alerter = Alerter(config.alert_webhook_url)
         self._trend = ForecastTrend()
@@ -262,6 +266,9 @@ class Rebalancer:
             for (event_id, strat_name), positions in event_strat_positions.items():
                 meta = event_meta[event_id]
                 city = meta["city"]
+                # Compute local hour for post-peak evaluator logic
+                city_tz = self._city_tz.get(city)
+                local_hour = datetime.now(city_tz).hour if city_tz else None
 
                 daily_max = daily_maxes.get(city)
                 observation = city_observations.get(city)
@@ -343,6 +350,7 @@ class Rebalancer:
                 exit_signals = evaluate_exit_signals(
                     event_obj, observation, daily_max, held_no_slots, strat_cfg,
                     days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
+                    local_hour=local_hour,
                 )
 
                 # P0-3 FIX: Query exposure once before loop, accumulate in-memory
@@ -586,6 +594,10 @@ class Rebalancer:
 
             days_ahead = (event.market_date - date.today()).days
 
+            # Compute local hour for post-peak evaluator logic
+            city_tz = self._city_tz.get(event.city)
+            local_hour = datetime.now(city_tz).hour if city_tz else None
+
             # Collect all evaluated signals across all strategy variants for decision logging
             # P0-1 FIX: store (signal, strat_name, source, strat_cfg, forecast) to avoid stale refs
             all_evaluated_for_event: list[tuple[TradeSignal, str, str, StrategyConfig, float]] = []
@@ -627,9 +639,10 @@ class Rebalancer:
                 )
                 event_pos_count = len(existing_positions)
 
-                # Phase 4: NO signals (forecast-based entry)
+                # Phase 4: NO signals (forecast-based entry, post-peak boost)
                 no_signals = evaluate_no_signals(
                     event, forecast, strat_cfg, error_dist, trend_state, held_token_ids, days_ahead,
+                    daily_max_f=daily_max, local_hour=local_hour,
                 )
 
                 # Locked-win signals: NO guaranteed on slots where daily max > upper bound
@@ -646,12 +659,13 @@ class Rebalancer:
                     if pos.get("token_id") and pos.get("entry_price"):
                         entry_prices[pos["token_id"]] = pos["entry_price"]
 
-                # Phase 5: Exit + Trim signals
+                # Phase 5: Exit + Trim signals (post-peak aware)
                 exit_signals = evaluate_exit_signals(
                     event, observation, daily_max, held_no_slots, strat_cfg, trend_state,
                     days_ahead=days_ahead,
                     forecast=forecast, error_dist=error_dist,
                     hours_to_settlement=hours_to_settle,
+                    local_hour=local_hour,
                 )
                 trim_signals = evaluate_trim_signals(
                     event, forecast, held_no_slots, strat_cfg, error_dist,

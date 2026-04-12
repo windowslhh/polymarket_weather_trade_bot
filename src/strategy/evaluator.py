@@ -2,6 +2,10 @@
 
 Uses empirical forecast error distributions (from historical data) when available,
 falling back to normal distribution approximation otherwise.
+
+Post-peak optimization: after a city's peak temperature window (~17:00 local),
+daily_max is essentially final. The evaluator uses it as a near-certain reference
+with tight confidence, boosting NO probabilities for slots above the observed max.
 """
 from __future__ import annotations
 
@@ -16,6 +20,14 @@ from src.strategy.trend import TrendState
 from src.weather.models import Forecast, Observation
 
 logger = logging.getLogger(__name__)
+
+# Post-peak confidence intervals: how much the daily max can still
+# rise after a given local hour.  After 17:00, ±1.5°F; during peak
+# (14-17), ±3°F.  Before 14:00, no adjustment (forecast only).
+_POST_PEAK_CONFIDENCE_F = 1.5
+_PEAK_WINDOW_CONFIDENCE_F = 3.0
+_PEAK_START_HOUR = 14
+_POST_PEAK_HOUR = 17
 
 
 def _estimate_no_win_probability_normal(
@@ -57,6 +69,31 @@ def _estimate_no_win_prob(
     return _estimate_no_win_probability_normal(distance, forecast.confidence_interval_f)
 
 
+def _post_peak_confidence(local_hour: int) -> float | None:
+    """Return the confidence interval to use for post-peak adjustment.
+
+    Returns None if before peak window (no adjustment needed).
+    """
+    if local_hour >= _POST_PEAK_HOUR:
+        return _POST_PEAK_CONFIDENCE_F
+    if local_hour >= _PEAK_START_HOUR:
+        return _PEAK_WINDOW_CONFIDENCE_F
+    return None
+
+
+def _observed_no_win_prob(
+    slot: TempSlot,
+    daily_max_f: float,
+    confidence_f: float,
+) -> float:
+    """Estimate NO win probability using observed daily_max as reference.
+
+    Used post-peak when daily_max is essentially final.
+    """
+    distance = _slot_distance(slot, daily_max_f)
+    return _estimate_no_win_probability_normal(distance, confidence_f)
+
+
 def evaluate_no_signals(
     event: WeatherMarketEvent,
     forecast: Forecast,
@@ -65,11 +102,18 @@ def evaluate_no_signals(
     trend: TrendState | None = None,
     held_token_ids: set[str] | None = None,
     days_ahead: int = 0,
+    daily_max_f: float | None = None,
+    local_hour: int | None = None,
 ) -> list[TradeSignal]:
     """Phase 4: Generate BUY NO signals for slots far from forecast.
 
     When an empirical error distribution is provided, uses it for accurate
     probability estimation. Otherwise falls back to normal approximation.
+
+    Post-peak boost (local_hour >= 14, same-day only):
+    When daily_max is available and the peak temperature window has passed,
+    use observed daily_max as a near-final reference to boost NO probability
+    for slots above the observed max.
 
     Trend state adjusts behavior:
     - SETTLING: tighter EV threshold (only high-confidence trades)
@@ -84,6 +128,11 @@ def evaluate_no_signals(
     # Require higher EV for future markets (forecast less reliable)
     if days_ahead > 0:
         ev_threshold /= (config.day_ahead_ev_discount ** days_ahead)
+
+    # Post-peak: determine if we can use daily_max as near-final reference
+    peak_conf = None
+    if days_ahead == 0 and daily_max_f is not None and local_hour is not None:
+        peak_conf = _post_peak_confidence(local_hour)
 
     for slot in event.slots:
         # Skip already-held slots
@@ -103,6 +152,18 @@ def evaluate_no_signals(
             continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
+
+        # Post-peak boost: use observed daily_max with tight confidence
+        # Take the more favorable probability (forecast vs observed)
+        if peak_conf is not None:
+            obs_prob = _observed_no_win_prob(slot, daily_max_f, peak_conf)
+            if obs_prob > win_prob:
+                logger.debug(
+                    "Post-peak boost %s slot %s: %.3f → %.3f (hour=%d, max=%.1f)",
+                    event.city, slot.outcome_label, win_prob, obs_prob,
+                    local_hour, daily_max_f,
+                )
+                win_prob = obs_prob
 
         # Trend-based probability boost for breakout direction
         if trend == TrendState.BREAKOUT_UP and slot.temp_lower_f is not None:
@@ -131,9 +192,11 @@ def evaluate_no_signals(
 
     using = "empirical" if (error_dist and error_dist._count >= 30) else "normal"
     trend_label = trend.value if trend else "none"
+    peak_label = f", post-peak(h={local_hour})" if peak_conf else ""
     logger.debug(
-        "City %s date %s: %d NO signals from %d slots (prob: %s, trend: %s)",
-        event.city, event.market_date, len(signals), len(event.slots), using, trend_label,
+        "City %s date %s: %d NO signals from %d slots (prob: %s, trend: %s%s)",
+        event.city, event.market_date, len(signals), len(event.slots),
+        using, trend_label, peak_label,
     )
     return signals
 
@@ -314,6 +377,7 @@ def evaluate_exit_signals(
     forecast: Forecast | None = None,
     error_dist: ForecastErrorDistribution | None = None,
     hours_to_settlement: float | None = None,
+    local_hour: int | None = None,
 ) -> list[TradeSignal]:
     """Three-layer hybrid exit logic for held NO positions.
 
@@ -324,6 +388,7 @@ def evaluate_exit_signals(
         When temperature approaches the slot (distance < exit_threshold),
         re-compute current EV using the closer of daily_max and forecast.
         If EV is still positive → HOLD; if negative → SELL.
+        Post-peak: use tighter confidence on daily_max, boosting hold probability.
 
     Layer 3 — Pre-settlement force exit:
         If within force_exit_hours of settlement AND distance < exit_threshold
@@ -346,6 +411,11 @@ def evaluate_exit_signals(
         exit_distance = config.no_distance_threshold_f * 0.3
     elif trend in (TrendState.BREAKOUT_UP, TrendState.BREAKOUT_DOWN):
         exit_distance = config.no_distance_threshold_f * 0.2
+
+    # Post-peak: determine confidence for observed daily_max
+    peak_conf = None
+    if local_hour is not None:
+        peak_conf = _post_peak_confidence(local_hour)
 
     signals: list[TradeSignal] = []
     for slot in held_no_slots:
@@ -376,11 +446,25 @@ def evaluate_exit_signals(
 
             # Also compute probability using daily_max as reference point
             dist_to_max = _slot_distance(slot, daily_max_f)
+            # Post-peak: use tighter confidence (daily_max is near final)
+            max_confidence = (peak_conf if peak_conf is not None
+                              else forecast.confidence_interval_f)
             wp_from_max = _estimate_no_win_probability_normal(
-                dist_to_max, forecast.confidence_interval_f,
+                dist_to_max, max_confidence,
             )
-            # Take the lower (more conservative) win probability
-            win_prob = min(win_prob, wp_from_max)
+
+            if peak_conf is not None:
+                # Post-peak: take the MORE favorable probability (daily_max is reliable)
+                win_prob = max(win_prob, wp_from_max)
+                logger.debug(
+                    "EXIT post-peak (h=%d): %s slot %s — wp_forecast=%.3f, wp_observed=%.3f → %.3f",
+                    local_hour, event.city, slot.outcome_label,
+                    _estimate_no_win_prob(slot, forecast, error_dist), wp_from_max, win_prob,
+                )
+            else:
+                # Pre-peak: take the lower (more conservative) win probability
+                win_prob = min(win_prob, wp_from_max)
+
             ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
             if ev >= 0:

@@ -854,3 +854,130 @@ class TestPerformance:
         elapsed = time.monotonic() - t0
 
         assert elapsed < 0.5, f"50 held slots exit took {elapsed:.3f}s (>0.5s)"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Post-peak optimization tests
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPostPeakNoSignals:
+    """After local 17:00, daily_max is near-final → boost NO probability."""
+
+    def test_post_peak_boosts_no_probability(self):
+        """Post-peak (hour=18): slot above daily_max gets higher win_prob."""
+        slot = _make_slot(80, 84, price_no=0.70)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(no_distance_threshold_f=3, max_no_price=0.95, min_no_ev=0.01)
+
+        # Without post-peak (morning)
+        signals_morning = evaluate_no_signals(
+            event, forecast, config, daily_max_f=72.0, local_hour=10,
+        )
+        # With post-peak (evening)
+        signals_evening = evaluate_no_signals(
+            event, forecast, config, daily_max_f=72.0, local_hour=18,
+        )
+
+        # Both should generate signals (slot is far from forecast)
+        assert len(signals_morning) == 1
+        assert len(signals_evening) == 1
+        # Evening signal should have higher win_prob (daily_max=72 is 8°F below slot)
+        assert signals_evening[0].estimated_win_prob >= signals_morning[0].estimated_win_prob
+
+    def test_no_boost_before_peak(self):
+        """Before 14:00, no post-peak adjustment applied."""
+        slot = _make_slot(78, 82, price_no=0.65)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(no_distance_threshold_f=2, max_no_price=0.95, min_no_ev=0.01)
+
+        sig_no_hour = evaluate_no_signals(event, forecast, config)
+        sig_morning = evaluate_no_signals(
+            event, forecast, config, daily_max_f=70.0, local_hour=10,
+        )
+
+        # Morning signals should have same win_prob as no-hour signals
+        if sig_no_hour and sig_morning:
+            assert sig_no_hour[0].estimated_win_prob == sig_morning[0].estimated_win_prob
+
+    def test_peak_window_uses_wider_confidence(self):
+        """During peak (14-17), uses ±3°F confidence (wider than post-peak ±1.5°F)."""
+        slot = _make_slot(78, 82, price_no=0.65)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(no_distance_threshold_f=2, max_no_price=0.95, min_no_ev=0.01)
+
+        sig_peak = evaluate_no_signals(
+            event, forecast, config, daily_max_f=72.0, local_hour=15,
+        )
+        sig_post = evaluate_no_signals(
+            event, forecast, config, daily_max_f=72.0, local_hour=18,
+        )
+
+        # Post-peak should have >= peak probability (tighter confidence)
+        if sig_peak and sig_post:
+            assert sig_post[0].estimated_win_prob >= sig_peak[0].estimated_win_prob
+
+    def test_no_boost_for_future_markets(self):
+        """Post-peak boost only applies to same-day markets (days_ahead=0)."""
+        slot = _make_slot(80, 84, price_no=0.70)
+        event = _make_event(slots=[slot])
+        # Set market_date to tomorrow
+        event.market_date = date.today() + __import__("datetime").timedelta(days=1)
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(
+            no_distance_threshold_f=3, max_no_price=0.95, min_no_ev=0.01,
+            day_ahead_ev_discount=0.7,
+        )
+
+        sig_future = evaluate_no_signals(
+            event, forecast, config, daily_max_f=72.0, local_hour=18, days_ahead=1,
+        )
+        sig_no_hour = evaluate_no_signals(
+            event, forecast, config, days_ahead=1,
+        )
+
+        # Future market: post-peak boost should NOT apply
+        if sig_future and sig_no_hour:
+            assert sig_future[0].estimated_win_prob == sig_no_hour[0].estimated_win_prob
+
+
+class TestPostPeakExitSignals:
+    """Post-peak exit logic: use observed daily_max with tight confidence."""
+
+    def test_post_peak_holds_position(self):
+        """Post-peak: daily_max well below slot → hold (don't exit prematurely)."""
+        slot = _make_slot(74, 78, price_no=0.80)
+        event = _make_event(slots=[slot])
+        obs = Observation(icao="KLGA", temp_f=72.0,
+                         observation_time=datetime.now(timezone.utc))
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(no_distance_threshold_f=8)
+
+        # Pre-peak: might exit (daily_max=73 is close to slot lower=74)
+        exit_morning = evaluate_exit_signals(
+            event, obs, 73.0, [slot], config, forecast=forecast, local_hour=10,
+        )
+        # Post-peak: daily_max=73 is essentially final → NO is safe, hold
+        exit_evening = evaluate_exit_signals(
+            event, obs, 73.0, [slot], config, forecast=forecast, local_hour=18,
+        )
+
+        # Post-peak should be less likely to exit (or hold completely)
+        assert len(exit_evening) <= len(exit_morning)
+
+    def test_post_peak_still_exits_when_threatened(self):
+        """Post-peak: if daily_max is IN the slot, still exit."""
+        slot = _make_slot(72, 76, price_no=0.80)
+        event = _make_event(slots=[slot])
+        obs = Observation(icao="KLGA", temp_f=74.0,
+                         observation_time=datetime.now(timezone.utc))
+        forecast = _make_forecast(high=75.0)
+        config = StrategyConfig(no_distance_threshold_f=8)
+
+        # daily_max=74 is INSIDE slot [72-76] → distance=0 → should exit
+        signals = evaluate_exit_signals(
+            event, obs, 74.0, [slot], config, forecast=forecast, local_hour=18,
+        )
+        assert len(signals) == 1
