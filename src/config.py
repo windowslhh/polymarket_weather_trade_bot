@@ -65,8 +65,11 @@ def get_strategy_variants() -> dict[str, dict]:
     return {
         "A": {
             # Conservative far-distance: fewest trades, highest safety margin
+            # Uses half-Kelly even on locked wins (vs B's full Kelly)
             "max_no_price": 0.70,
             "kelly_fraction": 0.5,
+            "locked_win_kelly_fraction": 0.5,
+            "max_locked_win_per_slot_usd": 5.0,
             "max_positions_per_event": 3,
             "calibration_confidence": 0.90,
             "min_no_ev": 0.05,
