@@ -54,6 +54,10 @@ class Rebalancer:
         self._portfolio = portfolio
         self._executor = executor
         self._max_tracker = max_tracker or DailyMaxTracker()
+        # Register local timezones so DailyMaxTracker groups by local date
+        for city_cfg in config.cities:
+            if city_cfg.tz:
+                self._max_tracker.register_timezone(city_cfg.icao, city_cfg.tz)
         self._error_dists = error_distributions or {}
         self._alerter = Alerter(config.alert_webhook_url)
         self._trend = ForecastTrend()
@@ -89,6 +93,13 @@ class Rebalancer:
             if history:
                 trends[city_cfg.name] = self._trend.get_trend(city_cfg.name).value
 
+        # Build observation time series per city for temperature dashboard
+        observation_series: dict[str, list[tuple[str, float]]] = {}
+        for city_cfg in self._config.cities:
+            obs = self._max_tracker.get_observations(city_cfg.icao)
+            if obs:
+                observation_series[city_cfg.name] = obs
+
         return {
             "last_run": self._last_run_at,
             "last_error": self._last_error,
@@ -100,6 +111,7 @@ class Rebalancer:
             "forecasts": self._last_forecasts,
             "daily_maxes": self._last_daily_maxes,
             "price_source": self._last_price_source,
+            "observation_series": observation_series,
         }
 
     def get_gamma_prices(self) -> dict[str, float]:

@@ -16,6 +16,7 @@ class CityConfig:
     icao: str
     lat: float
     lon: float
+    tz: str = "America/New_York"  # IANA timezone for local date grouping
 
 
 @dataclass

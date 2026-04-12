@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+{% block title %}Temperature Monitor - WeatherBot{% endblock %}
+{% block content %}
+<style>
+    .temp-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .temp-select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; font-family: inherit; min-width: 180px; }
+    .temp-select:focus { outline: none; border-color: var(--accent); }
+    .temp-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+    .temp-toggle input { accent-color: var(--accent); }
+    .forecast-badges { display: flex; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+    .forecast-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .forecast-badge.today { background: var(--green-dim); color: var(--green-text); }
+    .forecast-badge.d1 { background: var(--blue-dim); color: var(--blue); }
+    .forecast-badge.d2 { background: rgba(107,114,128,0.15); color: #9ca3af; }
+    .chart-lg { position: relative; height: 360px; }
+    .refresh-note { font-size: 11px; color: var(--text-dim); text-align: right; margin-top: 8px; }
+</style>
+
+<!-- Top metrics -->
+<div class="metrics">
+    <div class="metric-card">
+        <div class="metric-label">Cities Reporting</div>
+        <div class="metric-value" id="m-reporting">{{ observation_series|length }}</div>
+        <div class="metric-sub">of {{ cities|length }} configured</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Observations Today</div>
+        <div class="metric-value" id="m-obs-count">{{ observation_series.values()|map('length')|sum }}</div>
+        <div class="metric-sub">METAR readings</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Cities Above Forecast</div>
+        <div class="metric-value" id="m-above">
+            {% set ns = namespace(count=0) %}
+            {% for city in daily_maxes %}
+                {% if daily_maxes[city] is not none and forecasts.get(city) and daily_maxes[city] > forecasts[city].high %}
+                    {% set ns.count = ns.count + 1 %}
+                {% endif %}
+            {% endfor %}
+            {{ ns.count }}
+        </div>
+        <div class="metric-sub">observed max > forecast</div>
+    </div>
+</div>
+
+<!-- Chart panel -->
+<div class="panel">
+    <div class="panel-header">
+        <h3>Intraday Temperature Curve</h3>
+        <div class="temp-controls">
+            <select class="temp-select" id="city-select" onchange="updateChart()">
+                <option value="__all__">-- All Cities --</option>
+                {% for city in cities|sort %}
+                <option value="{{ city }}" {% if observation_series.get(city) %}style="font-weight:600;"{% endif %}>{{ city }}{% if daily_maxes.get(city) is not none %} ({{ "%.0f"|format(daily_maxes[city]) }}°F){% endif %}</option>
+                {% endfor %}
+            </select>
+            <label class="temp-toggle"><input type="checkbox" id="show-forecast" checked onchange="updateChart()"> Forecast line</label>
+        </div>
+    </div>
+    <div class="panel-body">
+        <div id="forecast-info" class="forecast-badges" style="margin-bottom:12px;"></div>
+        <div class="chart-lg"><canvas id="tempChart"></canvas></div>
+        <div class="refresh-note">Auto-refreshes every 60s &middot; METAR updates at :57 and :03 past each hour</div>
+    </div>
+</div>
+
+<!-- Forecast summary table -->
+<div class="panel">
+    <div class="panel-header"><h3>Forecast & Observation Summary</h3></div>
+    <table>
+        <thead><tr>
+            <th>City</th>
+            <th>Obs Max</th>
+            <th>Readings</th>
+            <th>Today</th>
+            <th>+1d</th>
+            <th>+2d</th>
+            <th>Trend</th>
+        </tr></thead>
+        <tbody id="summary-tbody">
+        {% for city in cities|sort %}
+        {% set f = forecasts.get(city) %}
+        {% set dm = daily_maxes.get(city) %}
+        {% set obs_count = (observation_series.get(city) or [])|length %}
+        {% if f or dm is not none %}
+        <tr>
+            <td style="font-weight:500;font-size:12px;">{{ city }}</td>
+            <td class="td-mono {% if dm is not none and f and dm > f.high %}positive{% endif %}">
+                {% if dm is not none %}{{ "%.1f"|format(dm) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}
+            </td>
+            <td class="td-mono" style="color:var(--text-muted);">{{ obs_count }}</td>
+            <td class="td-mono" style="font-weight:600;">{% if f %}{{ "%.0f"|format(f.high) }}°F{% else %}--{% endif %}</td>
+            <td class="td-mono">{% if f and f.high_d1 is defined and f.high_d1 is not none %}{{ "%.0f"|format(f.high_d1) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
+            <td class="td-mono">{% if f and f.high_d2 is defined and f.high_d2 is not none %}{{ "%.0f"|format(f.high_d2) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
+            <td><span class="tag tag-{{ (trends.get(city, 'STABLE'))|lower|replace('_','-') }}" style="font-size:9px;">{{ trends.get(city, 'STABLE') }}</span></td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+// Color palette for multi-city display
+const COLORS = [
+    '#6366f1','#22c55e','#ef4444','#f59e0b','#3b82f6','#a855f7','#ec4899','#14b8a6',
+    '#f97316','#06b6d4','#84cc16','#e11d48','#8b5cf6','#10b981','#f43f5e','#0ea5e9',
+    '#d946ef','#facc15','#64748b','#fb923c','#2dd4bf','#c084fc','#fbbf24','#38bdf8',
+    '#a3e635','#f472b6','#34d399','#818cf8','#fca5a1','#67e8f9'
+];
+
+let observationData = {{ observation_series|tojson }};
+let forecastData = {{ forecasts|tojson }};
+let dailyMaxData = {{ daily_maxes|tojson }};
+let tempChart = null;
+
+function toBeijingHM(isoStr) {
+    try {
+        const d = new Date(isoStr);
+        const bj = new Date(d.getTime() + 8 * 3600000);
+        return bj.getHours().toString().padStart(2,'0') + ':' + bj.getMinutes().toString().padStart(2,'0');
+    } catch(e) { return isoStr; }
+}
+
+function buildDatasets(selectedCity, showForecast) {
+    const datasets = [];
+    const allLabels = new Set();
+
+    if (selectedCity === '__all__') {
+        // Show all cities with data
+        let colorIdx = 0;
+        const sortedCities = Object.keys(observationData).sort();
+        for (const city of sortedCities) {
+            const obs = observationData[city] || [];
+            if (obs.length === 0) continue;
+            obs.forEach(o => allLabels.add(o[0]));
+            const color = COLORS[colorIdx % COLORS.length];
+            datasets.push({
+                label: city,
+                data: obs.map(o => ({ x: o[0], y: o[1] })),
+                borderColor: color,
+                backgroundColor: color + '33',
+                borderWidth: 1.5,
+                pointRadius: 2,
+                pointHoverRadius: 4,
+                tension: 0.3,
+                fill: false,
+            });
+            colorIdx++;
+        }
+    } else {
+        // Single city
+        const obs = observationData[selectedCity] || [];
+        obs.forEach(o => allLabels.add(o[0]));
+        datasets.push({
+            label: selectedCity + ' Observed',
+            data: obs.map(o => ({ x: o[0], y: o[1] })),
+            borderColor: '#6366f1',
+            backgroundColor: 'rgba(99,102,241,0.15)',
+            borderWidth: 2.5,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            tension: 0.3,
+            fill: true,
+        });
+
+        // Add forecast high as dashed line
+        const fc = forecastData[selectedCity];
+        if (fc && showForecast && obs.length >= 2) {
+            const fcHigh = fc.high;
+            datasets.push({
+                label: 'Forecast High (' + Math.round(fcHigh) + '°F)',
+                data: [{ x: obs[0][0], y: fcHigh }, { x: obs[obs.length-1][0], y: fcHigh }],
+                borderColor: '#22c55e',
+                borderWidth: 2,
+                borderDash: [8, 4],
+                pointRadius: 0,
+                fill: false,
+            });
+        }
+
+        // Add daily max as dotted line
+        const dm = dailyMaxData[selectedCity];
+        if (dm !== undefined && dm !== null && obs.length >= 2) {
+            datasets.push({
+                label: 'Daily Max (' + dm.toFixed(1) + '°F)',
+                data: [{ x: obs[0][0], y: dm }, { x: obs[obs.length-1][0], y: dm }],
+                borderColor: '#f59e0b',
+                borderWidth: 1.5,
+                borderDash: [4, 4],
+                pointRadius: 0,
+                fill: false,
+            });
+        }
+    }
+
+    // Sort labels chronologically
+    const sortedLabels = Array.from(allLabels).sort();
+    return { datasets, labels: sortedLabels.map(toBeijingHM), rawLabels: sortedLabels };
+}
+
+function updateForecastInfo(selectedCity) {
+    const el = document.getElementById('forecast-info');
+    if (selectedCity === '__all__') {
+        el.innerHTML = '';
+        return;
+    }
+    const fc = forecastData[selectedCity];
+    if (!fc) { el.innerHTML = '<span style="color:var(--text-dim);font-size:12px;">No forecast data</span>'; return; }
+    let html = '<span class="forecast-badge today">Today: ' + Math.round(fc.high) + '°F</span>';
+    if (fc.high_d1 != null) html += '<span class="forecast-badge d1">+1d: ' + Math.round(fc.high_d1) + '°F</span>';
+    if (fc.high_d2 != null) html += '<span class="forecast-badge d2">+2d: ' + Math.round(fc.high_d2) + '°F</span>';
+    el.innerHTML = html;
+}
+
+function updateChart() {
+    const selectedCity = document.getElementById('city-select').value;
+    const showForecast = document.getElementById('show-forecast').checked;
+    const { datasets, labels, rawLabels } = buildDatasets(selectedCity, showForecast);
+
+    updateForecastInfo(selectedCity);
+
+    if (tempChart) {
+        // Map all datasets to use the unified label set
+        for (const ds of datasets) {
+            const mapped = new Array(rawLabels.length).fill(null);
+            for (const pt of ds.data) {
+                const idx = rawLabels.indexOf(pt.x);
+                if (idx >= 0) mapped[idx] = pt.y;
+            }
+            ds.data = mapped;
+        }
+        tempChart.data.labels = labels;
+        tempChart.data.datasets = datasets;
+        tempChart.options.plugins.legend.display = selectedCity === '__all__';
+        tempChart.update();
+    }
+}
+
+function initChart() {
+    const ctx = document.getElementById('tempChart').getContext('2d');
+    const selectedCity = document.getElementById('city-select').value;
+    const showForecast = document.getElementById('show-forecast').checked;
+    const { datasets, labels, rawLabels } = buildDatasets(selectedCity, showForecast);
+
+    // Map datasets to label indices
+    for (const ds of datasets) {
+        const mapped = new Array(rawLabels.length).fill(null);
+        for (const pt of ds.data) {
+            const idx = rawLabels.indexOf(pt.x);
+            if (idx >= 0) mapped[idx] = pt.y;
+        }
+        ds.data = mapped;
+    }
+
+    tempChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: {
+                    display: selectedCity === '__all__',
+                    labels: { color: '#8b8fa3', font: { size: 11 }, boxWidth: 12, padding: 8 },
+                },
+                tooltip: {
+                    backgroundColor: '#1a1d27',
+                    borderColor: '#2a2d3a',
+                    borderWidth: 1,
+                    titleColor: '#e4e6ef',
+                    bodyColor: '#8b8fa3',
+                    callbacks: {
+                        label: function(ctx) {
+                            if (ctx.parsed.y === null) return null;
+                            return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + '°F';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    title: { display: true, text: 'Time (Beijing)', color: '#5e6278', font: { size: 11 } },
+                    ticks: { color: '#5e6278', font: { size: 10 }, maxRotation: 45 },
+                    grid: { color: 'rgba(42,45,58,0.5)' },
+                },
+                y: {
+                    title: { display: true, text: 'Temperature (°F)', color: '#5e6278', font: { size: 11 } },
+                    ticks: { color: '#5e6278', font: { size: 10 } },
+                    grid: { color: 'rgba(42,45,58,0.5)' },
+                }
+            }
+        }
+    });
+    updateForecastInfo(selectedCity);
+}
+
+async function refreshTemperatures() {
+    try {
+        const r = await fetch('/api/temperatures');
+        const d = await r.json();
+        observationData = d.observation_series || {};
+        forecastData = d.forecasts || {};
+        dailyMaxData = d.daily_maxes || {};
+        updateChart();
+
+        // Update metrics
+        const reporting = Object.keys(observationData).length;
+        const obsCount = Object.values(observationData).reduce((s, a) => s + a.length, 0);
+        let above = 0;
+        for (const city of Object.keys(dailyMaxData)) {
+            if (dailyMaxData[city] != null && forecastData[city] && dailyMaxData[city] > forecastData[city].high) above++;
+        }
+        const el1 = document.getElementById('m-reporting'); if (el1) el1.textContent = reporting;
+        const el2 = document.getElementById('m-obs-count'); if (el2) el2.textContent = obsCount;
+        const el3 = document.getElementById('m-above'); if (el3) el3.textContent = above;
+    } catch(e) { console.error('Temperature refresh failed:', e); }
+}
+
+document.addEventListener('DOMContentLoaded', initChart);
+setInterval(refreshTemperatures, 60000);
+</script>
+{% endblock %}

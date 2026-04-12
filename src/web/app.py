@@ -506,6 +506,42 @@ def create_app(store, rebalancer, config) -> Flask:
             cities=cfg.cities,
         )
 
+    @app.route("/temperatures")
+    def temperatures_page():
+        cfg = app.config["bot_config"]
+        reb = app.config["bot_rebalancer"]
+        state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
+
+        city_names = [c.name for c in cfg.cities]
+        return render_template(
+            "temperatures.html",
+            active_page="temperatures",
+            mode=_mode(),
+            cities=city_names,
+            observation_series=state.get("observation_series", {}),
+            forecasts=state.get("forecasts", {}),
+            daily_maxes=state.get("daily_maxes", {}),
+            trends=state.get("trends", {}),
+        )
+
+    @app.route("/api/temperatures")
+    def api_temperatures():
+        """Temperature observation time series + forecasts for real-time refresh."""
+        cached = _cached("temperatures", ttl=30)
+        if cached is not None:
+            return jsonify(cached)
+
+        reb = app.config["bot_rebalancer"]
+        state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
+
+        data = {
+            "observation_series": state.get("observation_series", {}),
+            "forecasts": state.get("forecasts", {}),
+            "daily_maxes": state.get("daily_maxes", {}),
+        }
+        _set_cache("temperatures", data)
+        return jsonify(data)
+
     @app.route("/api/status")
     def api_status():
         """Lightweight status endpoint — uses cache, no heavy DB queries."""

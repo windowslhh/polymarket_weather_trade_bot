@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -66,32 +67,81 @@ async def get_latest_metar(
 
 
 class DailyMaxTracker:
-    """Track the running daily maximum temperature per station."""
+    """Track the running daily maximum temperature per station.
+
+    Dates are keyed by each station's **local** date (not UTC) to avoid
+    cross-day contamination.  E.g. a KLAX observation at 00:23 UTC on
+    April 12 is actually 5:23 PM PDT on April 11 and must be grouped
+    under April 11.
+    """
 
     def __init__(self) -> None:
         # {(icao, date_str): max_temp_f}
         self._maxes: dict[tuple[str, str], float] = defaultdict(lambda: -999.0)
+        # {(icao, date_str): [(iso_timestamp, temp_f), ...]}
+        self._observations: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+        # ICAO → local timezone (registered via register_timezone)
+        self._tz_map: dict[str, ZoneInfo] = {}
+
+    def register_timezone(self, icao: str, tz_name: str) -> None:
+        """Register the local timezone for a station."""
+        self._tz_map[icao] = ZoneInfo(tz_name)
+
+    def _local_date_str(self, icao: str, utc_dt: datetime) -> str:
+        """Convert a UTC datetime to the station's local date string."""
+        tz = self._tz_map.get(icao)
+        if tz and utc_dt.tzinfo is not None:
+            return utc_dt.astimezone(tz).date().isoformat()
+        # Fallback: use the datetime's own date (UTC or naive)
+        return utc_dt.date().isoformat()
+
+    def _local_today(self, icao: str) -> str:
+        """Get today's date string in the station's local timezone."""
+        tz = self._tz_map.get(icao)
+        if tz:
+            return datetime.now(tz).date().isoformat()
+        return date.today().isoformat()
 
     def update(self, obs: Observation) -> tuple[float, bool]:
         """Update with an observation and return (current_daily_max, is_new_high).
 
         is_new_high is True when this observation set a new daily maximum.
         """
-        key = (obs.icao, obs.observation_time.date().isoformat())
+        key = (obs.icao, self._local_date_str(obs.icao, obs.observation_time))
         is_new_high = obs.temp_f > self._maxes[key]
         if is_new_high:
             self._maxes[key] = obs.temp_f
+
+        # Record individual observation for time-series (deduplicate by timestamp)
+        ts = obs.observation_time.isoformat()
+        series = self._observations[key]
+        if not series or series[-1][0] != ts:
+            series.append((ts, obs.temp_f))
+
         return self._maxes[key], is_new_high
 
     def get_max(self, icao: str, day: date | None = None) -> float | None:
         """Get the current daily max. Returns None if no data."""
-        d = (day or date.today()).isoformat()
+        d = day.isoformat() if day else self._local_today(icao)
         val = self._maxes.get((icao, d))
         return val if val != -999.0 else None
 
+    def get_observations(self, icao: str, day: date | None = None) -> list[tuple[str, float]]:
+        """Get the observation time series for a station and date.
+
+        Returns a list of (iso_timestamp, temp_f) tuples, or empty list if no data.
+        """
+        d = day.isoformat() if day else self._local_today(icao)
+        return list(self._observations.get((icao, d), []))
+
     def cleanup_old(self, keep_date: date | None = None) -> None:
-        """Remove entries older than keep_date."""
-        keep = (keep_date or date.today()).isoformat()
+        """Remove entries older than keep_date (with 1-day buffer for timezone safety)."""
+        # Subtract 1 day to avoid cleaning up entries for cities whose local
+        # date is behind UTC (e.g. Pacific = UTC-7)
+        keep = ((keep_date or date.today()) - timedelta(days=1)).isoformat()
         to_remove = [k for k in self._maxes if k[1] < keep]
         for k in to_remove:
             del self._maxes[k]
+        to_remove_obs = [k for k in self._observations if k[1] < keep]
+        for k in to_remove_obs:
+            del self._observations[k]

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,8 +41,8 @@ def _make_config(**overrides) -> AppConfig:
         ),
         scheduling=SchedulingConfig(),
         cities=[
-            CityConfig("New York", "KLGA", 40.7128, -74.006),
-            CityConfig("Dallas", "KDFW", 32.7767, -96.797),
+            CityConfig("New York", "KLGA", 40.7128, -74.006, tz="America/New_York"),
+            CityConfig("Dallas", "KDFW", 32.7767, -96.797, tz="America/Chicago"),
         ],
         dry_run=True,
         db_path=Path("/tmp/test_position_check.db"),
@@ -378,9 +379,9 @@ class TestPositionCheckTrackerIntegration:
             await reb.run_position_check()
 
         # After: tracker should have updated
-        # Use UTC date to match observation_time.date() stored by DailyMaxTracker
-        utc_today = datetime.now(timezone.utc).date()
-        assert reb._max_tracker.get_max("KLGA", utc_today) == 72.0
+        # Use local date (Eastern) — tracker now groups by station's local date
+        local_today = datetime.now(ZoneInfo("America/New_York")).date()
+        assert reb._max_tracker.get_max("KLGA", local_today) == 72.0
 
     @pytest.mark.asyncio
     async def test_tracker_preserves_higher_max(self):
@@ -402,9 +403,9 @@ class TestPositionCheckTrackerIntegration:
             await reb.run_position_check()
 
         # Max should still be 85, not 72
-        # Use UTC date to match observation_time.date() stored by DailyMaxTracker
-        utc_today = datetime.now(timezone.utc).date()
-        assert reb._max_tracker.get_max("KLGA", utc_today) == 85.0
+        # Use local date (Eastern) — tracker now groups by station's local date
+        local_today = datetime.now(ZoneInfo("America/New_York")).date()
+        assert reb._max_tracker.get_max("KLGA", local_today) == 85.0
 
 
 # ──────────────────────────────────────────────────────────────────────
