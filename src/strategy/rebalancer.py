@@ -133,8 +133,39 @@ class Rebalancer:
                 for c in city_configs
             )
             logger.info("Backfilled %d total observations across %d cities", total, len(city_configs))
+
+            # Fetch forecasts so dashboard has data immediately (not after first rebalance)
+            import asyncio
+            today = date.today()
+            forecasts = await get_forecasts_batch(city_configs)
+            self._cached_forecasts.update(forecasts)
+
+            forecasts_d1: dict = {}
+            forecasts_d2: dict = {}
+            try:
+                fc_d1, fc_d2 = await asyncio.gather(
+                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                )
+                forecasts_d1 = fc_d1
+                forecasts_d2 = fc_d2
+            except Exception as exc:
+                logger.warning("Backfill: failed to fetch multi-day forecasts: %s", exc)
+
+            self._last_forecasts = {}
+            for city, f in forecasts.items():
+                entry: dict = {
+                    "high": f.predicted_high_f, "low": f.predicted_low_f,
+                    "confidence": f.confidence_interval_f, "source": f.source,
+                }
+                if city in forecasts_d1:
+                    entry["high_d1"] = forecasts_d1[city].predicted_high_f
+                if city in forecasts_d2:
+                    entry["high_d2"] = forecasts_d2[city].predicted_high_f
+                self._last_forecasts[city] = entry
+            logger.info("Backfilled forecasts for %d cities (today + D1/D2)", len(forecasts))
         except Exception:
-            logger.exception("Failed to backfill METAR history")
+            logger.exception("Failed to backfill METAR history and forecasts")
 
     def get_dashboard_state(self) -> dict:
         """Return snapshot of current state for web UI."""
