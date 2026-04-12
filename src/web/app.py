@@ -145,12 +145,25 @@ def create_app(store, rebalancer, config) -> Flask:
         reb = app.config["bot_rebalancer"]
 
         positions = _run_async(st.get_open_positions())
+        closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
         daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
         strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
         strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        # Include realized P&L from closed/settled positions
+        for p in closed_pos:
+            rpnl = p.get("realized_pnl")
+            if rpnl is not None:
+                s = p.get("strategy", "B")
+                if s in strat_realized:
+                    strat_realized[s] += rpnl
+
+        # Total realized = settlement P&L + SELL/TRIM/EXIT P&L
+        total_realized = (daily_pnl_val or 0.0) + sum(
+            p["realized_pnl"] for p in closed_pos if p.get("realized_pnl") is not None
+        )
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
@@ -171,6 +184,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "positions": positions,
             "exposure": exposure,
             "daily_pnl_val": daily_pnl_val,
+            "total_realized": total_realized,
             "decision_log": decision_log,
             "state": state,
             "signals": signals,
@@ -200,10 +214,10 @@ def create_app(store, rebalancer, config) -> Flask:
             trends=d["state"].get("trends", {}),
             forecasts=d["state"].get("forecasts", {}),
             daily_maxes=d["state"].get("daily_maxes", {}),
-            realized=d["daily_pnl_val"] or 0.0,
+            realized=d["total_realized"],
             strategy_summary=d.get("strategy_summary", []),
             strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}),
-            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["daily_pnl_val"] or 0),
+            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
             price_source=d["state"].get("price_source", "gamma"),
