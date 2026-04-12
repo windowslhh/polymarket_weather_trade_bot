@@ -216,13 +216,13 @@ def create_app(store, rebalancer, config) -> Flask:
         reb = app.config["bot_rebalancer"]
 
         open_pos = _run_async(st.get_open_positions())
-        closed_pos = _run_async(st.get_closed_positions(limit=20))
+        closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
         strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
         strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
-        # Include realized P&L from TRIM/EXIT closed positions (not just settlements)
-        for p in _run_async(st.get_closed_positions(limit=200)):
+        # Include realized P&L from closed/settled positions (not just settlement table)
+        for p in closed_pos:
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
                 s = p.get("strategy", "B")
@@ -351,7 +351,7 @@ def create_app(store, rebalancer, config) -> Flask:
                 "ev": "",
                 "entry": f"{entry:.3f}",
                 "current": f"{current:.3f}" if current else "-",
-                "pnl": f"{'+'if pnl and pnl>0 else ''}${pnl:.3f}" if pnl is not None else "-",
+                "pnl": f"{'+'if pnl>0 else ''}${pnl:.3f}" if pnl is not None else "-",
                 "reason": reason,
                 "type": "open",
                 "sort_key": p.get("created_at", ""),

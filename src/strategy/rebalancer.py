@@ -740,6 +740,7 @@ class Rebalancer:
                         trend_state=trend_state.value, win_prob=signal.estimated_win_prob,
                         expected_value=signal.expected_value, price=signal.price,
                         size_usd=signal.suggested_size_usd, action=action, reason=reason,
+                        strategy=strat_name,
                     )
                 except Exception:
                     logger.debug("Failed to insert decision log for %s %s", event.city, signal.slot.outcome_label)

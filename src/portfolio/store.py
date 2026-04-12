@@ -132,6 +132,7 @@ class Store:
             ("positions", "exit_reason", "ALTER TABLE positions ADD COLUMN exit_reason TEXT DEFAULT ''"),
             ("positions", "exit_price", "ALTER TABLE positions ADD COLUMN exit_price REAL"),
             ("positions", "realized_pnl", "ALTER TABLE positions ADD COLUMN realized_pnl REAL"),
+            ("decision_log", "strategy", "ALTER TABLE decision_log ADD COLUMN strategy TEXT DEFAULT ''"),
         ]
         for table, column, sql in migrations:
             try:
@@ -280,13 +281,14 @@ class Store:
         slot_label: str, forecast_high_f: float | None, daily_max_f: float | None,
         trend_state: str, win_prob: float, expected_value: float,
         price: float, size_usd: float, action: str, reason: str = "",
+        strategy: str = "",
     ) -> None:
         await self.db.execute(
             """INSERT INTO decision_log (cycle_at, city, event_id, signal_type, slot_label,
-               forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason, strategy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cycle_at, city, event_id, signal_type, slot_label,
-             forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason),
+             forecast_high_f, daily_max_f, trend_state, win_prob, expected_value, price, size_usd, action, reason, strategy),
         )
         await self.db.commit()
 
@@ -388,7 +390,7 @@ class Store:
 
     async def get_closed_positions(self, limit: int = 20) -> list[dict]:
         async with self.db.execute(
-            "SELECT * FROM positions WHERE status = 'closed' ORDER BY closed_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM positions WHERE status IN ('closed', 'settled') ORDER BY closed_at DESC LIMIT ?", (limit,)
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]

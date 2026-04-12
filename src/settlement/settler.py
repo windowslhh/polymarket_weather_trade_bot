@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
@@ -86,7 +87,6 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             logger.info("Settlement detected: %s — winning slot: %s", city, winning_slot)
 
             # Compute P&L per strategy for separate tracking
-            from collections import defaultdict
             strategy_pnl: dict[str, float] = defaultdict(float)
             strategy_count: dict[str, int] = defaultdict(int)
             total_pnl = 0.0
@@ -201,39 +201,38 @@ async def _fetch_settlement_outcome(
     return winning_slot, settled_prices
 
 
-def _settlement_exit_price(position: dict, settled_prices: dict[str, float]) -> float:
-    """Determine the exit price for a settled position (0.0 or 1.0)."""
-    slot_label = position["slot_label"]
-    token_type = position["token_type"]
-    yes_resolved = None
+def _resolve_yes_price(slot_label: str, settled_prices: dict[str, float]) -> float | None:
+    """Match a position's slot_label to the settled YES price.
+
+    Uses bidirectional substring matching (slot_label ⊂ key or key ⊂ slot_label)
+    because Gamma API question text may be longer or shorter than the stored label.
+    Returns None if no match found.
+    """
     for label, price in settled_prices.items():
         if slot_label in label or label in slot_label:
-            yes_resolved = price
-            break
+            return price
+    return None
+
+
+def _settlement_exit_price(position: dict, settled_prices: dict[str, float]) -> float:
+    """Determine the exit price for a settled position (0.0 or 1.0)."""
+    yes_resolved = _resolve_yes_price(position["slot_label"], settled_prices)
     if yes_resolved is None:
         yes_resolved = 0.0
-    # NO token exit price: 1.0 if NO wins (YES=0), 0.0 if NO loses (YES=1)
-    if token_type == "NO":
+    if position["token_type"] == "NO":
         return 1.0 if yes_resolved <= 0.01 else 0.0
     return 1.0 if yes_resolved >= 0.99 else 0.0
 
 
 def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> float:
     """Compute realized P&L for a single position."""
-    slot_label = position["slot_label"]
     entry_price = position["entry_price"]
     shares = position["shares"]
     token_type = position["token_type"]
 
-    # Match slot to settled outcome
-    yes_resolved = None
-    for label, price in settled_prices.items():
-        if slot_label in label or label in slot_label:
-            yes_resolved = price
-            break
-
+    yes_resolved = _resolve_yes_price(position["slot_label"], settled_prices)
     if yes_resolved is None:
-        logger.warning("Could not match slot %s to settlement data, assuming NO wins", slot_label[:30])
+        logger.warning("Could not match slot %s to settlement data, assuming NO wins", position["slot_label"][:30])
         yes_resolved = 0.0
 
     if token_type == "NO":
