@@ -91,15 +91,34 @@ class Rebalancer:
         self._error_dists = dists
 
     async def backfill_today_observations(self) -> None:
-        """Backfill today's METAR history for all cities on startup.
+        """Backfill today's METAR history for cities with active markets.
 
         Fetches up to 24h of historical METAR data and replays it into
         DailyMaxTracker so temperature curves show the full day, not just
         from the moment the bot started.
+
+        Uses _active_city_configs if available (set by first rebalance),
+        otherwise discovers markets first to determine which cities to backfill.
         """
         try:
+            # Determine which cities have active markets
+            if not self._active_city_configs:
+                from src.markets.discovery import discover_weather_markets
+                events = await discover_weather_markets(
+                    self._config.cities,
+                    min_volume=self._config.strategy.min_market_volume,
+                    max_spread=self._config.strategy.max_slot_spread,
+                    max_days_ahead=self._config.strategy.max_days_ahead,
+                )
+                active_cities = {e.city for e in events}
+                self._active_city_configs = [
+                    c for c in self._config.cities if c.name in active_cities
+                ]
+                logger.info("Backfill: discovered %d cities with active markets", len(self._active_city_configs))
+
+            city_configs = self._active_city_configs
             async with httpx.AsyncClient(timeout=15) as client:
-                for city_cfg in self._config.cities:
+                for city_cfg in city_configs:
                     if not city_cfg.tz:
                         continue
                     observations = await get_today_metar_history(
@@ -111,9 +130,9 @@ class Rebalancer:
                         self._last_daily_maxes[city_cfg.name] = self._max_tracker.get_max(city_cfg.icao)
             total = sum(
                 len(self._max_tracker.get_observations(c.icao))
-                for c in self._config.cities
+                for c in city_configs
             )
-            logger.info("Backfilled %d total observations across %d cities", total, len(self._config.cities))
+            logger.info("Backfilled %d total observations across %d cities", total, len(city_configs))
         except Exception:
             logger.exception("Failed to backfill METAR history")
 

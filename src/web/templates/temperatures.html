@@ -145,6 +145,7 @@ function buildDatasets(selectedCity, showForecast) {
                 pointHoverRadius: 4,
                 tension: 0.3,
                 fill: false,
+                spanGaps: true,
             });
             colorIdx++;
         }
@@ -162,6 +163,7 @@ function buildDatasets(selectedCity, showForecast) {
             pointHoverRadius: 6,
             tension: 0.3,
             fill: true,
+            spanGaps: true,
         });
 
         // Add forecast high as dashed line
