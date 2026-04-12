@@ -82,7 +82,7 @@
         {% set f = forecasts.get(city) %}
         {% set dm = daily_maxes.get(city) %}
         {% set obs_count = (observation_series.get(city) or [])|length %}
-        {% if f or dm is not none %}
+        {% if f or dm is not none or obs_count > 0 %}
         <tr>
             <td style="font-weight:500;font-size:12px;">{{ city }}</td>
             <td class="td-mono {% if dm is not none and f and dm > f.high %}positive{% endif %}">
