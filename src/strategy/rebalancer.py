@@ -74,6 +74,7 @@ class Rebalancer:
         self._last_forecasts: dict = {}
         self._last_daily_maxes: dict[str, float | None] = {}
         self._last_markets: list[dict] = []
+        self._active_city_configs: list = []  # cities with active Polymarket markets
 
         # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn
         self._recent_exits: dict[str, datetime] = {}
@@ -97,18 +98,14 @@ class Rebalancer:
             if history:
                 trends[city_cfg.name] = self._trend.get_trend(city_cfg.name).value
 
-        # Build observation time series + daily maxes per city for temperature dashboard
+        # Build observation time series per city for temperature dashboard
+        # Only include cities with active markets
         observation_series: dict[str, list[tuple[str, float]]] = {}
-        all_daily_maxes: dict[str, float | None] = dict(self._last_daily_maxes)
-        for city_cfg in self._config.cities:
-            obs = self._max_tracker.get_observations(city_cfg.icao)
+        active_icaos = {c.icao: c.name for c in (self._active_city_configs or self._config.cities)}
+        for icao, city_name in active_icaos.items():
+            obs = self._max_tracker.get_observations(icao)
             if obs:
-                observation_series[city_cfg.name] = obs
-            # Fill in daily_maxes for cities not in the last rebalance
-            if city_cfg.name not in all_daily_maxes:
-                dm = self._max_tracker.get_max(city_cfg.icao)
-                if dm is not None:
-                    all_daily_maxes[city_cfg.name] = dm
+                observation_series[city_name] = obs
 
         return {
             "last_run": self._last_run_at,
@@ -119,7 +116,7 @@ class Rebalancer:
             "unrealized": self._last_unrealized,
             "markets": self._last_markets,
             "forecasts": self._last_forecasts,
-            "daily_maxes": all_daily_maxes,
+            "daily_maxes": self._last_daily_maxes,
             "price_source": self._last_price_source,
             "observation_series": observation_series,
         }
@@ -159,9 +156,11 @@ class Rebalancer:
         Runs at :57 and :03 past each hour to align with routine METAR reports
         (issued ~:51-:53). Only updates DailyMaxTracker and dashboard state;
         does NOT evaluate signals or execute trades.
+
+        Only fetches for cities with active Polymarket markets.
         """
         try:
-            city_configs = self._config.cities
+            city_configs = self._active_city_configs or self._config.cities
             daily_maxes, _ = await self._fetch_observations(city_configs)
             self._last_daily_maxes.update(daily_maxes)
             updated = sum(1 for v in daily_maxes.values() if v is not None)
@@ -473,6 +472,7 @@ class Rebalancer:
         # 2. Fetch forecasts for all cities with active markets
         active_cities = {e.city for e in events}
         city_configs = [c for c in self._config.cities if c.name in active_cities]
+        self._active_city_configs = city_configs  # save for refresh_metar
         forecasts = await get_forecasts_batch(city_configs)
         self._cached_forecasts.update(forecasts)  # keep cache fresh
         logger.info("Fetched forecasts for %d cities", len(forecasts))
@@ -493,25 +493,6 @@ class Rebalancer:
         except Exception as exc:
             logger.warning("Failed to fetch multi-day forecasts: %s", exc)
 
-        # Fetch forecasts for ALL cities (not just active markets) for dashboard
-        all_city_configs = self._config.cities
-        all_forecasts_d1: dict = {}
-        all_forecasts_d2: dict = {}
-        try:
-            non_market_configs = [c for c in all_city_configs if c.name not in active_cities]
-            if non_market_configs:
-                import asyncio as _aio
-                extra_fc, extra_d1, extra_d2 = await _aio.gather(
-                    get_forecasts_batch(non_market_configs),
-                    get_forecasts_batch(non_market_configs, today + timedelta(days=1)),
-                    get_forecasts_batch(non_market_configs, today + timedelta(days=2)),
-                )
-                forecasts.update(extra_fc)
-                forecasts_d1.update(extra_d1)
-                forecasts_d2.update(extra_d2)
-        except Exception as exc:
-            logger.debug("Non-market city forecasts failed (dashboard only): %s", exc)
-
         # Save forecast state for dashboard (today + 2 days)
         self._last_forecasts = {}
         for city, f in forecasts.items():
@@ -525,7 +506,7 @@ class Rebalancer:
                 entry["high_d2"] = forecasts_d2[city].predicted_high_f
             self._last_forecasts[city] = entry
 
-        # 3. Fetch observations from settlement-consistent stations (shared helper)
+        # 3. Fetch observations from settlement-consistent stations
         daily_maxes, city_observations = await self._fetch_observations(city_configs)
 
         # Save daily max temps for dashboard (update, don't overwrite — keep non-market cities)

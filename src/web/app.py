@@ -512,15 +512,19 @@ def create_app(store, rebalancer, config) -> Flask:
         reb = app.config["bot_rebalancer"]
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
 
-        city_names = [c.name for c in cfg.cities]
+        obs_series = state.get("observation_series", {})
+        forecasts = state.get("forecasts", {})
+        daily_maxes = state.get("daily_maxes", {})
+        # Only show cities with active market data
+        active_cities = sorted(set(obs_series.keys()) | set(forecasts.keys()) | set(daily_maxes.keys()))
         return render_template(
             "temperatures.html",
             active_page="temperatures",
             mode=_mode(),
-            cities=city_names,
-            observation_series=state.get("observation_series", {}),
-            forecasts=state.get("forecasts", {}),
-            daily_maxes=state.get("daily_maxes", {}),
+            cities=active_cities,
+            observation_series=obs_series,
+            forecasts=forecasts,
+            daily_maxes=daily_maxes,
             trends=state.get("trends", {}),
         )
 
