@@ -272,7 +272,10 @@ class Rebalancer:
                         pass
                 days_ahead = (market_date - date.today()).days
 
-                # Build held NO slots from positions
+                # Build held NO slots from positions, using cached Gamma prices
+                # when available so exit signals carry the current market price
+                # (not entry price) for accurate realized P&L computation.
+                gamma = self._last_gamma_prices
                 held_no_slots: list[TempSlot] = []
                 held_token_ids: set[str] = set()
                 for pos in positions:
@@ -281,15 +284,17 @@ class Rebalancer:
                             lower, upper = _parse_temp_bounds(pos["slot_label"])
                         except Exception:
                             lower, upper = None, None
+                        tid = pos["token_id"]
+                        price = gamma.get(tid, pos["entry_price"])
                         held_no_slots.append(TempSlot(
                             token_id_yes="",
-                            token_id_no=pos["token_id"],
+                            token_id_no=tid,
                             outcome_label=pos["slot_label"],
                             temp_lower_f=lower,
                             temp_upper_f=upper,
-                            price_no=pos["entry_price"],
+                            price_no=price,
                         ))
-                        held_token_ids.add(pos["token_id"])
+                        held_token_ids.add(tid)
 
                 if not held_no_slots:
                     continue

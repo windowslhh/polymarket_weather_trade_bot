@@ -81,6 +81,7 @@ class Executor:
                     token_id=signal.token_id,
                     strategy=signal.strategy,
                     exit_reason=signal.reason,
+                    exit_price=price,
                 )
                 logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
             logger.info("Order executed successfully: %s", result.order_id)

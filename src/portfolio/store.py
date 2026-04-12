@@ -130,6 +130,8 @@ class Store:
             ("settlements", "strategy", "ALTER TABLE settlements ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             ("positions", "buy_reason", "ALTER TABLE positions ADD COLUMN buy_reason TEXT DEFAULT ''"),
             ("positions", "exit_reason", "ALTER TABLE positions ADD COLUMN exit_reason TEXT DEFAULT ''"),
+            ("positions", "exit_price", "ALTER TABLE positions ADD COLUMN exit_price REAL"),
+            ("positions", "realized_pnl", "ALTER TABLE positions ADD COLUMN realized_pnl REAL"),
         ]
         for table, column, sql in migrations:
             try:
@@ -173,22 +175,23 @@ class Store:
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
-    async def close_position(self, position_id: int, exit_reason: str = "") -> None:
-        """Close a position and optionally set exit reason in a single UPDATE.
-
-        P1-9 FIX: merged close_position + update_exit_reason to avoid
-        two sequential writes for the common case.
-        """
-        if exit_reason:
-            await self.db.execute(
-                "UPDATE positions SET status = 'closed', closed_at = datetime('now'), exit_reason = ? WHERE id = ?",
-                (exit_reason, position_id),
-            )
-        else:
-            await self.db.execute(
-                "UPDATE positions SET status = 'closed', closed_at = datetime('now') WHERE id = ?",
-                (position_id,),
-            )
+    async def close_position(
+        self,
+        position_id: int,
+        exit_reason: str = "",
+        exit_price: float | None = None,
+        realized_pnl: float | None = None,
+    ) -> None:
+        """Close a position, storing exit price and realized P&L."""
+        await self.db.execute(
+            """UPDATE positions
+               SET status = 'closed', closed_at = datetime('now'),
+                   exit_reason = COALESCE(?, exit_reason),
+                   exit_price = COALESCE(?, exit_price),
+                   realized_pnl = COALESCE(?, realized_pnl)
+               WHERE id = ?""",
+            (exit_reason or None, exit_price, realized_pnl, position_id),
+        )
         await self.db.commit()
 
     async def update_exit_reason(self, position_id: int, exit_reason: str) -> None:

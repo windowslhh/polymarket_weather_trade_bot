@@ -124,7 +124,7 @@
         <span style="font-size:11px;color:var(--text-dim);">{{ closed_positions|length }} positions</span>
     </div>
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strategy</th><th>Entry</th><th>Size</th><th>Buy Reason</th><th>Exit Reason</th><th>Closed</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strat</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Size</th><th>Exit Reason</th><th>Closed</th></tr></thead>
         <tbody>
         {% for p in closed_positions[:15] %}
         <tr>
@@ -133,10 +133,13 @@
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag {% if p.strategy == 'A' %}tag-settling{% elif p.strategy == 'B' %}tag-stable{% elif p.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
-            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
-            <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.buy_reason or '' }}">
-                {{ p.buy_reason[:40] if p.buy_reason else '-' }}
+            <td class="td-mono" style="{% if p.exit_price is not none %}color:{{ 'var(--green-text)' if p.exit_price > p.entry_price else 'var(--red-text)' if p.exit_price < p.entry_price else 'var(--text)' }}{% endif %}">
+                {{ "%.3f"|format(p.exit_price) if p.exit_price is not none else '-' }}
             </td>
+            <td class="td-mono" style="font-weight:600;{% if p.realized_pnl is not none %}color:{{ 'var(--green-text)' if p.realized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">
+                {% if p.realized_pnl is not none %}{{ '+' if p.realized_pnl > 0 else '' }}${{ "%.3f"|format(p.realized_pnl) }}{% else %}-{% endif %}
+            </td>
+            <td class="td-mono">${{ "%.2f"|format(p.size_usd) }}</td>
             <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ p.exit_reason or '' }}">
                 {{ p.exit_reason[:40] if p.exit_reason else '-' }}
             </td>

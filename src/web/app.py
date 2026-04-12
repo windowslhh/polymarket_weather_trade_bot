@@ -221,6 +221,13 @@ def create_app(store, rebalancer, config) -> Flask:
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
         strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
         strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        # Include realized P&L from TRIM/EXIT closed positions (not just settlements)
+        for p in _run_async(st.get_closed_positions(limit=200)):
+            rpnl = p.get("realized_pnl")
+            if rpnl is not None:
+                s = p.get("strategy", "B")
+                if s in strat_realized:
+                    strat_realized[s] += rpnl
 
         # Get current prices for P&L calculation
         gamma_prices = reb.get_gamma_prices() if hasattr(reb, 'get_gamma_prices') else {}
@@ -374,8 +381,8 @@ def create_app(store, rebalancer, config) -> Flask:
                 "action": "SELL",
                 "forecast": "", "win_prob": "", "ev": "",
                 "entry": f"{p['entry_price']:.3f}",
-                "current": "-",
-                "pnl": "-",
+                "current": f"{p['exit_price']:.3f}" if p.get("exit_price") is not None else "-",
+                "pnl": f"{'+'if p.get('realized_pnl',0)>0 else ''}${p['realized_pnl']:.3f}" if p.get("realized_pnl") is not None else "-",
                 "reason": exit_reason,
                 "type": "settled" if p.get("status") == "settled" else "closed",
                 "sort_key": p.get("closed_at") or p.get("created_at", ""),
@@ -424,6 +431,8 @@ def create_app(store, rebalancer, config) -> Flask:
                 s = "B"
             if p.get("status") == "settled":
                 strat_counts[s]["settled"] += 1
+            if p.get("realized_pnl") is not None:
+                strat_pnl[s] += p["realized_pnl"]
 
         return render_template(
             "trades.html",

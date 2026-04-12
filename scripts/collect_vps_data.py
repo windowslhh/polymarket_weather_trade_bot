@@ -52,8 +52,8 @@ def q(sql):
 
 # All positions with full fields
 result["all_positions"] = q(
-    "SELECT id, strategy, status, city, slot_label, side, token_type, "
-    "entry_price, size_usd, shares, buy_reason, exit_reason, "
+    "SELECT id, event_id, token_id, strategy, status, city, slot_label, side, token_type, "
+    "entry_price, exit_price, size_usd, shares, realized_pnl, buy_reason, exit_reason, "
     "created_at, closed_at FROM positions ORDER BY id"
 )
 

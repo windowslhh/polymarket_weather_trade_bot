@@ -94,6 +94,7 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
 
             for pos in positions:
                 pnl = _compute_position_pnl(pos, settled_prices)
+                exit_price = _settlement_exit_price(pos, settled_prices)
                 strat = pos.get("strategy", "B")
                 strategy_pnl[strat] += pnl
                 strategy_count[strat] += 1
@@ -101,8 +102,9 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 settled_count += 1
 
                 await store.db.execute(
-                    "UPDATE positions SET status = 'settled', closed_at = datetime('now') WHERE id = ?",
-                    (pos["id"],),
+                    """UPDATE positions SET status = 'settled', closed_at = datetime('now'),
+                       exit_price = ?, realized_pnl = ? WHERE id = ?""",
+                    (exit_price, pnl, pos["id"]),
                 )
                 logger.info(
                     "  Position %d [%s]: %s %s %s → P&L=$%.2f",
@@ -197,6 +199,23 @@ async def _fetch_settlement_outcome(
         winning_slot = "none"
 
     return winning_slot, settled_prices
+
+
+def _settlement_exit_price(position: dict, settled_prices: dict[str, float]) -> float:
+    """Determine the exit price for a settled position (0.0 or 1.0)."""
+    slot_label = position["slot_label"]
+    token_type = position["token_type"]
+    yes_resolved = None
+    for label, price in settled_prices.items():
+        if slot_label in label or label in slot_label:
+            yes_resolved = price
+            break
+    if yes_resolved is None:
+        yes_resolved = 0.0
+    # NO token exit price: 1.0 if NO wins (YES=0), 0.0 if NO loses (YES=1)
+    if token_type == "NO":
+        return 1.0 if yes_resolved <= 0.01 else 0.0
+    return 1.0 if yes_resolved >= 0.99 else 0.0
 
 
 def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> float:

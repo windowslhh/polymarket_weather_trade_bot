@@ -105,19 +105,29 @@ class PortfolioTracker:
         token_id: str,
         strategy: str | None = None,
         exit_reason: str = "",
+        exit_price: float | None = None,
     ) -> int:
         """Close open positions matching event_id, token_id, and strategy.
 
         When strategy is provided, only closes positions for that strategy.
         This prevents a SELL signal from strategy A from closing B/C/D positions.
+        Computes realized P&L = (exit_price - entry_price) * shares for NO positions.
         """
         positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
         closed = 0
         for pos in positions:
             if pos["token_id"] == token_id and pos["status"] == "open":
-                # P1-9: single SQL call for close + exit_reason
-                await self._store.close_position(pos["id"], exit_reason=exit_reason)
-                logger.info("Position closed: id=%d [%s] %s %s", pos["id"], pos.get("strategy", "?"), pos["slot_label"][:30], pos["token_type"])
+                pnl: float | None = None
+                if exit_price is not None:
+                    pnl = (exit_price - pos["entry_price"]) * pos["shares"]
+                await self._store.close_position(
+                    pos["id"],
+                    exit_reason=exit_reason,
+                    exit_price=exit_price,
+                    realized_pnl=pnl,
+                )
+                pnl_str = f" P&L=${pnl:.3f}" if pnl is not None else ""
+                logger.info("Position closed: id=%d [%s] %s %s%s", pos["id"], pos.get("strategy", "?"), pos["slot_label"][:30], pos["token_type"], pnl_str)
                 closed += 1
         return closed
 
