@@ -97,7 +97,8 @@ class TestSlotDistance:
 
     def test_open_upper_slot(self):
         slot = _make_slot(90, None)
-        assert _slot_distance(slot, 75.0) == 16.0
+        # ≥90°F: forecast=75 is below threshold → distance = 90-75 = 15
+        assert _slot_distance(slot, 75.0) == 15.0
 
 
 class TestEvaluateNoSignals:
@@ -634,16 +635,18 @@ class TestEvaluateExitSignalsAdvanced:
 
 class TestSlotDistanceAdvanced:
     def test_open_lower_slot(self):
-        """'Below X°F' slot: lower=None, upper=60."""
+        """'Below X°F' slot: lower=None, upper=60. NO wins when actual >= 60."""
         slot = _make_slot(None, 60)
-        # midpoint = 60 - 1 = 59, distance = |59 - 75| = 16
-        assert _slot_distance(slot, 75.0) == 16.0
+        # forecast=75 > upper=60 → forecast above threshold, NO likely wins
+        # distance = forecast - upper = 75 - 60 = 15
+        assert _slot_distance(slot, 75.0) == 15.0
 
     def test_open_upper_slot(self):
-        """'≥X°F' slot: lower=90, upper=None."""
+        """'≥X°F' slot: lower=90, upper=None. NO wins when actual < 90."""
         slot = _make_slot(90, None)
-        # midpoint = 90 + 1 = 91, distance = |91 - 75| = 16
-        assert _slot_distance(slot, 75.0) == 16.0
+        # forecast=75 < lower=90 → forecast below threshold, NO likely wins
+        # distance = lower - forecast = 90 - 75 = 15
+        assert _slot_distance(slot, 75.0) == 15.0
 
     def test_both_none_slot(self):
         """Degenerate slot with both bounds None (should not happen in prod)."""

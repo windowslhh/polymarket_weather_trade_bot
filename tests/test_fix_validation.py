@@ -108,17 +108,15 @@ class TestDistCalculation:
         slot = _make_slot(lower=76.0, upper=80.0)
         assert _slot_distance(slot, 90.0) == 10.0
 
-    def test_open_ended_upper_uses_midpoint_fallback(self):
-        """Slot with upper=None → fallback to midpoint-based distance."""
+    def test_open_ended_upper_forecast_above_threshold(self):
+        """≥76°F slot: forecast=80 >= lower=76 → YES likely wins, distance=0 (no NO edge)."""
         slot = _make_slot(lower=76.0, upper=None)
-        # midpoint = lower + 1 = 77
-        assert _slot_distance(slot, 80.0) == 3.0
+        assert _slot_distance(slot, 80.0) == 0.0
 
-    def test_open_ended_lower_uses_midpoint_fallback(self):
-        """Slot with lower=None → fallback to midpoint-based distance."""
+    def test_open_ended_lower_forecast_below_threshold(self):
+        """Below 80°F slot: forecast=75 <= upper=80 → YES likely wins, distance=0 (no NO edge)."""
         slot = _make_slot(lower=None, upper=80.0)
-        # midpoint = upper - 1 = 79
-        assert _slot_distance(slot, 75.0) == 4.0
+        assert _slot_distance(slot, 75.0) == 0.0
 
     def test_both_bounds_none(self):
         """Slot with both bounds None → midpoint=0, fallback."""

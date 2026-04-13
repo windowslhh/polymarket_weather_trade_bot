@@ -45,11 +45,28 @@ def _estimate_no_win_probability_normal(
 
 
 def _slot_distance(slot: TempSlot, forecast_high_f: float) -> float:
-    """Calculate the minimum distance from the slot to the forecast high."""
+    """Calculate the minimum distance from the slot to the forecast high.
+
+    For open-ended slots:
+    - "≥X°F" (upper=None): NO wins when actual < X. Distance = how far forecast
+      is below X. Returns 0 when forecast >= X (YES likely wins, no NO edge).
+    - "below X°F" (lower=None): NO wins when actual >= X. Distance = how far
+      forecast is above X. Returns 0 when forecast <= X (YES likely wins).
+    """
     if slot.temp_lower_f is not None and slot.temp_upper_f is not None:
         if slot.temp_lower_f <= forecast_high_f <= slot.temp_upper_f:
             return 0.0
         return min(abs(forecast_high_f - slot.temp_lower_f), abs(forecast_high_f - slot.temp_upper_f))
+    if slot.temp_upper_f is None and slot.temp_lower_f is not None:
+        # "≥X°F" slot: YES wins when actual >= X → NO wins when actual < X
+        if forecast_high_f >= slot.temp_lower_f:
+            return 0.0  # forecast at/above threshold → YES likely wins, no NO edge
+        return slot.temp_lower_f - forecast_high_f
+    if slot.temp_lower_f is None and slot.temp_upper_f is not None:
+        # "below X°F" slot: YES wins when actual < X → NO wins when actual >= X
+        if forecast_high_f <= slot.temp_upper_f:
+            return 0.0  # forecast at/below threshold → YES likely wins, no NO edge
+        return forecast_high_f - slot.temp_upper_f
     mid = slot.temp_midpoint_f
     return abs(mid - forecast_high_f)
 
@@ -137,6 +154,18 @@ def evaluate_no_signals(
     for slot in event.slots:
         # Skip already-held slots
         if held_token_ids and slot.token_id_no in held_token_ids:
+            continue
+
+        # For "≥X°F" slots (upper=None): when daily_max already >= X, YES is a
+        # guaranteed winner → NO is a guaranteed loser. Block immediately.
+        # (evaluate_locked_win_signals already skips these; mirror the guard here.)
+        if (
+            days_ahead == 0
+            and daily_max_f is not None
+            and slot.temp_upper_f is None
+            and slot.temp_lower_f is not None
+            and daily_max_f >= slot.temp_lower_f
+        ):
             continue
 
         distance = _slot_distance(slot, forecast.predicted_high_f)
