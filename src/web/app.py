@@ -297,8 +297,22 @@ def create_app(store, rebalancer, config) -> Flask:
                 if s in strat_realized:
                     strat_realized[s] += rpnl
 
-        # Get current prices for P&L calculation
-        gamma_prices = reb.get_gamma_prices() if hasattr(reb, 'get_gamma_prices') else {}
+        # Get current prices for P&L calculation.
+        # Use the shared prices_fresh cache (same 30s TTL as /api/prices).
+        # If the cache is cold, build it now: rebalancer cache + fresh Gamma fetch.
+        # This ensures the initial page render always shows live P&L, not just '-'.
+        gamma_prices = _cached("prices_fresh")
+        if gamma_prices is None:
+            _reb_cache = reb.get_gamma_prices() if hasattr(reb, 'get_gamma_prices') else {}
+            gamma_prices = dict(_reb_cache)
+            _pos_token_ids = [p["token_id"] for p in open_pos if p.get("token_id")]
+            if _pos_token_ids:
+                try:
+                    _fresh = _run_async(_fetch_gamma_prices(_pos_token_ids), timeout=5)
+                    gamma_prices.update(_fresh)
+                except Exception:
+                    pass
+            _set_cache("prices_fresh", gamma_prices)
 
         # Enrich positions with current price, unrealized P&L, and parsed slot info
         for p in open_pos:
