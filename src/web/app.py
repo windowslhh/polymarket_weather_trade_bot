@@ -69,7 +69,7 @@ async def _fetch_gamma_prices(token_ids: list[str]) -> dict[str, float]:
 
     prices: dict[str, float] = {}
     try:
-        async with _httpx.AsyncClient(timeout=10) as client:
+        async with _httpx.AsyncClient(timeout=5) as client:
             batch_size = 20
             for i in range(0, len(token_ids), batch_size):
                 batch = token_ids[i:i + batch_size]
@@ -582,10 +582,15 @@ def create_app(store, rebalancer, config) -> Flask:
 
     @app.route("/api/prices")
     def api_prices():
-        """Fetch fresh current prices from Gamma API for all open position token IDs.
+        """Return current prices for all open position token IDs.
 
-        Uses a 30-second TTL cache to avoid hammering Gamma API.
-        Falls back to the rebalancer's cached prices for any token not found.
+        Primary source: rebalancer's in-memory cache (refreshed every 15 min by
+        position check + every 60 min by rebalance cycle).  Augmented with a
+        best-effort fresh Gamma fetch when available.
+
+        The fresh Gamma fetch is optional — if it times out or fails for any
+        reason the endpoint always falls back to the rebalancer cache so the JS
+        poller always gets a 200 response with prices, never a 500.
         """
         cached = _cached("prices_fresh", ttl=30)
         if cached is not None:
@@ -597,14 +602,21 @@ def create_app(store, rebalancer, config) -> Flask:
         open_pos = _run_async(st.get_open_positions())
         token_ids = list({p["token_id"] for p in open_pos if p.get("token_id")})
 
-        # Fetch fresh prices from Gamma API
-        prices = _run_async(_fetch_gamma_prices(token_ids), timeout=15) if token_ids else {}
-
-        # Fill any gaps with rebalancer's cached prices
+        # Start with rebalancer cache as the guaranteed baseline.
+        # The rebalancer's position check already fetches fresh Gamma prices every
+        # 15 min, so this is at most 15 minutes stale — good enough for the UI.
         cached_prices = reb.get_gamma_prices() if hasattr(reb, "get_gamma_prices") else {}
-        for tid in token_ids:
-            if tid not in prices and tid in cached_prices:
-                prices[tid] = cached_prices[tid]
+        prices = dict(cached_prices)  # copy so we can update safely
+
+        # Best-effort fresh Gamma fetch (shorter timeout to avoid blocking the
+        # background asyncio loop and causing concurrent.futures.TimeoutError).
+        # If it fails for any reason we silently use the rebalancer cache above.
+        if token_ids:
+            try:
+                fresh = _run_async(_fetch_gamma_prices(token_ids), timeout=8)
+                prices.update(fresh)  # overlay fresh prices on top of cached
+            except Exception:
+                pass  # rebalancer cache is already in prices — no further action
 
         _set_cache("prices_fresh", prices)
         return jsonify(prices)
