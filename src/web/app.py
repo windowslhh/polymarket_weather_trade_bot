@@ -55,6 +55,55 @@ def _set_cache(key: str, val: object):
     _cache[key] = (time.time(), val)
 
 
+async def _fetch_gamma_prices(token_ids: list[str]) -> dict[str, float]:
+    """Fetch current prices from Gamma API for a list of CLOB token IDs.
+
+    Calls /markets?clob_token_ids=... which returns outcomePrices per token.
+    Batches requests to avoid URL length limits.
+    """
+    import json as _json
+    import httpx as _httpx
+
+    if not token_ids:
+        return {}
+
+    prices: dict[str, float] = {}
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+            batch_size = 20
+            for i in range(0, len(token_ids), batch_size):
+                batch = token_ids[i:i + batch_size]
+                resp = await client.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"clob_token_ids": ",".join(batch)},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, list):
+                    continue
+                for mkt in data:
+                    tokens_raw = mkt.get("clobTokenIds", [])
+                    prices_raw = mkt.get("outcomePrices", [])
+                    if isinstance(tokens_raw, str):
+                        try:
+                            tokens_raw = _json.loads(tokens_raw)
+                        except Exception:
+                            tokens_raw = []
+                    if isinstance(prices_raw, str):
+                        try:
+                            prices_raw = _json.loads(prices_raw)
+                        except Exception:
+                            prices_raw = []
+                    for tid, p in zip(tokens_raw, prices_raw):
+                        try:
+                            prices[tid] = float(p)
+                        except (ValueError, TypeError):
+                            pass
+    except Exception:
+        logger.warning("Failed to fetch fresh Gamma prices for %d tokens", len(token_ids))
+    return prices
+
+
 _MONTH_SHORT = {
     "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr",
     "May": "May", "June": "Jun", "July": "Jul", "August": "Aug",
@@ -530,6 +579,35 @@ def create_app(store, rebalancer, config) -> Flask:
             trends=state.get("trends", {}),
             city_timezones=city_tzs,
         )
+
+    @app.route("/api/prices")
+    def api_prices():
+        """Fetch fresh current prices from Gamma API for all open position token IDs.
+
+        Uses a 30-second TTL cache to avoid hammering Gamma API.
+        Falls back to the rebalancer's cached prices for any token not found.
+        """
+        cached = _cached("prices_fresh", ttl=30)
+        if cached is not None:
+            return jsonify(cached)
+
+        st = app.config["bot_store"]
+        reb = app.config["bot_rebalancer"]
+
+        open_pos = _run_async(st.get_open_positions())
+        token_ids = list({p["token_id"] for p in open_pos if p.get("token_id")})
+
+        # Fetch fresh prices from Gamma API
+        prices = _run_async(_fetch_gamma_prices(token_ids), timeout=15) if token_ids else {}
+
+        # Fill any gaps with rebalancer's cached prices
+        cached_prices = reb.get_gamma_prices() if hasattr(reb, "get_gamma_prices") else {}
+        for tid in token_ids:
+            if tid not in prices and tid in cached_prices:
+                prices[tid] = cached_prices[tid]
+
+        _set_cache("prices_fresh", prices)
+        return jsonify(prices)
 
     @app.route("/api/temperatures")
     def api_temperatures():
