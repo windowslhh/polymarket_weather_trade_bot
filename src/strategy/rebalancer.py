@@ -348,9 +348,17 @@ class Rebalancer:
             for (event_id, strat_name), positions in event_strat_positions.items():
                 meta = event_meta[event_id]
                 city = meta["city"]
-                # Compute local hour for post-peak evaluator logic
+                # Compute local hour and local date using city timezone.
+                # Must use city-local date (not UTC) for days_ahead to avoid
+                # misclassifying next-day markets as same-day during UTC midnight crossover.
                 city_tz = self._city_tz.get(city)
-                local_hour = datetime.now(city_tz).hour if city_tz else None
+                if city_tz:
+                    city_now = datetime.now(city_tz)
+                    local_hour = city_now.hour
+                    local_today = city_now.date()
+                else:
+                    local_hour = None
+                    local_today = date.today()
 
                 daily_max = daily_maxes.get(city)
                 observation = city_observations.get(city)
@@ -361,17 +369,17 @@ class Rebalancer:
 
                 # Infer market_date from slot_label (e.g. "...on April 11?")
                 # to correctly compute days_ahead for exit logic.
-                market_date = date.today()
+                market_date = local_today
                 sample_label = positions[0].get("slot_label", "")
                 m = re.search(r'on (\w+ \d+)\??$', sample_label)
                 if m:
                     try:
                         market_date = datetime.strptime(
-                            f"{m.group(1)} {date.today().year}", "%B %d %Y"
+                            f"{m.group(1)} {local_today.year}", "%B %d %Y"
                         ).date()
                     except ValueError:
                         pass
-                days_ahead = (market_date - date.today()).days
+                days_ahead = (market_date - local_today).days
 
                 # Build held NO slots from positions, using cached Gamma prices
                 # when available so exit signals carry the current market price
@@ -675,11 +683,19 @@ class Rebalancer:
             except Exception:
                 logger.debug("Failed to flush edge batch")
 
-            days_ahead = (event.market_date - date.today()).days
-
-            # Compute local hour for post-peak evaluator logic
+            # Compute local hour and local date for post-peak evaluator logic.
+            # Use city-local date (not UTC) for days_ahead: during UTC midnight
+            # crossover (00:00–06:00 UTC), date.today() is already the next day
+            # in UTC while US cities are still on the previous day locally.
             city_tz = self._city_tz.get(event.city)
-            local_hour = datetime.now(city_tz).hour if city_tz else None
+            if city_tz:
+                city_now = datetime.now(city_tz)
+                local_hour = city_now.hour
+                local_today = city_now.date()
+            else:
+                local_hour = None
+                local_today = date.today()
+            days_ahead = (event.market_date - local_today).days
 
             # Collect all evaluated signals across all strategy variants for decision logging
             # P0-1 FIX: store (signal, strat_name, source, strat_cfg, forecast) to avoid stale refs
