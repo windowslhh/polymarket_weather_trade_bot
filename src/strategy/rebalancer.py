@@ -16,6 +16,7 @@ from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.markets.discovery import discover_weather_markets, _parse_temp_bounds
 from src.markets.models import TempSlot, TradeSignal, WeatherMarketEvent
+from src.markets.price_buffer import PriceBuffer
 from src.portfolio.tracker import PortfolioTracker
 from src.strategy.evaluator import (
     _estimate_no_win_prob,
@@ -81,6 +82,10 @@ class Rebalancer:
         self._last_price_source: str = "gamma"
         self._last_unrealized: float = 0.0
         self._last_gamma_prices: dict[str, float] = {}
+
+        # TWAP price buffer: smooths CLOB/Gamma prices across cycles to reduce
+        # noise and filter single-point outliers before strategy decisions.
+        self._price_buffer = PriceBuffer()
 
         # Cached Forecast objects — refreshed every 15 min (position check)
         # and every 60 min (full rebalance).  Used by position check for
@@ -325,6 +330,59 @@ class Rebalancer:
             if not city_configs:
                 return []
 
+            # ── Refresh prices for held tokens ───────────────────────────────
+            # Fetch fresh Gamma prices for all open position token IDs so that
+            # exit/trim decisions use prices no older than 15 minutes rather
+            # than the stale values from the last full rebalance (up to 60 min).
+            held_token_ids = list({p["token_id"] for p in all_positions if p.get("token_id")})
+            if held_token_ids:
+                try:
+                    import asyncio as _asyncio
+                    import json as _json
+                    import httpx as _httpx
+
+                    async def _fetch_gamma_for_tokens(tids: list[str]) -> dict[str, float]:
+                        prices: dict[str, float] = {}
+                        async with _httpx.AsyncClient(timeout=10) as _client:
+                            for i in range(0, len(tids), 20):
+                                batch = tids[i:i + 20]
+                                try:
+                                    resp = await _client.get(
+                                        "https://gamma-api.polymarket.com/markets",
+                                        params={"clob_token_ids": ",".join(batch)},
+                                    )
+                                    resp.raise_for_status()
+                                    for mkt in resp.json():
+                                        toks = mkt.get("clobTokenIds", [])
+                                        pxs = mkt.get("outcomePrices", [])
+                                        if isinstance(toks, str):
+                                            toks = _json.loads(toks)
+                                        if isinstance(pxs, str):
+                                            pxs = _json.loads(pxs)
+                                        for tid, px in zip(toks, pxs):
+                                            try:
+                                                prices[tid] = float(px)
+                                            except (ValueError, TypeError):
+                                                pass
+                                except Exception:
+                                    logger.warning("Gamma price batch fetch failed (batch %d)", i // 20)
+                        return prices
+
+                    fresh_gamma = await _fetch_gamma_for_tokens(held_token_ids)
+                    if fresh_gamma:
+                        # Apply TWAP smoothing (same buffer as main cycle)
+                        smoothed_fresh = self._price_buffer.apply_batch(fresh_gamma)
+                        self._last_gamma_prices.update(smoothed_fresh)
+                        logger.info(
+                            "Position check: refreshed prices for %d/%d tokens (TWAP-smoothed)",
+                            len(fresh_gamma), len(held_token_ids),
+                        )
+                    else:
+                        logger.warning("Position check: Gamma price refresh returned no prices")
+                except Exception:
+                    logger.warning("Position check: price refresh failed, using cached prices")
+            # ─────────────────────────────────────────────────────────────────
+
             # Refresh forecasts + METAR in parallel for minimum latency
             import asyncio
             forecast_task = self.refresh_forecasts()
@@ -527,7 +585,7 @@ class Rebalancer:
             return []
         logger.info("Found %d active weather events", len(events))
 
-        # 1b. Refresh prices from CLOB (live mode) or keep Gamma prices (paper/dry-run)
+        # 1b. Refresh prices: CLOB (live) cross-validated with Gamma, then TWAP-smoothed.
         all_token_ids = []
         for event in events:
             for slot in event.slots:
@@ -536,23 +594,43 @@ class Rebalancer:
                 if slot.token_id_no:
                     all_token_ids.append(slot.token_id_no)
 
+        # Collect raw Gamma prices from discovery payload
+        gamma_raw: dict[str, float] = {}
+        for event in events:
+            for slot in event.slots:
+                if slot.token_id_no and slot.price_no > 0:
+                    gamma_raw[slot.token_id_no] = slot.price_no
+                if slot.token_id_yes and slot.price_yes > 0:
+                    gamma_raw[slot.token_id_yes] = slot.price_yes
+
+        # Try CLOB for live mode; paper/dry-run always returns {}
         clob_prices = await self._clob.get_prices_batch(all_token_ids)
+
         if clob_prices:
-            refreshed = 0
-            for event in events:
-                for slot in event.slots:
-                    if slot.token_id_yes in clob_prices:
-                        slot.price_yes = clob_prices[slot.token_id_yes]
-                        refreshed += 1
-                    if slot.token_id_no in clob_prices:
-                        slot.price_no = clob_prices[slot.token_id_no]
-                        refreshed += 1
+            # Cross-validate CLOB vs Gamma; fall back to Gamma on >5% divergence
+            merged = self._price_buffer.cross_validate(clob_prices, gamma_raw)
             self._last_price_source = "clob"
-            logger.info("Refreshed %d slot prices from CLOB", refreshed)
         else:
+            merged = gamma_raw
             self._last_price_source = "gamma"
             logger.info("Using Gamma API prices (CLOB unavailable in %s mode)",
                         "paper" if self._config.paper else "dry-run" if self._config.dry_run else "live")
+
+        # Apply TWAP smoothing; returns TWAP or raw price if window is thin
+        smoothed = self._price_buffer.apply_batch(merged)
+
+        # Write smoothed prices back into slot objects for signal evaluation
+        refreshed = 0
+        for event in events:
+            for slot in event.slots:
+                if slot.token_id_yes in smoothed:
+                    slot.price_yes = smoothed[slot.token_id_yes]
+                    refreshed += 1
+                if slot.token_id_no in smoothed:
+                    slot.price_no = smoothed[slot.token_id_no]
+                    refreshed += 1
+        if clob_prices:
+            logger.info("Refreshed %d slot prices from CLOB (TWAP-smoothed)", refreshed)
 
         # 2. Fetch forecasts for all cities with active markets
         active_cities = {e.city for e in events}
@@ -891,7 +969,7 @@ class Rebalancer:
         else:
             logger.info("No trade signals generated")
 
-        # Collect latest Gamma prices for unrealized P&L and position display
+        # Collect smoothed prices (already in slot objects) for dashboard + P&L
         gamma_prices: dict[str, float] = {}
         for event in events:
             for slot in event.slots:
