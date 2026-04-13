@@ -402,6 +402,7 @@ class Rebalancer:
 
             now = datetime.now(timezone.utc)
             variants = get_strategy_variants()
+            skipped_no_obs = 0
 
             for (event_id, strat_name), positions in event_strat_positions.items():
                 meta = event_meta[event_id]
@@ -423,6 +424,7 @@ class Rebalancer:
                 error_dist = self._error_dists.get(city)
 
                 if not observation or daily_max is None:
+                    skipped_no_obs += 1
                     continue
 
                 # Infer market_date from slot_label (e.g. "...on April 11?")
@@ -436,7 +438,17 @@ class Rebalancer:
                             f"{m.group(1)} {local_today.year}", "%B %d %Y"
                         ).date()
                     except ValueError:
-                        pass
+                        logger.warning(
+                            "Position check: could not parse date from slot_label %r "
+                            "for event %s — defaulting days_ahead=0 (same-day exit logic applies)",
+                            sample_label, event_id,
+                        )
+                else:
+                    logger.debug(
+                        "Position check: no date found in slot_label %r "
+                        "for event %s — defaulting days_ahead=0",
+                        sample_label, event_id,
+                    )
                 days_ahead = (market_date - local_today).days
 
                 # Build held NO slots from positions, using cached Gamma prices
@@ -522,6 +534,13 @@ class Rebalancer:
                     sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
                     self._recent_exits[sig.token_id] = now
                     signals.append(sig)
+
+            if skipped_no_obs:
+                logger.warning(
+                    "Position check: skipped %d event(s) due to missing METAR observations or daily_max — "
+                    "exit/trim signals suppressed for affected positions",
+                    skipped_no_obs,
+                )
 
             # Execute any urgent trades
             if signals:

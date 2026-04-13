@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import json
 
@@ -125,13 +126,19 @@ async def discover_weather_markets(
                 if not market_date:
                     continue
 
-                # Skip past markets
-                if market_date < date.today():
-                    continue
+                # Skip past/future markets — compare against city-local date, not UTC.
+                # During UTC midnight (00:00–06:00 UTC), US west coast cities are still
+                # on the previous day; date.today() (UTC) would wrongly filter out
+                # same-day markets for cities like Los Angeles (PDT/PST = UTC-7/8).
+                try:
+                    city_tz = ZoneInfo(city_cfg.tz) if city_cfg.tz else timezone.utc
+                    local_today = datetime.now(city_tz).date()
+                except Exception:
+                    local_today = datetime.now(timezone.utc).date()
 
-                # Skip markets too far ahead (forecast accuracy drops)
-                from datetime import timedelta
-                if market_date > date.today() + timedelta(days=max_days_ahead):
+                if market_date < local_today:
+                    continue
+                if market_date > local_today + timedelta(days=max_days_ahead):
                     continue
 
                 # Parse temperature slots from child markets
