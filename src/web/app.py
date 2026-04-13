@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import re
 import threading
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 _bg_loop: asyncio.AbstractEventLoop | None = None
 _bg_thread: threading.Thread | None = None
 _bg_lock = threading.Lock()
+# W-01 fix: track which threads are currently inside _run_async to detect
+# re-entrant calls that would deadlock the background event loop.
+_active_threads: set[int] = set()
+_active_threads_lock = threading.Lock()
 
 
 def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
@@ -31,10 +36,31 @@ def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
 
 
 def _run_async(coro, timeout: float = 10):
-    """Run async coroutine on the persistent background loop (fast)."""
-    loop = _ensure_bg_loop()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=timeout)
+    """Run async coroutine on the persistent background loop (fast).
+
+    W-01 fix: detects re-entrant calls from the same thread.  If a coroutine
+    scheduled on the background loop somehow triggers another _run_async call
+    (e.g. via a callback that runs on a Flask worker thread that is already
+    blocked waiting for the first result), the second call would deadlock
+    because future.result() blocks the thread while the loop can't proceed.
+    This guard raises immediately instead of hanging.
+    """
+    tid = threading.get_ident()
+    with _active_threads_lock:
+        if tid in _active_threads:
+            raise RuntimeError(
+                "_run_async re-entrant call detected — would deadlock the "
+                "background event loop. Refactor the caller to avoid nesting "
+                "sync-over-async bridges."
+            )
+        _active_threads.add(tid)
+    try:
+        loop = _ensure_bg_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+    finally:
+        with _active_threads_lock:
+            _active_threads.discard(tid)
 
 
 # Simple TTL cache for dashboard data
@@ -214,8 +240,11 @@ def create_app(store, rebalancer, config) -> Flask:
                 if s in strat_realized:
                     strat_realized[s] += rpnl
 
-        # Total realized = settlement P&L + SELL/TRIM/EXIT P&L
-        total_realized = (daily_pnl_val or 0.0) + sum(
+        # W-03 fix: use positions table as single source of truth for realized P&L.
+        # Previously this summed daily_pnl_val (which includes settlement P&L) PLUS
+        # closed positions' realized_pnl (which also includes settlement P&L),
+        # double-counting settlement gains/losses.
+        total_realized = sum(
             p["realized_pnl"] for p in closed_pos if p.get("realized_pnl") is not None
         )
 
@@ -692,7 +721,8 @@ def create_app(store, rebalancer, config) -> Flask:
         secret = getattr(cfg, "trigger_secret", "") if cfg else ""
         if secret:
             auth_header = request.headers.get("Authorization", "")
-            if auth_header != f"Bearer {secret}":
+            # W-02 fix: constant-time comparison to prevent timing side-channel attacks
+            if not hmac.compare_digest(auth_header, f"Bearer {secret}"):
                 logger.warning("Unauthorized /api/trigger attempt from %s", request.remote_addr)
                 return jsonify({"error": "unauthorized"}), 401
 

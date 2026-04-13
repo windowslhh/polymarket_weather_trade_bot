@@ -202,25 +202,48 @@ This prevents exceeding `max_total_exposure_usd` when multiple events are proces
 | **SET-01** | CRITICAL | ✅ Pass | settled_pairs filter prevents double P&L |
 | **E-01** | HIGH | ✅ Pass | forecast=None → hold, not sell |
 | **D-01** | HIGH | ✅ Pass | Exact-first, single-substring-only matching |
-| **SET-02** | HIGH | ⚠️ Adequate | Improved label matching; token_id match not implemented |
-| **W-02** | HIGH | ⚠️ Concern | Auth added but uses `!=` not `hmac.compare_digest()` |
+| **SET-02** | HIGH | ✅ Fixed (round 2) | Token_id-first matching via SettlementOutcome.token_prices |
+| **W-02** | HIGH | ✅ Fixed (round 2) | `hmac.compare_digest()` for constant-time comparison |
 | **CC-01** | HIGH | ✅ Pass | WAL mode enabled |
-| **R-02** | HIGH | ⚠️ Partial | Rebalancer uses city TZ; settler still uses `date.today()` |
+| **R-02** | HIGH | ✅ Fixed (round 2) | `settler.py` now uses `datetime.now(timezone.utc).date()` |
 | **ST-03** | HIGH | ✅ Pass | Atomic SQL increment, correct syntax |
-| **W-03** | HIGH | ❌ Not fixed | Dashboard still double-counts realized P&L |
-| **W-01** | HIGH | — | Not targeted (latent risk, deferred) |
+| **W-03** | HIGH | ✅ Fixed (round 2) | Dashboard uses positions table as single P&L source |
+| **W-01** | HIGH | ✅ Fixed (round 2) | Re-entrancy guard on `_run_async` prevents deadlock |
 | **A-01** | MEDIUM | ✅ Pass | Task references retained |
 | **R-03** | MEDIUM | ✅ Pass | Periodic cleanup of exit cooldowns |
 
 ---
 
-## Verdict: ⚠️ DEPLOYABLE WITH CAVEATS
+## Round 2 Fixes (2026-04-14)
 
-**Can deploy.** All 3 CRITICAL issues are correctly fixed. The trading-critical code paths (SELL execution, race condition prevention, settlement P&L) are solid. 605 tests pass.
+Five residual issues from the initial verification were fixed in a follow-up commit:
 
-**Before next deploy, address**:
-1. **W-02**: Replace `!=` with `hmac.compare_digest()` for timing-safe token comparison (1-line fix)
-2. **W-03**: Fix dashboard P&L double-counting (use one source, not both `daily_pnl` + position `realized_pnl`)
-3. **R-02/SET-03**: Replace `date.today()` in `settler.py:126` with UTC-aware date
+### W-02: Timing-safe auth comparison ✅
+- **File**: `src/web/app.py` — replaced `!=` with `hmac.compare_digest()` for Bearer token comparison
+- Prevents timing side-channel attacks that could recover the TRIGGER_SECRET byte-by-byte
 
-**These are LOW-risk residual issues** — W-02 is mitigated by firewall, W-03 is display-only, R-02 only matters near midnight UTC.
+### R-02: Settlement P&L date timezone ✅
+- **File**: `src/settlement/settler.py:126` — replaced `date.today().isoformat()` with `datetime.now(timezone.utc).date().isoformat()`
+- Ensures settlement P&L is recorded under the correct UTC date, not server-local date
+
+### SET-02: Token_id-based settlement matching ✅
+- **File**: `src/settlement/settler.py` — introduced `SettlementOutcome` dataclass with both `label_prices` and `token_prices` maps
+- `_fetch_settlement_outcome` now extracts `clobTokenIds` from each market and builds a `{token_id: yes_price}` map
+- `_resolve_yes_price` tries token_id match first (Priority 1), then exact label (Priority 2), then substring fallback (Priority 3)
+- Backward-compatible: existing tests that pass only label_prices still work (token_prices defaults to None)
+
+### W-03: Dashboard P&L double-counting ✅
+- **File**: `src/web/app.py:218-221` — `total_realized` now sums only from positions table `realized_pnl`
+- Previously summed `daily_pnl_val` (includes settlement P&L) + closed positions' `realized_pnl` (also includes settlement P&L)
+
+### W-01: _run_async re-entrancy deadlock guard ✅
+- **File**: `src/web/app.py` — added `_active_threads` tracking with thread-ID check
+- If the same thread calls `_run_async` while already blocked inside a prior `_run_async` call, raises `RuntimeError` immediately instead of hanging
+- Uses `threading.get_ident()` for thread identification, `try/finally` for cleanup
+
+---
+
+## Verdict: ✅ READY TO DEPLOY
+
+All 3 CRITICAL and all 9 HIGH issues from CODE_REVIEW.md are now resolved. 605 tests pass.
+No residual concerns remain for the CRITICAL/HIGH tier.
