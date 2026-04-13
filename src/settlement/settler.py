@@ -93,9 +93,13 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             settled_count = 0
 
             for pos in positions:
+                strat = pos.get("strategy", "B")
+                # Skip strategies already settled in a prior run — their P&L was
+                # counted then; including them again would double-count realized P&L.
+                if (event_id, strat) in settled_pairs:
+                    continue
                 pnl = _compute_position_pnl(pos, settled_prices)
                 exit_price = _settlement_exit_price(pos, settled_prices)
-                strat = pos.get("strategy", "B")
                 strategy_pnl[strat] += pnl
                 strategy_count[strat] += 1
                 total_pnl += pnl
@@ -204,13 +208,31 @@ async def _fetch_settlement_outcome(
 def _resolve_yes_price(slot_label: str, settled_prices: dict[str, float]) -> float | None:
     """Match a position's slot_label to the settled YES price.
 
-    Uses bidirectional substring matching (slot_label ⊂ key or key ⊂ slot_label)
-    because Gamma API question text may be longer or shorter than the stored label.
+    Tries exact match first, then falls back to bidirectional substring matching
+    (slot_label ⊂ key or key ⊂ slot_label) because Gamma API question text may
+    be longer or shorter than the stored label.  Exact match avoids false
+    positives when one label is a prefix of another (e.g. "below 70°F" vs
+    "below 70°F or above").
     Returns None if no match found.
     """
-    for label, price in settled_prices.items():
-        if slot_label in label or label in slot_label:
-            return price
+    # Pass 1: exact match
+    if slot_label in settled_prices:
+        return settled_prices[slot_label]
+    # Pass 2: bidirectional substring match
+    matches = [
+        (label, price) for label, price in settled_prices.items()
+        if slot_label in label or label in slot_label
+    ]
+    if len(matches) == 1:
+        return matches[0][1]
+    if len(matches) > 1:
+        # Multiple substring matches — return the longest matching key (most specific)
+        matches.sort(key=lambda lp: len(lp[0]), reverse=True)
+        logger.warning(
+            "Ambiguous slot match for %r — using longest match %r",
+            slot_label, matches[0][0],
+        )
+        return matches[0][1]
     return None
 
 
@@ -248,8 +270,20 @@ def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> f
 
 
 async def _update_realized_pnl(store: Store, date_str: str, pnl: float) -> None:
-    """Add realized P&L to the daily total."""
-    current = await store.get_daily_pnl(date_str)
-    new_realized = (current or 0.0) + pnl
+    """Atomically increment realized P&L for the given date.
+
+    Uses a single INSERT … ON CONFLICT DO UPDATE SET realized_pnl = realized_pnl + ?
+    instead of a read-modify-write so that concurrent settlement runs (before R-01
+    lock is in place) cannot lose increments by overwriting each other.
+    """
     exposure = await store.get_total_exposure()
-    await store.upsert_daily_pnl(date_str, new_realized, 0, exposure)
+    await store.db.execute(
+        """INSERT INTO daily_pnl (date, realized_pnl, unrealized_pnl, total_exposure, updated_at)
+           VALUES (?, ?, 0, ?, datetime('now'))
+           ON CONFLICT(date) DO UPDATE SET
+               realized_pnl  = realized_pnl + ?,
+               total_exposure = ?,
+               updated_at    = datetime('now')""",
+        (date_str, pnl, exposure, pnl, exposure),
+    )
+    await store.db.commit()

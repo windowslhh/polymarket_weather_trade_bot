@@ -9,7 +9,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 logger = logging.getLogger(__name__)
 
@@ -686,6 +686,16 @@ def create_app(store, rebalancer, config) -> Flask:
 
     @app.route("/api/trigger", methods=["POST"])
     def api_trigger():
+        # Token auth: if TRIGGER_SECRET is set, require "Authorization: Bearer <secret>"
+        # so arbitrary callers cannot trigger expensive full rebalance cycles.
+        cfg = app.config.get("bot_config")
+        secret = getattr(cfg, "trigger_secret", "") if cfg else ""
+        if secret:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header != f"Bearer {secret}":
+                logger.warning("Unauthorized /api/trigger attempt from %s", request.remote_addr)
+                return jsonify({"error": "unauthorized"}), 401
+
         reb = app.config["bot_rebalancer"]
         _cache.clear()  # Invalidate all caches
         try:

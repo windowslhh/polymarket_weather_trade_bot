@@ -260,8 +260,11 @@ class TestEvaluateExitSignals:
         held_slot = _make_slot(80, 84, price_no=0.92)
         event = _make_event(slots=[held_slot])
         obs = Observation(icao="KLGA", temp_f=79.0, observation_time=datetime.now(timezone.utc))
+        # Forecast required after forecast=None fix: use high=82°F (inside slot) so
+        # win_prob is low and EV is negative → SELL fires on close approach.
+        forecast = _make_forecast(high=82.0)
 
-        signals = evaluate_exit_signals(event, obs, 79.0, [held_slot], config)
+        signals = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, forecast=forecast)
         # distance from 79 to 80-84 is 1, which is < threshold/2 = 4
         assert len(signals) == 1
         assert signals[0].side == Side.SELL
@@ -689,10 +692,13 @@ class TestEvaluateExitSignalsAdvanced:
         event = _make_event(slots=[held_slot])
         obs = Observation(icao="KLGA", temp_f=77.5, observation_time=datetime.now(timezone.utc))
 
+        # Forecast required: use high=80°F so slot [80,84] is approached and EV is negative
+        fc = _make_forecast(high=80.0)
+
         # Default: distance=2.5, exit_distance=2.5 → 2.5 < 2.5 is False → NO exit
-        sig_default = evaluate_exit_signals(event, obs, 77.5, [held_slot], config)
+        sig_default = evaluate_exit_signals(event, obs, 77.5, [held_slot], config, forecast=fc)
         # STABLE: distance=2.5, exit_distance=3.0 → 2.5 < 3.0 → EXIT
-        sig_stable = evaluate_exit_signals(event, obs, 77.5, [held_slot], config, trend=TrendState.STABLE)
+        sig_stable = evaluate_exit_signals(event, obs, 77.5, [held_slot], config, trend=TrendState.STABLE, forecast=fc)
 
         assert len(sig_default) == 0
         assert len(sig_stable) == 1
@@ -705,25 +711,33 @@ class TestEvaluateExitSignalsAdvanced:
         held_slot = _make_slot(80, 84, price_no=0.92)
         event = _make_event(slots=[held_slot])
         obs = Observation(icao="KLGA", temp_f=79.0, observation_time=datetime.now(timezone.utc))
+        # Forecast required: high=82 (inside slot) → EV negative → exit fires
+        fc = _make_forecast(high=82.0)
 
         # BREAKOUT_UP: distance=1, exit_distance=2.0 → 1 < 2 → EXIT
-        sig = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_UP)
+        sig = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_UP, forecast=fc)
         assert len(sig) == 1
         # BREAKOUT_DOWN same multiplier
-        sig2 = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_DOWN)
+        sig2 = evaluate_exit_signals(event, obs, 79.0, [held_slot], config, trend=TrendState.BREAKOUT_DOWN, forecast=fc)
         assert len(sig2) == 1
 
-    def test_exit_signal_has_zero_ev_and_wp(self):
-        """Current exit signals hardcode ev=0, wp=0 (to be changed in Phase 4)."""
+    def test_exit_signal_has_ev_and_wp(self):
+        """Exit signals carry computed EV and win_prob from forecast (not zeros).
+
+        Updated: forecast=None no longer generates SELL signals (see forecast=None fix).
+        When forecast is supplied, exit signals carry real EV from Layer 2 computation.
+        """
         config = StrategyConfig(no_distance_threshold_f=8)
         held_slot = _make_slot(80, 84, price_no=0.92)
         event = _make_event(slots=[held_slot])
         obs = Observation(icao="KLGA", temp_f=80.0, observation_time=datetime.now(timezone.utc))
-        signals = evaluate_exit_signals(event, obs, 80.0, [held_slot], config)
+        # high=82 puts forecast squarely in the slot → EV < 0 → SELL
+        fc = _make_forecast(high=82.0)
+        signals = evaluate_exit_signals(event, obs, 80.0, [held_slot], config, forecast=fc)
         assert len(signals) == 1
-        assert signals[0].expected_value == 0
-        assert signals[0].estimated_win_prob == 0
         assert signals[0].side == Side.SELL
+        # EV and win_prob are now computed from the forecast (not hard-coded zeros)
+        assert signals[0].expected_value != 0 or signals[0].estimated_win_prob != 0
 
     def test_multiple_held_slots_selective_exit(self):
         """Of multiple held slots, only threatened ones exit."""
@@ -733,8 +747,10 @@ class TestEvaluateExitSignalsAdvanced:
         far_slot = _make_slot(90, 94, price_no=0.85)      # daily_max=79 → distance=11 > 3.2 → HOLD
         event = _make_event(slots=[close_slot, far_slot])
         obs = Observation(icao="KLGA", temp_f=79.0, observation_time=datetime.now(timezone.utc))
+        # Forecast high=82 (inside close_slot) → EV negative → close_slot exits
+        fc = _make_forecast(high=82.0)
 
-        signals = evaluate_exit_signals(event, obs, 79.0, [close_slot, far_slot], config)
+        signals = evaluate_exit_signals(event, obs, 79.0, [close_slot, far_slot], config, forecast=fc)
         assert len(signals) == 1
         assert signals[0].slot.outcome_label == close_slot.outcome_label
 

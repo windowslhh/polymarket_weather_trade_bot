@@ -1,6 +1,7 @@
 """Hourly rebalance orchestrator — the main strategy loop."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -77,6 +78,11 @@ class Rebalancer:
         self._last_markets: list[dict] = []
         self._active_city_configs: list = []  # cities with active Polymarket markets
 
+        # Mutual-exclusion lock: prevents full rebalance and 15-min position check
+        # from running concurrently and racing on shared state (_recent_exits,
+        # _cached_forecasts, _last_gamma_prices).
+        self._cycle_lock = asyncio.Lock()
+
         # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn
         self._recent_exits: dict[str, datetime] = {}
         self._last_price_source: str = "gamma"
@@ -94,6 +100,28 @@ class Rebalancer:
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
+
+    def _cleanup_recent_exits(self) -> None:
+        """Remove expired entries from _recent_exits to prevent unbounded growth.
+
+        Uses the maximum configured exit_cooldown_hours across all strategy variants
+        as the TTL.  Entries older than this cannot influence any future BUY decision,
+        so they are safe to discard.
+        """
+        variants = get_strategy_variants()
+        if variants:
+            max_cooldown_h = max(
+                self._config.strategy.exit_cooldown_hours,
+                *(self._config.strategy.exit_cooldown_hours for _ in variants),
+            )
+        else:
+            max_cooldown_h = self._config.strategy.exit_cooldown_hours
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_cooldown_h)
+        expired = [tid for tid, t in self._recent_exits.items() if t < cutoff]
+        for tid in expired:
+            del self._recent_exits[tid]
+        if expired:
+            logger.debug("Cleaned up %d expired exit cooldown entries", len(expired))
 
     async def backfill_today_observations(self) -> None:
         """Backfill today's METAR history for cities with active markets.
@@ -323,252 +351,261 @@ class Rebalancer:
         - Evaluate locked-win BUY signals for existing events
         - Evaluate EXIT signals for threatened held positions (with forecast)
         - Execute urgent trades (locked wins + exits)
+
+        Uses _cycle_lock to avoid racing with the full rebalance cycle: both
+        coroutines write _recent_exits, _cached_forecasts, and _last_gamma_prices.
+        If the lock is already held (full rebalance in progress), skip this cycle
+        rather than queuing — position checks run every 15 min so the next one
+        will catch any urgent signals.
         """
+        if self._cycle_lock.locked():
+            logger.info("Position check skipped: full rebalance cycle in progress")
+            return []
+
         logger.info("--- Position check start ---")
         signals: list[TradeSignal] = []
 
-        try:
-            # Get all open positions grouped by event
-            all_positions = await self._portfolio.get_all_open_positions()
-            if not all_positions:
-                logger.debug("Position check: no open positions")
-                return []
+        async with self._cycle_lock:
+            try:
+                # Get all open positions grouped by event
+                all_positions = await self._portfolio.get_all_open_positions()
+                if not all_positions:
+                    logger.debug("Position check: no open positions")
+                    return []
 
-            # Identify cities with open positions
-            cities_with_positions = {p["city"] for p in all_positions}
-            city_configs = [c for c in self._config.cities if c.name in cities_with_positions]
+                # Identify cities with open positions
+                cities_with_positions = {p["city"] for p in all_positions}
+                city_configs = [c for c in self._config.cities if c.name in cities_with_positions]
 
-            if not city_configs:
-                return []
+                if not city_configs:
+                    return []
 
-            # ── Refresh prices for held tokens ───────────────────────────────
-            # Fetch fresh Gamma prices for all open position token IDs so that
-            # exit/trim decisions use prices no older than 15 minutes rather
-            # than the stale values from the last full rebalance (up to 60 min).
-            held_token_ids = list({p["token_id"] for p in all_positions if p.get("token_id")})
-            if held_token_ids:
-                try:
-                    import asyncio as _asyncio
-                    import json as _json
-                    import httpx as _httpx
-
-                    async def _fetch_gamma_for_tokens(tids: list[str]) -> dict[str, float]:
-                        prices: dict[str, float] = {}
-                        async with _httpx.AsyncClient(timeout=10) as _client:
-                            for i in range(0, len(tids), 20):
-                                batch = tids[i:i + 20]
-                                try:
-                                    resp = await _client.get(
-                                        "https://gamma-api.polymarket.com/markets",
-                                        params=[("clob_token_ids", tid) for tid in batch],
-                                    )
-                                    resp.raise_for_status()
-                                    for mkt in resp.json():
-                                        toks = mkt.get("clobTokenIds", [])
-                                        pxs = mkt.get("outcomePrices", [])
-                                        if isinstance(toks, str):
-                                            toks = _json.loads(toks)
-                                        if isinstance(pxs, str):
-                                            pxs = _json.loads(pxs)
-                                        for tid, px in zip(toks, pxs):
-                                            try:
-                                                prices[tid] = float(px)
-                                            except (ValueError, TypeError):
-                                                pass
-                                except Exception:
-                                    logger.warning("Gamma price batch fetch failed (batch %d)", i // 20)
-                        return prices
-
-                    fresh_gamma = await _fetch_gamma_for_tokens(held_token_ids)
-                    if fresh_gamma:
-                        # Apply TWAP smoothing (same buffer as main cycle)
-                        smoothed_fresh = self._price_buffer.apply_batch(fresh_gamma)
-                        self._last_gamma_prices.update(smoothed_fresh)
-                        logger.info(
-                            "Position check: refreshed prices for %d/%d tokens (TWAP-smoothed)",
-                            len(fresh_gamma), len(held_token_ids),
-                        )
-                    else:
-                        logger.warning("Position check: Gamma price refresh returned no prices")
-                except Exception:
-                    logger.warning("Position check: price refresh failed, using cached prices")
-            # ─────────────────────────────────────────────────────────────────
-
-            # Refresh forecasts + METAR in parallel for minimum latency
-            import asyncio
-            forecast_task = self.refresh_forecasts()
-            metar_task = self._fetch_observations(city_configs)
-            _, (daily_maxes, city_observations) = await asyncio.gather(
-                forecast_task, metar_task,
-            )
-
-            # Group positions by (event_id, strategy)
-            event_strat_positions: dict[tuple[str, str], list[dict]] = defaultdict(list)
-            event_meta: dict[str, dict] = {}  # event_id → {city, ...}
-            for pos in all_positions:
-                key = (pos["event_id"], pos.get("strategy", "B"))
-                event_strat_positions[key].append(pos)
-                if pos["event_id"] not in event_meta:
-                    event_meta[pos["event_id"]] = {"city": pos["city"]}
-
-            now = datetime.now(timezone.utc)
-            variants = get_strategy_variants()
-            skipped_no_obs = 0
-
-            for (event_id, strat_name), positions in event_strat_positions.items():
-                meta = event_meta[event_id]
-                city = meta["city"]
-                # Compute local hour and local date using city timezone.
-                # Must use city-local date (not UTC) for days_ahead to avoid
-                # misclassifying next-day markets as same-day during UTC midnight crossover.
-                city_tz = self._city_tz.get(city)
-                if city_tz:
-                    city_now = datetime.now(city_tz)
-                    local_hour = city_now.hour
-                    local_today = city_now.date()
-                else:
-                    local_hour = None
-                    local_today = date.today()
-
-                daily_max = daily_maxes.get(city)
-                observation = city_observations.get(city)
-                error_dist = self._error_dists.get(city)
-
-                if not observation or daily_max is None:
-                    skipped_no_obs += 1
-                    continue
-
-                # Infer market_date from slot_label (e.g. "...on April 11?")
-                # to correctly compute days_ahead for exit logic.
-                market_date = local_today
-                sample_label = positions[0].get("slot_label", "")
-                m = re.search(r'on (\w+ \d+)\??$', sample_label)
-                if m:
+                # ── Refresh prices for held tokens ───────────────────────────────
+                # Fetch fresh Gamma prices for all open position token IDs so that
+                # exit/trim decisions use prices no older than 15 minutes rather
+                # than the stale values from the last full rebalance (up to 60 min).
+                held_token_ids = list({p["token_id"] for p in all_positions if p.get("token_id")})
+                if held_token_ids:
                     try:
-                        market_date = datetime.strptime(
-                            f"{m.group(1)} {local_today.year}", "%B %d %Y"
-                        ).date()
-                    except ValueError:
-                        logger.warning(
-                            "Position check: could not parse date from slot_label %r "
-                            "for event %s — defaulting days_ahead=0 (same-day exit logic applies)",
+                        import json as _json
+                        import httpx as _httpx
+
+                        async def _fetch_gamma_for_tokens(tids: list[str]) -> dict[str, float]:
+                            prices: dict[str, float] = {}
+                            async with _httpx.AsyncClient(timeout=10) as _client:
+                                for i in range(0, len(tids), 20):
+                                    batch = tids[i:i + 20]
+                                    try:
+                                        resp = await _client.get(
+                                            "https://gamma-api.polymarket.com/markets",
+                                            params=[("clob_token_ids", tid) for tid in batch],
+                                        )
+                                        resp.raise_for_status()
+                                        for mkt in resp.json():
+                                            toks = mkt.get("clobTokenIds", [])
+                                            pxs = mkt.get("outcomePrices", [])
+                                            if isinstance(toks, str):
+                                                toks = _json.loads(toks)
+                                            if isinstance(pxs, str):
+                                                pxs = _json.loads(pxs)
+                                            for tid, px in zip(toks, pxs):
+                                                try:
+                                                    prices[tid] = float(px)
+                                                except (ValueError, TypeError):
+                                                    pass
+                                    except Exception:
+                                        logger.warning("Gamma price batch fetch failed (batch %d)", i // 20)
+                            return prices
+
+                        fresh_gamma = await _fetch_gamma_for_tokens(held_token_ids)
+                        if fresh_gamma:
+                            # Apply TWAP smoothing (same buffer as main cycle)
+                            smoothed_fresh = self._price_buffer.apply_batch(fresh_gamma)
+                            self._last_gamma_prices.update(smoothed_fresh)
+                            logger.info(
+                                "Position check: refreshed prices for %d/%d tokens (TWAP-smoothed)",
+                                len(fresh_gamma), len(held_token_ids),
+                            )
+                        else:
+                            logger.warning("Position check: Gamma price refresh returned no prices")
+                    except Exception:
+                        logger.warning("Position check: price refresh failed, using cached prices")
+                # ─────────────────────────────────────────────────────────────────
+
+                # Refresh forecasts + METAR in parallel for minimum latency
+                forecast_task = self.refresh_forecasts()
+                metar_task = self._fetch_observations(city_configs)
+                _, (daily_maxes, city_observations) = await asyncio.gather(
+                    forecast_task, metar_task,
+                )
+
+                # Group positions by (event_id, strategy)
+                event_strat_positions: dict[tuple[str, str], list[dict]] = defaultdict(list)
+                event_meta: dict[str, dict] = {}  # event_id → {city, ...}
+                for pos in all_positions:
+                    key = (pos["event_id"], pos.get("strategy", "B"))
+                    event_strat_positions[key].append(pos)
+                    if pos["event_id"] not in event_meta:
+                        event_meta[pos["event_id"]] = {"city": pos["city"]}
+
+                now = datetime.now(timezone.utc)
+                variants = get_strategy_variants()
+                skipped_no_obs = 0
+
+                for (event_id, strat_name), positions in event_strat_positions.items():
+                    meta = event_meta[event_id]
+                    city = meta["city"]
+                    # Compute local hour and local date using city timezone.
+                    # Must use city-local date (not UTC) for days_ahead to avoid
+                    # misclassifying next-day markets as same-day during UTC midnight crossover.
+                    city_tz = self._city_tz.get(city)
+                    if city_tz:
+                        city_now = datetime.now(city_tz)
+                        local_hour = city_now.hour
+                        local_today = city_now.date()
+                    else:
+                        local_hour = None
+                        local_today = date.today()
+
+                    daily_max = daily_maxes.get(city)
+                    observation = city_observations.get(city)
+                    error_dist = self._error_dists.get(city)
+
+                    if not observation or daily_max is None:
+                        skipped_no_obs += 1
+                        continue
+
+                    # Infer market_date from slot_label (e.g. "...on April 11?")
+                    # to correctly compute days_ahead for exit logic.
+                    market_date = local_today
+                    sample_label = positions[0].get("slot_label", "")
+                    m = re.search(r'on (\w+ \d+)\??$', sample_label)
+                    if m:
+                        try:
+                            market_date = datetime.strptime(
+                                f"{m.group(1)} {local_today.year}", "%B %d %Y"
+                            ).date()
+                        except ValueError:
+                            logger.warning(
+                                "Position check: could not parse date from slot_label %r "
+                                "for event %s — defaulting days_ahead=0 (same-day exit logic applies)",
+                                sample_label, event_id,
+                            )
+                    else:
+                        logger.debug(
+                            "Position check: no date found in slot_label %r "
+                            "for event %s — defaulting days_ahead=0",
                             sample_label, event_id,
                         )
-                else:
-                    logger.debug(
-                        "Position check: no date found in slot_label %r "
-                        "for event %s — defaulting days_ahead=0",
-                        sample_label, event_id,
+                    days_ahead = (market_date - local_today).days
+
+                    # Build held NO slots from positions, using cached Gamma prices
+                    # when available so exit signals carry the current market price
+                    # (not entry price) for accurate realized P&L computation.
+                    gamma = self._last_gamma_prices
+                    held_no_slots: list[TempSlot] = []
+                    held_token_ids_set: set[str] = set()
+                    for pos in positions:
+                        if pos["token_type"] == "NO" and pos["side"] == "BUY":
+                            try:
+                                lower, upper = _parse_temp_bounds(pos["slot_label"])
+                            except Exception:
+                                lower, upper = None, None
+                            tid = pos["token_id"]
+                            price = gamma.get(tid, pos["entry_price"])
+                            held_no_slots.append(TempSlot(
+                                token_id_yes="",
+                                token_id_no=tid,
+                                outcome_label=pos["slot_label"],
+                                temp_lower_f=lower,
+                                temp_upper_f=upper,
+                                price_no=price,
+                            ))
+                            held_token_ids_set.add(tid)
+
+                    if not held_no_slots:
+                        continue
+
+                    # Build strategy config for this variant
+                    overrides = variants.get(strat_name, {})
+                    strat_cfg = replace(self._config.strategy, **overrides)
+
+                    # Auto-calibrate distance if enabled (k×std dynamic formula)
+                    if strat_cfg.auto_calibrate_distance and error_dist is not None:
+                        cal_dist = calibrate_distance_dynamic(error_dist)
+                        strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+
+                    # Build a lightweight event object for signal evaluation
+                    event_obj = WeatherMarketEvent(
+                        event_id=event_id,
+                        condition_id="",
+                        city=city,
+                        market_date=market_date,
+                        slots=held_no_slots,
                     )
-                days_ahead = (market_date - local_today).days
 
-                # Build held NO slots from positions, using cached Gamma prices
-                # when available so exit signals carry the current market price
-                # (not entry price) for accurate realized P&L computation.
-                gamma = self._last_gamma_prices
-                held_no_slots: list[TempSlot] = []
-                held_token_ids: set[str] = set()
-                for pos in positions:
-                    if pos["token_type"] == "NO" and pos["side"] == "BUY":
-                        try:
-                            lower, upper = _parse_temp_bounds(pos["slot_label"])
-                        except Exception:
-                            lower, upper = None, None
-                        tid = pos["token_id"]
-                        price = gamma.get(tid, pos["entry_price"])
-                        held_no_slots.append(TempSlot(
-                            token_id_yes="",
-                            token_id_no=tid,
-                            outcome_label=pos["slot_label"],
-                            temp_lower_f=lower,
-                            temp_upper_f=upper,
-                            price_no=price,
-                        ))
-                        held_token_ids.add(tid)
+                    # Evaluate locked-win signals (new BUY opportunities)
+                    locked_signals = evaluate_locked_win_signals(
+                        event_obj, daily_max, strat_cfg, held_token_ids_set, days_ahead=days_ahead,
+                    )
 
-                if not held_no_slots:
-                    continue
+                    # Use cached forecast for better exit decisions
+                    forecast = self._cached_forecasts.get(city)
 
-                # Build strategy config for this variant
-                overrides = variants.get(strat_name, {})
-                strat_cfg = replace(self._config.strategy, **overrides)
+                    # Pull trend state for this city so exit thresholds are tighter
+                    # during breakout periods (trend is updated by the main 60-min cycle
+                    # and remains valid for 15-min position checks between rebalances).
+                    city_trend = self._trend.get_trend(city)
 
-                # Auto-calibrate distance if enabled (k×std dynamic formula)
-                if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                    cal_dist = calibrate_distance_dynamic(error_dist)
-                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+                    # Evaluate exit signals (urgent sells) — only same-day markets
+                    exit_signals = evaluate_exit_signals(
+                        event_obj, observation, daily_max, held_no_slots, strat_cfg,
+                        trend=city_trend,
+                        days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
+                        local_hour=local_hour,
+                    )
 
-                # Build a lightweight event object for signal evaluation
-                event_obj = WeatherMarketEvent(
-                    event_id=event_id,
-                    condition_id="",
-                    city=city,
-                    market_date=market_date,
-                    slots=held_no_slots,
-                )
+                    # P0-3 FIX: Query exposure once before loop, accumulate in-memory
+                    strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
+                    strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
 
-                # Evaluate locked-win signals (new BUY opportunities)
-                locked_signals = evaluate_locked_win_signals(
-                    event_obj, daily_max, strat_cfg, held_token_ids, days_ahead=days_ahead,
-                )
+                    # Size and tag locked-win signals
+                    for sig in locked_signals:
+                        size = compute_size(sig, strat_city_exp, strat_total_exp, strat_cfg)
+                        if size > 0:
+                            sig.suggested_size_usd = size
+                            sig.strategy = strat_name
+                            sig.reason = f"[{strat_name}] LOCKED WIN: daily_max={daily_max:.0f}°F > slot upper, EV={sig.expected_value:.3f}"
+                            signals.append(sig)
+                            strat_city_exp += size
+                            strat_total_exp += size
 
-                # Use cached forecast for better exit decisions
-                forecast = self._cached_forecasts.get(city)
-
-                # Pull trend state for this city so exit thresholds are tighter
-                # during breakout periods (trend is updated by the main 60-min cycle
-                # and remains valid for 15-min position checks between rebalances).
-                city_trend = self._trend.get_trend(city)
-
-                # Evaluate exit signals (urgent sells) — only same-day markets
-                exit_signals = evaluate_exit_signals(
-                    event_obj, observation, daily_max, held_no_slots, strat_cfg,
-                    trend=city_trend,
-                    days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
-                    local_hour=local_hour,
-                )
-
-                # P0-3 FIX: Query exposure once before loop, accumulate in-memory
-                strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
-                strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
-
-                # Size and tag locked-win signals
-                for sig in locked_signals:
-                    size = compute_size(sig, strat_city_exp, strat_total_exp, strat_cfg)
-                    if size > 0:
-                        sig.suggested_size_usd = size
+                    # Tag exit signals
+                    for sig in exit_signals:
                         sig.strategy = strat_name
-                        sig.reason = f"[{strat_name}] LOCKED WIN: daily_max={daily_max:.0f}°F > slot upper, EV={sig.expected_value:.3f}"
+                        sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
+                        self._recent_exits[sig.token_id] = now
                         signals.append(sig)
-                        strat_city_exp += size
-                        strat_total_exp += size
 
-                # Tag exit signals
-                for sig in exit_signals:
-                    sig.strategy = strat_name
-                    sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
-                    self._recent_exits[sig.token_id] = now
-                    signals.append(sig)
+                if skipped_no_obs:
+                    logger.warning(
+                        "Position check: skipped %d event(s) due to missing METAR observations or daily_max — "
+                        "exit/trim signals suppressed for affected positions",
+                        skipped_no_obs,
+                    )
 
-            if skipped_no_obs:
-                logger.warning(
-                    "Position check: skipped %d event(s) due to missing METAR observations or daily_max — "
-                    "exit/trim signals suppressed for affected positions",
-                    skipped_no_obs,
-                )
+                # Execute any urgent trades
+                if signals:
+                    logger.info("Position check: %d urgent signals (locked=%d, exit=%d)",
+                               len(signals),
+                               sum(1 for s in signals if s.side.value == "BUY"),
+                               sum(1 for s in signals if s.side.value == "SELL"))
+                    await self._executor.execute_signals(signals)
+                else:
+                    logger.debug("Position check: no urgent signals")
 
-            # Execute any urgent trades
-            if signals:
-                logger.info("Position check: %d urgent signals (locked=%d, exit=%d)",
-                           len(signals),
-                           sum(1 for s in signals if s.side.value == "BUY"),
-                           sum(1 for s in signals if s.side.value == "SELL"))
-                await self._executor.execute_signals(signals)
-            else:
-                logger.debug("Position check: no urgent signals")
-
-        except Exception:
-            logger.exception("Position check failed")
+            except Exception:
+                logger.exception("Position check failed")
 
         logger.info("--- Position check done ---")
         return signals
@@ -580,13 +617,17 @@ class Rebalancer:
         logger.info("=== Starting rebalance cycle ===")
         self._last_error = None
 
-        try:
-            return await self._run_cycle()
-        except Exception as e:
-            self._last_error = str(e)
-            raise
-        finally:
-            self._last_run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        # Acquire cycle lock so position check cannot interleave with full rebalance.
+        # Both coroutines mutate _recent_exits, _cached_forecasts, _last_gamma_prices;
+        # the lock ensures they run sequentially on the shared async event loop.
+        async with self._cycle_lock:
+            try:
+                return await self._run_cycle()
+            except Exception as e:
+                self._last_error = str(e)
+                raise
+            finally:
+                self._last_run_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     async def _run_cycle(self) -> list[TradeSignal]:
         # Validate station config (first run only)
@@ -713,8 +754,14 @@ class Rebalancer:
         all_signals: list[TradeSignal] = []
         cycle_at = datetime.now(timezone.utc).isoformat()
 
-        # Track cumulative new exposure per city across all events in this cycle
+        # Track cumulative new exposure per city across all events in this cycle.
+        # Key: "{strategy}:{city}" — prevents a strategy's city limit from being
+        # double-counted when two events share the same city (e.g. same city, different dates).
         cycle_city_additions: dict[str, float] = {}
+        # Track cumulative total new exposure per strategy across ALL events.
+        # Without this, strat_total_exp is re-queried from DB each event and
+        # misses in-cycle additions, allowing the portfolio total to exceed the limit.
+        cycle_total_additions: dict[str, float] = {}
 
         # Build market data for dashboard
         self._last_markets = []
@@ -835,10 +882,14 @@ class Rebalancer:
                 )
                 held_token_ids = {s.token_id_no for s in held_no_slots}
 
-                # Track exposure per strategy
+                # Track exposure per strategy.
+                # strat_total_exp adds cycle_total_additions so that in-cycle BUYs
+                # across earlier events are counted against the portfolio total limit,
+                # not just against the per-city limit.
                 db_city_exp = await self._portfolio.get_city_exposure(event.city, strategy=strat_name)
                 strat_city_exp = db_city_exp + cycle_city_additions.get(f"{strat_name}:{event.city}", 0.0)
-                strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
+                db_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
+                strat_total_exp = db_total_exp + cycle_total_additions.get(strat_name, 0.0)
 
                 # Count existing positions for this event+strategy
                 existing_positions = await self._portfolio.get_open_positions_for_event(
@@ -911,6 +962,10 @@ class Rebalancer:
                         strat_total_exp += size
                         key = f"{strat_name}:{event.city}"
                         cycle_city_additions[key] = cycle_city_additions.get(key, 0.0) + size
+                        # Also track the per-strategy cycle total so that subsequent
+                        # events in this cycle see the updated portfolio total, not
+                        # the stale DB value from before this cycle started.
+                        cycle_total_additions[strat_name] = cycle_total_additions.get(strat_name, 0.0) + size
                         new_count += 1
                     elif size > 0 and new_count >= max_new:
                         # Mark as capped for decision log
@@ -1015,6 +1070,7 @@ class Rebalancer:
 
         # Cleanup old tracking data
         self._max_tracker.cleanup_old()
+        self._cleanup_recent_exits()
 
         await self._alerter.rebalance_summary(len(all_signals), len(events))
         logger.info("=== Rebalance cycle complete ===")

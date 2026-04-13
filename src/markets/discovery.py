@@ -71,11 +71,32 @@ def _parse_date(date_str: str) -> date | None:
 
 
 def _match_city(event_city: str, configured_cities: list[CityConfig]) -> CityConfig | None:
-    """Match an event's city name to a configured city."""
+    """Match an event's city name to a configured city.
+
+    Prefers exact (case-insensitive) match over substring match to avoid
+    ambiguity between cities that share a name prefix (e.g. "Portland" could
+    match both "Portland OR" and "Portland ME").  Falls back to substring
+    matching only when no exact match exists.
+    """
     event_lower = event_city.lower().strip()
+    # Pass 1: exact match
     for city in configured_cities:
-        if city.name.lower() in event_lower or event_lower in city.name.lower():
+        if city.name.lower() == event_lower:
             return city
+    # Pass 2: substring match (event name contains city name or vice versa)
+    substring_matches = [
+        city for city in configured_cities
+        if city.name.lower() in event_lower or event_lower in city.name.lower()
+    ]
+    if len(substring_matches) == 1:
+        return substring_matches[0]
+    if len(substring_matches) > 1:
+        # Multiple substring matches — log and return None to avoid wrong assignment
+        logger.warning(
+            "Ambiguous city match for %r: candidates %s — skipping",
+            event_city, [c.name for c in substring_matches],
+        )
+        return None
     return None
 
 
