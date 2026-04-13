@@ -360,7 +360,7 @@ class Rebalancer:
                                 try:
                                     resp = await _client.get(
                                         "https://gamma-api.polymarket.com/markets",
-                                        params={"clob_token_ids": ",".join(batch)},
+                                        params=[("clob_token_ids", tid) for tid in batch],
                                     )
                                     resp.raise_for_status()
                                     for mkt in resp.json():
