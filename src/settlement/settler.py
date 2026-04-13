@@ -83,7 +83,9 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             if outcome is None:
                 continue
 
-            winning_slot, settled_prices = outcome
+            winning_slot = outcome.winning_slot
+            settled_prices = outcome.label_prices
+            token_prices = outcome.token_prices
             logger.info("Settlement detected: %s — winning slot: %s", city, winning_slot)
 
             # Compute P&L per strategy for separate tracking
@@ -93,9 +95,13 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             settled_count = 0
 
             for pos in positions:
-                pnl = _compute_position_pnl(pos, settled_prices)
-                exit_price = _settlement_exit_price(pos, settled_prices)
                 strat = pos.get("strategy", "B")
+                # Skip strategies already settled in a prior run — their P&L was
+                # counted then; including them again would double-count realized P&L.
+                if (event_id, strat) in settled_pairs:
+                    continue
+                pnl = _compute_position_pnl(pos, settled_prices, token_prices)
+                exit_price = _settlement_exit_price(pos, settled_prices, token_prices)
                 strategy_pnl[strat] += pnl
                 strategy_count[strat] += 1
                 total_pnl += pnl
@@ -119,7 +125,11 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 await store.insert_settlement(event_id, city, winning_slot, pnl, strategy=strat)
                 logger.info("  Strategy %s: %d positions, P&L=$%.2f", strat, strategy_count[strat], pnl)
 
-            await _update_realized_pnl(store, date.today().isoformat(), total_pnl)
+            # R-02 fix: use UTC date instead of server-local date.today()
+            # In Docker the server runs UTC; for US settlements this avoids
+            # recording P&L under tomorrow's date during UTC midnight crossover.
+            utc_date_str = datetime.now(timezone.utc).date().isoformat()
+            await _update_realized_pnl(store, utc_date_str, total_pnl)
 
             results.append(SettlementResult(
                 event_id=event_id, city=city, winning_slot=winning_slot,
@@ -136,12 +146,21 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
     return results
 
 
+@dataclass
+class SettlementOutcome:
+    """Parsed settlement data from the Gamma API."""
+    winning_slot: str
+    label_prices: dict[str, float]    # {question_text: resolved_yes_price}
+    token_prices: dict[str, float]    # {clob_token_id: resolved_yes_price} — SET-02 fix
+
+
 async def _fetch_settlement_outcome(
     client: httpx.AsyncClient, event_id: str
-) -> tuple[str, dict[str, float]] | None:
+) -> SettlementOutcome | None:
     """Fetch resolved outcome for an event from Gamma API.
 
-    Returns (winning_slot_label, {question: resolved_yes_price}) or None.
+    Returns a SettlementOutcome with both label-keyed and token_id-keyed price
+    maps, or None if the event is not yet settled.
     """
     try:
         resp = await client.get(f"{GAMMA_API_URL}/events/{event_id}")
@@ -161,7 +180,8 @@ async def _fetch_settlement_outcome(
         return None
 
     winning_slot = None
-    settled_prices: dict[str, float] = {}
+    label_prices: dict[str, float] = {}
+    token_prices: dict[str, float] = {}
 
     for mkt in markets:
         question = mkt.get("question", "")
@@ -180,12 +200,28 @@ async def _fetch_settlement_outcome(
         except (ValueError, TypeError):
             continue
 
-        settled_prices[question] = yes_price
+        label_prices[question] = yes_price
+
+        # SET-02 fix: also build a token_id → yes_price map so that settlement
+        # matching can use exact token_id lookup instead of substring on labels.
+        clob_token_ids = mkt.get("clobTokenIds", [])
+        if isinstance(clob_token_ids, str):
+            try:
+                clob_token_ids = json.loads(clob_token_ids)
+            except (json.JSONDecodeError, TypeError):
+                clob_token_ids = []
+        if clob_token_ids:
+            # First token is YES, map it to the resolved yes_price
+            token_prices[clob_token_ids[0]] = yes_price
+            # Also map the NO token (second entry) so positions holding NO tokens
+            # can be looked up directly
+            if len(clob_token_ids) > 1:
+                token_prices[clob_token_ids[1]] = yes_price
 
         if yes_price >= 0.99:
             winning_slot = question
 
-    if not settled_prices:
+    if not label_prices:
         return None
 
     # Only settle when the event is officially closed by Polymarket
@@ -198,25 +234,63 @@ async def _fetch_settlement_outcome(
         # All resolved to 0 but none to 1 — unusual, treat as no winner
         winning_slot = "none"
 
-    return winning_slot, settled_prices
+    return SettlementOutcome(
+        winning_slot=winning_slot,
+        label_prices=label_prices,
+        token_prices=token_prices,
+    )
 
 
-def _resolve_yes_price(slot_label: str, settled_prices: dict[str, float]) -> float | None:
-    """Match a position's slot_label to the settled YES price.
+def _resolve_yes_price(
+    slot_label: str,
+    label_prices: dict[str, float],
+    token_id: str = "",
+    token_prices: dict[str, float] | None = None,
+) -> float | None:
+    """Match a position to the settled YES price.
 
-    Uses bidirectional substring matching (slot_label ⊂ key or key ⊂ slot_label)
-    because Gamma API question text may be longer or shorter than the stored label.
-    Returns None if no match found.
+    SET-02 fix: prefers exact token_id match (no ambiguity possible), then falls
+    back to label matching.  Token_id matching uses the clobTokenIds returned by
+    the Gamma API which are guaranteed unique per slot.
+
+    Falls back to label matching (exact first, then substring) for backward
+    compatibility in case token_prices is unavailable.
     """
-    for label, price in settled_prices.items():
-        if slot_label in label or label in slot_label:
-            return price
+    # Priority 1: exact token_id match — unambiguous, no false positives
+    if token_id and token_prices and token_id in token_prices:
+        return token_prices[token_id]
+
+    # Priority 2: exact label match
+    if slot_label in label_prices:
+        return label_prices[slot_label]
+
+    # Priority 3: substring fallback (kept for edge cases where labels differ slightly)
+    matches = [
+        (label, price) for label, price in label_prices.items()
+        if slot_label in label or label in slot_label
+    ]
+    if len(matches) == 1:
+        return matches[0][1]
+    if len(matches) > 1:
+        matches.sort(key=lambda lp: len(lp[0]), reverse=True)
+        logger.warning(
+            "Ambiguous slot match for %r — using longest match %r",
+            slot_label, matches[0][0],
+        )
+        return matches[0][1]
     return None
 
 
-def _settlement_exit_price(position: dict, settled_prices: dict[str, float]) -> float:
+def _settlement_exit_price(
+    position: dict,
+    label_prices: dict[str, float],
+    token_prices: dict[str, float] | None = None,
+) -> float:
     """Determine the exit price for a settled position (0.0 or 1.0)."""
-    yes_resolved = _resolve_yes_price(position["slot_label"], settled_prices)
+    yes_resolved = _resolve_yes_price(
+        position["slot_label"], label_prices,
+        token_id=position.get("token_id", ""), token_prices=token_prices,
+    )
     if yes_resolved is None:
         yes_resolved = 0.0
     if position["token_type"] == "NO":
@@ -224,13 +298,20 @@ def _settlement_exit_price(position: dict, settled_prices: dict[str, float]) -> 
     return 1.0 if yes_resolved >= 0.99 else 0.0
 
 
-def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> float:
+def _compute_position_pnl(
+    position: dict,
+    label_prices: dict[str, float],
+    token_prices: dict[str, float] | None = None,
+) -> float:
     """Compute realized P&L for a single position."""
     entry_price = position["entry_price"]
     shares = position["shares"]
     token_type = position["token_type"]
 
-    yes_resolved = _resolve_yes_price(position["slot_label"], settled_prices)
+    yes_resolved = _resolve_yes_price(
+        position["slot_label"], label_prices,
+        token_id=position.get("token_id", ""), token_prices=token_prices,
+    )
     if yes_resolved is None:
         logger.warning("Could not match slot %s to settlement data, assuming NO wins", position["slot_label"][:30])
         yes_resolved = 0.0
@@ -248,8 +329,20 @@ def _compute_position_pnl(position: dict, settled_prices: dict[str, float]) -> f
 
 
 async def _update_realized_pnl(store: Store, date_str: str, pnl: float) -> None:
-    """Add realized P&L to the daily total."""
-    current = await store.get_daily_pnl(date_str)
-    new_realized = (current or 0.0) + pnl
+    """Atomically increment realized P&L for the given date.
+
+    Uses a single INSERT … ON CONFLICT DO UPDATE SET realized_pnl = realized_pnl + ?
+    instead of a read-modify-write so that concurrent settlement runs (before R-01
+    lock is in place) cannot lose increments by overwriting each other.
+    """
     exposure = await store.get_total_exposure()
-    await store.upsert_daily_pnl(date_str, new_realized, 0, exposure)
+    await store.db.execute(
+        """INSERT INTO daily_pnl (date, realized_pnl, unrealized_pnl, total_exposure, updated_at)
+           VALUES (?, ?, 0, ?, datetime('now'))
+           ON CONFLICT(date) DO UPDATE SET
+               realized_pnl  = realized_pnl + ?,
+               total_exposure = ?,
+               updated_at    = datetime('now')""",
+        (date_str, pnl, exposure, pnl, exposure),
+    )
+    await store.db.commit()

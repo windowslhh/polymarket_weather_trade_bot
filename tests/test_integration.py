@@ -25,6 +25,7 @@ from src.portfolio.risk import check_circuit_breaker, check_exposure_limits, che
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
 from src.strategy.evaluator import evaluate_exit_signals, evaluate_no_signals
+from src.weather.models import Forecast
 from src.strategy.rebalancer import Rebalancer
 from src.strategy.sizing import compute_size
 from src.weather.metar import DailyMaxTracker
@@ -177,8 +178,17 @@ class TestFullLogicChain:
         event = _make_market_event("New York", [held_slot])
 
         # Scenario A: temp is 84°F — danger zone (within threshold/2 = 4)
+        # forecast high=84°F → slot [85,87] is near → EV negative → exit fires
+        fc_danger = Forecast(
+            city="New York", forecast_date=date.today(),
+            predicted_high_f=84.0, predicted_low_f=70.0,
+            confidence_interval_f=3.0, source="test",
+            fetched_at=datetime.now(timezone.utc),
+        )
         obs_danger = Observation("KLGA", 84.0, datetime.now(timezone.utc))
-        exits = evaluate_exit_signals(event, obs_danger, 84.0, [held_slot], config)
+        exits = evaluate_exit_signals(
+            event, obs_danger, 84.0, [held_slot], config, forecast=fc_danger,
+        )
 
         logger.info("=== Step 3: Exit Signals ===")
         logger.info("Held NO slot: %s", held_slot.outcome_label)
@@ -403,24 +413,34 @@ class TestMetarDailyMaxIntegration:
         logger.info("=== METAR → Exit Signal Integration ===")
         logger.info("Held NO slot: %s", held_slot.outcome_label)
 
+        # Forecast must be supplied (forecast=None → hold, per fixed behaviour).
+        # Use high=81°F so that when daily_max reaches 81°F the slot [82,84] is
+        # within exit_distance (2°F < 8*0.25=2) and EV is negative → exit fires.
+        fc = Forecast(
+            city="New York", forecast_date=date.today(),
+            predicted_high_f=81.0, predicted_low_f=65.0,
+            confidence_interval_f=3.0, source="test",
+            fetched_at=datetime.now(timezone.utc),
+        )
+
         # Morning: 68°F — safe
         obs1 = Observation("KLGA", 68.0, datetime(2026, 4, 4, 10, 0, tzinfo=timezone.utc))
         max1, _ = tracker.update(obs1)
-        exits1 = evaluate_exit_signals(event, obs1, max1, [held_slot], config)
+        exits1 = evaluate_exit_signals(event, obs1, max1, [held_slot], config, forecast=fc)
         logger.info("10:00 UTC — temp 68°F, max %.1f°F → exits: %d", max1, len(exits1))
         assert len(exits1) == 0
 
         # Afternoon: 78°F — still safe but warming
         obs2 = Observation("KLGA", 78.0, datetime(2026, 4, 4, 14, 0, tzinfo=timezone.utc))
         max2, _ = tracker.update(obs2)
-        exits2 = evaluate_exit_signals(event, obs2, max2, [held_slot], config)
+        exits2 = evaluate_exit_signals(event, obs2, max2, [held_slot], config, forecast=fc)
         logger.info("14:00 UTC — temp 78°F, max %.1f°F → exits: %d", max2, len(exits2))
         assert len(exits2) == 0
 
         # Peak: 81°F — danger zone!
         obs3 = Observation("KLGA", 81.0, datetime(2026, 4, 4, 16, 0, tzinfo=timezone.utc))
         max3, _ = tracker.update(obs3)
-        exits3 = evaluate_exit_signals(event, obs3, max3, [held_slot], config)
+        exits3 = evaluate_exit_signals(event, obs3, max3, [held_slot], config, forecast=fc)
         logger.info("16:00 UTC — temp 81°F, max %.1f°F → exits: %d 🚨", max3, len(exits3))
         assert len(exits3) == 1, "Should exit when daily max approaches slot"
 

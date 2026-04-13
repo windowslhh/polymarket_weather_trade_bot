@@ -135,6 +135,10 @@ class AppConfig:
     # Alert webhook URL (Telegram/Discord/Slack)
     alert_webhook_url: str = ""
 
+    # Optional secret token protecting the /api/trigger endpoint.
+    # Set TRIGGER_SECRET in .env; if empty the endpoint is unprotected (dev only).
+    trigger_secret: str = ""
+
     # Sub-configs
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -165,6 +169,7 @@ def load_config(config_path: str | Path | None = None, env_path: str | Path | No
         eth_private_key=os.getenv("ETH_PRIVATE_KEY", ""),
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
+        trigger_secret=os.getenv("TRIGGER_SECRET", ""),
         strategy=StrategyConfig(**strategy_raw),
         scheduling=SchedulingConfig(**scheduling_raw),
         cities=[CityConfig(**c) for c in cities_raw],

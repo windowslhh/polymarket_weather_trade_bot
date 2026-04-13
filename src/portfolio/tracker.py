@@ -145,6 +145,21 @@ class PortfolioTracker:
         """Get open positions for a specific event (optionally filtered by strategy)."""
         return await self._store.get_open_positions(event_id=event_id, strategy=strategy)
 
+    async def get_total_shares_for_token(
+        self, event_id: str, token_id: str, strategy: str | None = None,
+    ) -> float:
+        """Return total open shares held for a specific token (used to size SELL orders).
+
+        SELL signals carry suggested_size_usd=0 because position size is unknown at
+        signal-generation time. The executor calls this to find the real share count.
+        """
+        positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
+        return sum(
+            p["shares"]
+            for p in positions
+            if p["token_id"] == token_id and p["status"] == "open"
+        )
+
     # ── Delegate methods for store operations ───────────────────────
 
     async def insert_edge_snapshot(self, **kwargs) -> None:

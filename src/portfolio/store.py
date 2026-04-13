@@ -114,6 +114,11 @@ class Store:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path), timeout=30.0)
         self._db.row_factory = aiosqlite.Row
+        # WAL mode allows concurrent readers while a writer is active, dramatically
+        # reducing "database is locked" errors when the web dashboard reads while the
+        # bot writes.  Must be set before schema creation in case it changes locking.
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")  # safe with WAL
         await self._db.executescript(SCHEMA)
         await self._db.commit()
 

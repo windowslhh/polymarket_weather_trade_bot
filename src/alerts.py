@@ -17,6 +17,10 @@ class Alerter:
 
     def __init__(self, webhook_url: str = "") -> None:
         self._webhook_url = webhook_url.strip()
+        # Hold strong references to fire-and-forget webhook tasks so the event
+        # loop GC cannot collect them before they complete (Python ≥3.10 warns
+        # about this; earlier versions silently drop unrooted tasks).
+        self._pending_tasks: set[asyncio.Task] = set()
 
     async def send(self, level: str, message: str) -> None:
         """Send an alert at the given level (info/warning/critical)."""
@@ -28,7 +32,10 @@ class Alerter:
         log_fn("[ALERT] %s", message)
 
         if self._webhook_url:
-            asyncio.create_task(self._send_webhook(level, message))
+            task = asyncio.create_task(self._send_webhook(level, message))
+            self._pending_tasks.add(task)
+            # Remove the reference once the task finishes to avoid leaking memory
+            task.add_done_callback(self._pending_tasks.discard)
 
     async def _send_webhook(self, level: str, message: str) -> None:
         """Fire-and-forget webhook notification."""
