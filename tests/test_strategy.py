@@ -127,6 +127,133 @@ class TestEvaluateNoSignals:
         assert len(signals) == 0
 
 
+class TestBiasCorrectedDistanceFilter:
+    """Forecast bias correction in evaluate_no_signals distance pre-filter."""
+
+    def _cfg(self) -> StrategyConfig:
+        return StrategyConfig(no_distance_threshold_f=8, min_no_ev=0.01, max_no_price=0.95)
+
+    def _dist(self, errors: list[float]) -> ForecastErrorDistribution:
+        return ForecastErrorDistribution("TestCity", errors)
+
+    # ── No error_dist → unchanged behaviour ──────────────────────────────────
+
+    def test_no_error_dist_baseline(self):
+        """Without error_dist, uses raw forecast (existing behaviour)."""
+        config = self._cfg()
+        # forecast=80, slot 70-74, distance from 80 = 6°F < 8 → filtered
+        slot = _make_slot(70, 74, price_no=0.80)
+        signals = evaluate_no_signals(_make_event(slots=[slot]), _make_forecast(80.0), config)
+        assert len(signals) == 0
+
+    def test_no_error_dist_passes_distant_slot(self):
+        """Without error_dist, a clearly distant slot passes."""
+        config = self._cfg()
+        slot = _make_slot(90, 94, price_no=0.80)
+        signals = evaluate_no_signals(_make_event(slots=[slot]), _make_forecast(80.0), config)
+        assert len(signals) == 1
+
+    # ── Positive bias (forecast runs hot) ────────────────────────────────────
+
+    def test_hot_bias_blocks_lower_slot_that_raw_would_pass(self):
+        """Forecast=80, bias=+4°F (runs hot) → corrected ref=76.
+        Slot 70-74: raw distance=6°F (would pass raw threshold of 8 if adjusted down),
+        but we need a slot that raw passes yet bias-corrected fails.
+
+        Slot 68-72: raw distance from 80 = 8°F (just passes).
+        Bias-corrected distance from 76 = 4°F → blocked.
+        """
+        config = self._cfg()  # threshold=8
+        # 30 errors all at +4 → mean=+4
+        dist = self._dist([4.0] * 30)
+        # Slot 68-72, forecast=80: raw_distance = min(|80-68|, |80-72|) = 8 → passes raw
+        # bias_corrected=76: distance = min(|76-68|, |76-72|) = 4 → blocked
+        slot = _make_slot(68, 72, price_no=0.75)
+        signals = evaluate_no_signals(
+            _make_event(slots=[slot]), _make_forecast(80.0), config, error_dist=dist
+        )
+        assert len(signals) == 0, "Lower slot that was borderline raw should be blocked by bias correction"
+
+    def test_hot_bias_unlocks_upper_slot_that_raw_would_block(self):
+        """Forecast=80, bias=+4°F → corrected ref=76.
+        Slot 86-90: raw distance from 80 = 6°F → blocked raw.
+        Bias-corrected distance from 76 = 10°F → passes.
+        """
+        config = self._cfg()  # threshold=8
+        dist = self._dist([4.0] * 30)
+        # Slot 86-90, forecast=80: raw_distance = min(|80-86|, |80-90|) = 6 → blocked
+        # bias_corrected=76: distance = min(|76-86|, |76-90|) = 10 → passes
+        slot = _make_slot(86, 90, price_no=0.80)
+        signals = evaluate_no_signals(
+            _make_event(slots=[slot]), _make_forecast(80.0), config, error_dist=dist
+        )
+        assert len(signals) == 1, "Upper slot that looked borderline raw should pass after bias correction"
+
+    # ── Negative bias (forecast runs cold) ───────────────────────────────────
+
+    def test_cold_bias_blocks_upper_slot_that_raw_would_pass(self):
+        """Forecast=80, bias=-4°F (runs cold) → corrected ref=84.
+        Slot 88-92: raw distance from 80 = 8°F → passes raw.
+        Bias-corrected distance from 84 = 4°F → blocked.
+        """
+        config = self._cfg()  # threshold=8
+        dist = self._dist([-4.0] * 30)
+        slot = _make_slot(88, 92, price_no=0.75)
+        signals = evaluate_no_signals(
+            _make_event(slots=[slot]), _make_forecast(80.0), config, error_dist=dist
+        )
+        assert len(signals) == 0, "Upper slot near bias-corrected ref should be blocked"
+
+    def test_cold_bias_unlocks_lower_slot_that_raw_would_block(self):
+        """Forecast=80, bias=-4°F → corrected ref=84.
+        Slot 68-72: raw distance from 80 = 8°F → borderline / filtered.
+        Actually raw=8 passes the >= threshold... let me recalculate.
+
+        Slot 70-74: raw distance from 80 = min(|80-70|,|80-74|) = 6 → blocked.
+        Bias-corrected from 84: distance = min(|84-70|,|84-74|) = 10 → passes.
+        """
+        config = self._cfg()  # threshold=8
+        dist = self._dist([-4.0] * 30)
+        slot = _make_slot(70, 74, price_no=0.80)
+        signals = evaluate_no_signals(
+            _make_event(slots=[slot]), _make_forecast(80.0), config, error_dist=dist
+        )
+        assert len(signals) == 1, "Lower slot that was blocked by raw should pass after cold bias correction"
+
+    # ── Insufficient samples → fall back to raw ──────────────────────────────
+
+    def test_insufficient_samples_uses_raw_forecast(self):
+        """error_dist with < 30 samples must not apply bias correction."""
+        config = self._cfg()  # threshold=8
+        # Only 10 samples with huge bias — should be ignored
+        dist = ForecastErrorDistribution("TestCity", [10.0] * 10)
+        assert dist._count == 10  # confirm < 30
+        # Slot 86-90, forecast=80: raw distance=6 → blocked (no bias applied)
+        slot = _make_slot(86, 90, price_no=0.80)
+        signals = evaluate_no_signals(
+            _make_event(slots=[slot]), _make_forecast(80.0), config, error_dist=dist
+        )
+        assert len(signals) == 0, "With < 30 samples bias correction must not apply"
+
+    # ── Zero bias → identical to baseline ────────────────────────────────────
+
+    def test_zero_bias_same_as_no_error_dist(self):
+        """error_dist with mean≈0 should produce the same filter result as no dist."""
+        config = self._cfg()
+        # Symmetric errors → mean≈0
+        errors = [i * 0.1 for i in range(-15, 16)]  # -1.5 to +1.5, mean=0
+        dist = ForecastErrorDistribution("TestCity", errors)
+        assert abs(dist.mean) < 0.01
+
+        slot_far = _make_slot(90, 94, price_no=0.80)  # distance=10 → should pass
+        slot_near = _make_slot(73, 77, price_no=0.80)  # distance=3 → should block
+        event = _make_event(slots=[slot_far, slot_near])
+        signals = evaluate_no_signals(event, _make_forecast(80.0), config, error_dist=dist)
+        labels = [s.slot.outcome_label for s in signals]
+        assert any("90" in lbl for lbl in labels), "Far slot should pass"
+        assert all("73" not in lbl for lbl in labels), "Near slot should be blocked"
+
+
 class TestEvaluateExitSignals:
     def test_exit_when_temp_approaches_slot(self):
         config = StrategyConfig(no_distance_threshold_f=8)
