@@ -189,7 +189,22 @@ def evaluate_no_signals(
         ):
             continue
 
-        distance = _slot_distance(slot, forecast.predicted_high_f)
+        # Bias-corrected reference temperature for the distance pre-filter.
+        # When the empirical distribution shows a systematic bias (e.g. forecasts
+        # run +2°F hot), the expected actual temperature is lower than the raw
+        # forecast.  Using the bias-corrected value prevents the distance filter
+        # from accepting lower slots that are actually close to the expected actual
+        # (false pass) and from rejecting upper slots that are actually far from
+        # the expected actual (false block).
+        #
+        # The probability calculation (_estimate_no_win_prob) is NOT adjusted
+        # here — it uses the full empirical error distribution via prob_no_wins(),
+        # which already implicitly captures the bias.
+        bias_corrected_f = forecast.predicted_high_f
+        if error_dist is not None and error_dist._count >= 30:
+            bias_corrected_f = forecast.predicted_high_f - error_dist.mean
+
+        distance = _slot_distance(slot, bias_corrected_f)
 
         if distance < config.no_distance_threshold_f:
             continue
