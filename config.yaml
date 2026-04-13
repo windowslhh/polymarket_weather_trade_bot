@@ -33,10 +33,20 @@ strategy:
   day_ahead_ev_discount: 0.7
   # Only trade markets settling within N days (远期预报不准)
   max_days_ahead: 2
-  # Maximum number of open positions per event (across all slots)
+  # Maximum number of open positions per event (across all slots).
+  # With k×std dynamic threshold, accurate cities (15 cities at 3°F floor) now see
+  # 3-4× more qualifying slots. The per-event cap remains the binding constraint and
+  # is kept at 4 — EV gate (min_no_ev 0.05-0.06 per strategy variant) provides the
+  # primary quality filter; per-event cap prevents over-concentration in one market.
   max_positions_per_event: 4
-  # Auto-calibrate distance threshold from historical forecast error data
+  # Auto-calibrate distance threshold using k×std dynamic formula (calibrator.py).
+  # Accurate cities (|mean_bias|<1.5°F AND std<2.5°F): threshold = 1.2 × std → floor 3°F
+  # Uncertain cities (|mean_bias|≥1.5°F OR  std≥2.5°F): threshold = 2.0 × std → up to 15°F
+  # Real thresholds by city (from 2y data): Las Vegas/Phoenix/Miami 3°F, Denver 7.2°F, Cleveland 8.7°F
+  # Fallback to fixed no_distance_threshold_f=8 if error_dist unavailable or <30 samples.
   auto_calibrate_distance: true
+  # NOTE: calibration_confidence is retained for backward-compat but is NOT used by
+  # the k×std dynamic calibrator. It was used by the older percentile-based approach.
   calibration_confidence: 0.90
   # Locked-win signals: buy NO on slots where daily max already exceeded upper bound
   enable_locked_wins: true

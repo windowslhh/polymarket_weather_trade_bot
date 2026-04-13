@@ -26,7 +26,7 @@ from src.strategy.evaluator import (
     evaluate_no_signals,
     evaluate_trim_signals,
 )
-from src.strategy.calibrator import calibrate_distance_threshold
+from src.strategy.calibrator import calibrate_distance_dynamic, calibrate_distance_threshold
 from src.strategy.sizing import compute_size
 from src.strategy.trend import ForecastTrend
 from src.weather.forecast import get_forecasts_batch
@@ -493,11 +493,9 @@ class Rebalancer:
                 overrides = variants.get(strat_name, {})
                 strat_cfg = replace(self._config.strategy, **overrides)
 
-                # Auto-calibrate distance if enabled
+                # Auto-calibrate distance if enabled (k×std dynamic formula)
                 if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                    cal_dist = calibrate_distance_threshold(
-                        error_dist, strat_cfg.calibration_confidence,
-                    )
+                    cal_dist = calibrate_distance_dynamic(error_dist)
                     strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
 
                 # Build a lightweight event object for signal evaluation
@@ -755,12 +753,10 @@ class Rebalancer:
                     "ev": ev,
                     "is_forecast_slot": distance < 3,
                 })
-            # Compute calibrated distance threshold for dashboard display
+            # Compute calibrated distance threshold for dashboard display (k×std formula)
             cal_threshold = None
             if self._config.strategy.auto_calibrate_distance and error_dist is not None:
-                cal_threshold = round(calibrate_distance_threshold(
-                    error_dist, self._config.strategy.calibration_confidence,
-                ), 1)
+                cal_threshold = round(calibrate_distance_dynamic(error_dist), 1)
             self._last_markets.append({
                 "city": event.city,
                 "market_date": event.market_date.isoformat(),
@@ -821,11 +817,9 @@ class Rebalancer:
                 # Build strategy config for this variant
                 strat_cfg = replace(self._config.strategy, **overrides)
 
-                # Auto-calibrate distance threshold from historical error data
+                # Auto-calibrate distance threshold from historical error data (k×std formula)
                 if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                    cal_dist = calibrate_distance_threshold(
-                        error_dist, strat_cfg.calibration_confidence,
-                    )
+                    cal_dist = calibrate_distance_dynamic(error_dist)
                     strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
 
                 # Build current prices map from refreshed event slot data

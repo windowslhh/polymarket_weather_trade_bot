@@ -13,6 +13,11 @@ from src.strategy.calibrator import (
     MAX_THRESHOLD_F,
     MIN_CALIBRATION_SAMPLES,
     MIN_THRESHOLD_F,
+    _K_HIGH,
+    _K_LOW,
+    _MEAN_BIAS_LIMIT_F,
+    _STD_LIMIT_F,
+    calibrate_distance_dynamic,
     calibrate_distance_threshold,
 )
 from src.weather.historical import ForecastErrorDistribution
@@ -277,9 +282,10 @@ class TestRebalancerCalibrationWiring:
     """Verify the calibrator is correctly imported and callable from rebalancer context."""
 
     def test_calibrator_imported_in_rebalancer(self):
-        """Rebalancer module should import calibrate_distance_threshold."""
+        """Rebalancer module should import both calibration functions."""
         import src.strategy.rebalancer as mod
         assert hasattr(mod, "calibrate_distance_threshold")
+        assert hasattr(mod, "calibrate_distance_dynamic")
 
     def test_calibration_affects_strat_cfg(self):
         """Simulate what rebalancer does: replace threshold after calibration."""
@@ -408,6 +414,129 @@ class TestCalibratedSignalGeneration:
         assert cfg_cal.no_distance_threshold_f >= 10
         sig_cal = evaluate_no_signals(event, forecast, cfg_cal)
         assert len(sig_cal) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# calibrate_distance_dynamic (k×std formula)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCalibrateDistanceDynamic:
+    """Tests for the k×std dynamic calibration function."""
+
+    # ── Insufficient data ─────────────────────────────────────────────
+
+    def test_no_samples_returns_default(self):
+        dist = _make_dist([])
+        assert calibrate_distance_dynamic(dist) == float(DEFAULT_THRESHOLD_F)
+
+    def test_insufficient_samples_returns_default(self):
+        dist = _make_dist(_uniform_errors(MIN_CALIBRATION_SAMPLES - 1, 3.0))
+        assert calibrate_distance_dynamic(dist) == float(DEFAULT_THRESHOLD_F)
+
+    def test_exactly_min_samples_calibrates(self):
+        # Accurate city with exactly MIN_CALIBRATION_SAMPLES: should calibrate, not fallback
+        dist = _make_dist(_constant_errors(MIN_CALIBRATION_SAMPLES, 0.5))  # mean~0.5, std~0
+        result = calibrate_distance_dynamic(dist)
+        # std≈0 → raw=k×0=0 → clamped to MIN_THRESHOLD_F
+        assert result == float(MIN_THRESHOLD_F)
+
+    # ── k selection ───────────────────────────────────────────────────
+
+    def test_accurate_city_uses_k_low(self):
+        """City with |mean| < MEAN_BIAS_LIMIT and std < STD_LIMIT → k = K_LOW."""
+        # mean≈0, std=2.0 → accurate
+        errors = [2.0 * (i / 99 - 0.5) for i in range(100)]  # mean=0, std≈0.58 ... use bigger range
+        errors = _uniform_errors(100, 2.0 * 1.732)  # std≈2.0 for uniform over [-sqrt(3)×2, +sqrt(3)×2]
+        # Actually let's just use constant ±1.5 → std=1.5
+        errors = ([1.5] * 50) + ([-1.5] * 50)  # mean=0, std=1.5
+        dist = _make_dist(errors)
+        assert abs(dist.mean) < _MEAN_BIAS_LIMIT_F
+        assert dist.std < _STD_LIMIT_F
+        result = calibrate_distance_dynamic(dist)
+        expected_raw = _K_LOW * dist.std
+        expected = max(MIN_THRESHOLD_F, min(MAX_THRESHOLD_F, expected_raw))
+        assert abs(result - expected) < 1e-9
+
+    def test_high_mean_bias_uses_k_high(self):
+        """City with |mean| >= MEAN_BIAS_LIMIT → k = K_HIGH (even if std is small)."""
+        # mean = +2.0°F (> 1.5 limit), std ≈ 0.5
+        errors = ([2.5] * 50) + ([1.5] * 50)  # mean=2.0, std=0.5
+        dist = _make_dist(errors)
+        assert abs(dist.mean) >= _MEAN_BIAS_LIMIT_F
+        result = calibrate_distance_dynamic(dist)
+        expected_raw = _K_HIGH * dist.std
+        expected = max(MIN_THRESHOLD_F, min(MAX_THRESHOLD_F, expected_raw))
+        assert abs(result - expected) < 1e-9
+
+    def test_high_std_uses_k_high(self):
+        """City with std >= STD_LIMIT → k = K_HIGH (even if mean bias is small)."""
+        # mean ≈ 0 (< 1.5), std = 3.0 (> 2.5)
+        errors = ([3.0] * 50) + ([-3.0] * 50)  # mean=0, std=3.0
+        dist = _make_dist(errors)
+        assert abs(dist.mean) < _MEAN_BIAS_LIMIT_F
+        assert dist.std >= _STD_LIMIT_F
+        result = calibrate_distance_dynamic(dist)
+        expected_raw = _K_HIGH * dist.std
+        expected = max(MIN_THRESHOLD_F, min(MAX_THRESHOLD_F, expected_raw))
+        assert abs(result - expected) < 1e-9
+
+    # ── Real city examples ────────────────────────────────────────────
+
+    def test_las_vegas_profile_gets_min_floor(self):
+        """Las Vegas profile: mean=−0.17, std=1.47 → accurate → 1.2×1.47=1.76 → floor to 3°F."""
+        errors = ([1.47] * 365) + ([-1.47] * 366)  # mean≈0, std≈1.47
+        # Shift by -0.17 to simulate Las Vegas mean
+        errors = [e - 0.17 for e in errors]
+        dist = _make_dist(errors, "Las Vegas")
+        result = calibrate_distance_dynamic(dist)
+        assert result == float(MIN_THRESHOLD_F), f"Las Vegas should hit floor, got {result}"
+
+    def test_cleveland_profile_gives_large_threshold(self):
+        """Cleveland profile: mean=+3.44, std=4.36 → uncertain → 2.0×4.36=8.72 → 8.7°F."""
+        errors = ([3.44 + 4.36] * 365) + ([3.44 - 4.36] * 366)  # mean=3.44, std≈4.36
+        dist = _make_dist(errors, "Cleveland")
+        result = calibrate_distance_dynamic(dist)
+        # 2.0 × 4.36 = 8.72 → within [3, 15]
+        assert result > 6.0, f"Cleveland should get wide threshold, got {result}"
+        assert result <= MAX_THRESHOLD_F
+
+    def test_denver_profile(self):
+        """Denver: mean=+2.04, std=3.59 → uncertain → 2.0×3.59=7.18°F."""
+        errors = ([2.04 + 3.59] * 365) + ([2.04 - 3.59] * 366)
+        dist = _make_dist(errors, "Denver")
+        result = calibrate_distance_dynamic(dist)
+        assert 6.0 <= result <= 8.0, f"Denver threshold out of expected range: {result}"
+
+    # ── Clamping ──────────────────────────────────────────────────────
+
+    def test_min_clamp_applied(self):
+        """Very small std → raw below MIN_THRESHOLD_F → clamped."""
+        errors = _constant_errors(50, 0.1)  # std≈0
+        dist = _make_dist(errors)
+        assert calibrate_distance_dynamic(dist) >= MIN_THRESHOLD_F
+
+    def test_max_clamp_applied(self):
+        """Huge std → raw above MAX_THRESHOLD_F → clamped."""
+        errors = ([20.0] * 50) + ([-20.0] * 50)  # std=20
+        dist = _make_dist(errors)
+        assert calibrate_distance_dynamic(dist) <= MAX_THRESHOLD_F
+
+    # ── Monotonicity ──────────────────────────────────────────────────
+
+    def test_wider_std_gives_larger_or_equal_threshold(self):
+        """For same k class, wider std → wider threshold (before clamping)."""
+        # Both uncertain (high std): compare std=3.0 vs std=4.0
+        e_narrow = ([3.5] * 50) + ([-3.5] * 50)  # std=3.5 (uncertain: std>=2.5)
+        e_wide   = ([4.5] * 50) + ([-4.5] * 50)  # std=4.5 (uncertain)
+        t_narrow = calibrate_distance_dynamic(_make_dist(e_narrow))
+        t_wide   = calibrate_distance_dynamic(_make_dist(e_wide))
+        assert t_wide >= t_narrow
+
+    # ── Return type ───────────────────────────────────────────────────
+
+    def test_returns_float(self):
+        dist = _make_dist(_uniform_errors(50, 3.0))
+        assert isinstance(calibrate_distance_dynamic(dist), float)
 
 
 # ──────────────────────────────────────────────────────────────────────
