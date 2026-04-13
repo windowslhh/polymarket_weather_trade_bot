@@ -21,6 +21,27 @@ from src.weather.models import Forecast, Observation
 
 logger = logging.getLogger(__name__)
 
+# Polymarket taker fee for the Weather category (as of 2026).
+# Weather markets charge 1.25% base rate, probability-weighted so the fee is
+# highest at 50/50 and decreases toward 0 or 1.  Matches the backtest engine.
+# Formula: fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
+# (peaks at price=0.50: 0.625% per dollar; at price=0.70: 0.525% per dollar)
+# Makers pay 0%; we assume all our orders execute as taker (aggressive limits).
+TAKER_FEE_RATE: float = 0.0125  # 1.25%
+
+
+def _entry_fee_per_dollar(price: float) -> float:
+    """Compute Polymarket taker fee per dollar invested at *price*.
+
+    Probability-weighted formula: fee is highest at 50/50 and falls toward
+    price extremes.  Only applied on entry — settlement is automatic (no exit
+    fee when the position resolves to $1).  For early exits (SELL orders) the
+    same formula applies but is not captured here since the exit decision is
+    whether to *hold* vs sell (hold EV does not incur an additional fee).
+    """
+    return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
+
+
 # Post-peak confidence intervals: how much the daily max can still
 # rise after a given local hour.  After 17:00, ±1.5°F; during peak
 # (14-17), ±3°F.  Before 14:00, no adjustment (forecast only).
@@ -204,8 +225,11 @@ def evaluate_no_signals(
             if slot.temp_lower_f is not None and slot.temp_lower_f > forecast.predicted_high_f:
                 win_prob = min(win_prob * 1.05, 0.99)
 
-        # EV = win_prob * profit_if_win - (1 - win_prob) * cost_if_lose
-        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
+        # EV = win_prob * profit_if_win - (1 - win_prob) * cost_if_lose - entry_fee
+        # Entry taker fee is probability-weighted; deducted only once at trade entry.
+        ev = (win_prob * (1.0 - slot.price_no)
+              - (1.0 - win_prob) * slot.price_no
+              - _entry_fee_per_dollar(slot.price_no))
 
         if ev < ev_threshold:
             continue
@@ -368,9 +392,12 @@ def evaluate_locked_win_signals(
             )
             continue
 
-        # Locked win: near-certain probability (0.99), compute EV
+        # Locked win: near-certain probability (0.99), compute EV after entry fee.
+        # Even guaranteed wins must overcome the taker fee cost.
         win_prob = 0.99
-        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
+        ev = (win_prob * (1.0 - slot.price_no)
+              - (1.0 - win_prob) * slot.price_no
+              - _entry_fee_per_dollar(slot.price_no))
 
         if ev <= 0:
             continue

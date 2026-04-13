@@ -116,13 +116,17 @@ class TestLockedWinDetection:
         assert locked_ids == {"n1", "n2", "n3"}
 
     def test_ev_positive_for_reasonable_price(self):
-        """Locked win at price_no=0.90 → EV = 0.99*0.10 - 0.01*0.90 = 0.09."""
+        """Locked win at price_no=0.90: EV is positive (after entry fee deduction)."""
+        from src.strategy.evaluator import TAKER_FEE_RATE
         slot = _slot(70, 74, price_no=0.90)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, StrategyConfig())
         assert len(sigs) == 1
-        expected_ev = 0.99 * 0.10 - 0.01 * 0.90
-        assert abs(sigs[0].expected_value - expected_ev) < 0.001
+        p = 0.90
+        fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
+        expected_ev = 0.99 * (1.0 - p) - 0.01 * p - fee
+        assert abs(sigs[0].expected_value - expected_ev) < 1e-9
+        assert sigs[0].expected_value > 0, "EV must remain positive after fee deduction"
 
     def test_all_signals_are_no_buy(self):
         """Every locked win signal must be NO/BUY."""

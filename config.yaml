@@ -5,9 +5,17 @@ strategy:
   min_no_ev: 0.03
   # Maximum USD per single slot position
   max_position_per_slot_usd: 5.0
-  # Maximum USD exposure per city
+  # Maximum USD exposure per city — enforced independently per strategy variant.
+  # With 4 active strategies (A/B/C/D) each capped at this value, the real
+  # cross-strategy total per city can reach up to 4× this number.
+  # Each strategy variant overrides this with a tighter per-strategy value
+  # (A/B/D: $30, C: $25) — see get_strategy_variants() in src/config.py.
   max_exposure_per_city_usd: 50.0
-  # Maximum total USD exposure across all cities
+  # Maximum total USD exposure across all cities — enforced PER STRATEGY,
+  # not across all strategies combined.  Four strategies can each hold up to
+  # this amount, so real-world total exposure is up to 4× this figure.
+  # In practice Kelly sizing keeps per-position sizes to $1–5, so actual
+  # combined exposure stays well below 4× even with many open positions.
   max_total_exposure_usd: 1000.0
   # Daily loss circuit breaker (USD)
   daily_loss_limit_usd: 50.0
