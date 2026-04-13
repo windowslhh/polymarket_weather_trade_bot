@@ -81,12 +81,14 @@
             <th>+1d</th>
             <th>+2d</th>
             <th>Trend</th>
+            <th title="Historical forecast bias: mean(forecast − actual). Positive = forecasts run hot; negative = forecasts run cold. Based on 2y of data.">Avg Bias</th>
         </tr></thead>
         <tbody id="summary-tbody">
         {% for city in cities|sort %}
         {% set f = forecasts.get(city) %}
         {% set dm = daily_maxes.get(city) %}
         {% set obs_count = (observation_series.get(city) or [])|length %}
+        {% set ed = error_dists.get(city) %}
         {% if f or dm is not none or obs_count > 0 %}
         <tr>
             <td style="font-weight:500;font-size:12px;">{{ city }}</td>
@@ -102,6 +104,15 @@
             <td class="td-mono">{% if f and f.high_d1 is defined and f.high_d1 is not none %}{{ "%.0f"|format(f.high_d1) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
             <td class="td-mono">{% if f and f.high_d2 is defined and f.high_d2 is not none %}{{ "%.0f"|format(f.high_d2) }}°F{% else %}<span style="color:var(--text-dim);">--</span>{% endif %}</td>
             <td><span class="tag tag-{{ (trends.get(city, 'STABLE'))|lower|replace('_','-') }}" style="font-size:9px;">{{ trends.get(city, 'STABLE') }}</span></td>
+            <td class="td-mono bias-cell" id="bias-{{ city|replace(' ','-') }}"
+                data-city="{{ city }}"
+                {% if ed %}title="{{ ed.samples }}d sample · σ={{ "%.1f"|format(ed.std_error) }}°F"{% endif %}>
+                {% if ed %}
+                    <span style="color:{% if ed.mean_error > 1.0 %}#ef4444{% elif ed.mean_error < -1.0 %}#3b82f6{% else %}var(--text-muted){% endif %};">
+                        {% if ed.mean_error > 0 %}+{% endif %}{{ "%.1f"|format(ed.mean_error) }}°F
+                    </span>
+                {% else %}<span style="color:var(--text-dim);">--</span>{% endif %}
+            </td>
         </tr>
         {% endif %}
         {% endfor %}
@@ -125,6 +136,7 @@ const cityTimezones = {{ city_timezones|tojson }};
 let observationData = {{ observation_series|tojson }};
 let forecastData    = {{ forecasts|tojson }};
 let dailyMaxData    = {{ daily_maxes|tojson }};
+let errorDistData   = {{ error_dists|tojson }};
 let tempChart       = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -437,6 +449,19 @@ function updateLocalTimes() {
 
 // ── Data refresh ──────────────────────────────────────────────────────────────
 
+function updateBiasCells() {
+    document.querySelectorAll('.bias-cell[data-city]').forEach(cell => {
+        const city = cell.dataset.city;
+        const ed = errorDistData[city];
+        if (!ed) return;
+        const v = ed.mean_error;
+        const sign = v > 0 ? '+' : '';
+        const color = v > 1.0 ? '#ef4444' : v < -1.0 ? '#3b82f6' : 'var(--text-muted)';
+        cell.title = ed.samples + 'd sample · σ=' + ed.std_error.toFixed(1) + '°F';
+        cell.innerHTML = '<span style="color:' + color + ';">' + sign + v.toFixed(1) + '°F</span>';
+    });
+}
+
 async function refreshTemperatures() {
     try {
         const r = await fetch('/api/temperatures');
@@ -444,6 +469,7 @@ async function refreshTemperatures() {
         observationData = d.observation_series || {};
         forecastData    = d.forecasts || {};
         dailyMaxData    = d.daily_maxes || {};
+        if (d.error_dists) { errorDistData = d.error_dists; updateBiasCells(); }
         updateChart();
 
         // Update metric cards

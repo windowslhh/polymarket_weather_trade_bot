@@ -564,6 +564,7 @@ def create_app(store, rebalancer, config) -> Flask:
         obs_series = state.get("observation_series", {})
         forecasts = state.get("forecasts", {})
         daily_maxes = state.get("daily_maxes", {})
+        error_dists = state.get("error_dists", {})
         # Only show cities with active market data
         active_cities = sorted(set(obs_series.keys()) | set(forecasts.keys()) | set(daily_maxes.keys()))
         # City → IANA timezone string for local time display
@@ -578,6 +579,7 @@ def create_app(store, rebalancer, config) -> Flask:
             daily_maxes=daily_maxes,
             trends=state.get("trends", {}),
             city_timezones=city_tzs,
+            error_dists=error_dists,
         )
 
     @app.route("/api/prices")
@@ -635,6 +637,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "observation_series": state.get("observation_series", {}),
             "forecasts": state.get("forecasts", {}),
             "daily_maxes": state.get("daily_maxes", {}),
+            "error_dists": state.get("error_dists", {}),
         }
         _set_cache("temperatures", data)
         return jsonify(data)

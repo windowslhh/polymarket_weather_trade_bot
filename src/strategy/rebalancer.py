@@ -189,6 +189,16 @@ class Rebalancer:
             if obs:
                 observation_series[city_name] = obs
 
+        # Build per-city forecast error distribution summary for dashboard
+        error_dist_summary: dict[str, dict] = {}
+        for city_name, dist in self._error_dists.items():
+            if dist._count > 0:
+                error_dist_summary[city_name] = {
+                    "mean_error": round(dist.mean, 2),
+                    "std_error": round(dist.std, 2),
+                    "samples": dist._count,
+                }
+
         return {
             "last_run": self._last_run_at,
             "last_error": self._last_error,
@@ -201,6 +211,7 @@ class Rebalancer:
             "daily_maxes": self._last_daily_maxes,
             "price_source": self._last_price_source,
             "observation_series": observation_series,
+            "error_dists": error_dist_summary,
         }
 
     def get_gamma_prices(self) -> dict[str, float]:
