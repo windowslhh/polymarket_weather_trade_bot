@@ -58,8 +58,9 @@ def _set_cache(key: str, val: object):
 async def _fetch_gamma_prices(token_ids: list[str]) -> dict[str, float]:
     """Fetch current prices from Gamma API for a list of CLOB token IDs.
 
-    Calls /markets?clob_token_ids=... which returns outcomePrices per token.
-    Batches requests to avoid URL length limits.
+    Calls /markets?clob_token_ids=<id1>&clob_token_ids=<id2>&... using
+    repeated query parameters (comma-joined values return HTTP 422).
+    Batches to stay within reasonable URL length limits.
     """
     import json as _json
     import httpx as _httpx
@@ -73,9 +74,12 @@ async def _fetch_gamma_prices(token_ids: list[str]) -> dict[str, float]:
             batch_size = 20
             for i in range(0, len(token_ids), batch_size):
                 batch = token_ids[i:i + batch_size]
+                # Gamma API requires repeated params, not comma-joined values.
+                # httpx accepts a list of (key, value) tuples for repeated params.
+                params = [("clob_token_ids", tid) for tid in batch]
                 resp = await client.get(
                     "https://gamma-api.polymarket.com/markets",
-                    params={"clob_token_ids": ",".join(batch)},
+                    params=params,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -100,7 +104,8 @@ async def _fetch_gamma_prices(token_ids: list[str]) -> dict[str, float]:
                         except (ValueError, TypeError):
                             pass
     except Exception:
-        logger.warning("Failed to fetch fresh Gamma prices for %d tokens", len(token_ids))
+        logger.warning("Failed to fetch fresh Gamma prices for %d tokens", len(token_ids),
+                       exc_info=True)
     return prices
 
 
