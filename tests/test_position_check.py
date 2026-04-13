@@ -441,7 +441,13 @@ class TestPositionCheckPerformance:
             return None
 
         t0 = time.monotonic()
-        with patch("src.strategy.rebalancer.fetch_settlement_temp", side_effect=mock_fetch):
+        with patch("src.strategy.rebalancer.fetch_settlement_temp", side_effect=mock_fetch), \
+             patch("httpx.AsyncClient") as mock_http:
+            # Stub Gamma price fetch to avoid real network calls in perf test
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = []
+            mock_http.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
             signals = await reb.run_position_check()
         elapsed = time.monotonic() - t0
 
