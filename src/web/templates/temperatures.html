@@ -16,6 +16,11 @@
     .refresh-note { font-size: 11px; color: var(--text-dim); text-align: right; margin-top: 8px; }
     .local-time { font-size: 11px; color: var(--accent); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
     .local-time-label { font-size: 10px; color: var(--text-dim); display: block; }
+    .rel-badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; }
+    .rel-a { background: rgba(34,197,94,0.15);  color: #22c55e; }
+    .rel-b { background: rgba(59,130,246,0.15);  color: #3b82f6; }
+    .rel-c { background: rgba(249,115,22,0.15);  color: #f97316; }
+    .rel-d { background: rgba(239,68,68,0.15);   color: #ef4444; }
 </style>
 
 <!-- Top metrics -->
@@ -82,6 +87,7 @@
             <th>+2d</th>
             <th>Trend</th>
             <th title="Historical forecast bias: mean(forecast − actual). Positive = forecasts run hot; negative = forecasts run cold. Based on 2y of data.">Avg Bias</th>
+            <th title="Forecast reliability grade (2y historical data). A=Excellent (|bias|&lt;1°F, σ&lt;2.5), B=Good (|bias|&lt;1.5, σ&lt;2.8), C=Fair (|bias|&lt;2.5, σ&lt;3.5), D=Poor">Reliability</th>
         </tr></thead>
         <tbody id="summary-tbody">
         {% for city in cities|sort %}
@@ -113,6 +119,26 @@
                     </span>
                 {% else %}<span style="color:var(--text-dim);">--</span>{% endif %}
             </td>
+            {% if ed %}
+                {% set abs_mean = ed.mean_error | abs %}
+                {% set rel = namespace(grade='D', label='Poor') %}
+                {% if abs_mean < 1.0 and ed.std_error < 2.5 %}
+                    {% set rel.grade = 'A' %}{% set rel.label = 'Excellent' %}
+                {% elif abs_mean < 1.5 and ed.std_error < 2.8 %}
+                    {% set rel.grade = 'B' %}{% set rel.label = 'Good' %}
+                {% elif abs_mean < 2.5 and ed.std_error < 3.5 %}
+                    {% set rel.grade = 'C' %}{% set rel.label = 'Fair' %}
+                {% endif %}
+            <td class="reliability-cell" id="rel-{{ city|replace(' ','-') }}"
+                data-city="{{ city }}"
+                title="bias={{ '+' if ed.mean_error > 0 else '' }}{{ '%.2f'|format(ed.mean_error) }}°F  σ={{ '%.2f'|format(ed.std_error) }}°F  ({{ ed.samples }}d)">
+                <span class="rel-badge rel-{{ rel.grade|lower }}">{{ rel.grade }} · {{ rel.label }}</span>
+            </td>
+            {% else %}
+            <td class="reliability-cell" id="rel-{{ city|replace(' ','-') }}" data-city="{{ city }}">
+                <span style="color:var(--text-dim);">--</span>
+            </td>
+            {% endif %}
         </tr>
         {% endif %}
         {% endfor %}
@@ -449,6 +475,36 @@ function updateLocalTimes() {
 
 // ── Data refresh ──────────────────────────────────────────────────────────────
 
+// ── Reliability grade helpers ─────────────────────────────────────────────────
+// Thresholds mirror Python calibrator.py constants (_MEAN_BIAS_LIMIT_F, _STD_LIMIT_F)
+// and the four-tier classification added to the dashboard.
+// A: |mean|<1.0 AND std<2.5 — Excellent
+// B: |mean|<1.5 AND std<2.8 — Good
+// C: |mean|<2.5 AND std<3.5 — Fair
+// D: else                    — Poor
+const GRADE_LABELS = { A: 'Excellent', B: 'Good', C: 'Fair', D: 'Poor' };
+const GRADE_CLASSES = { A: 'rel-a', B: 'rel-b', C: 'rel-c', D: 'rel-d' };
+
+function getReliabilityGrade(meanError, stdError) {
+    const am = Math.abs(meanError);
+    if (am < 1.0 && stdError < 2.5) return 'A';
+    if (am < 1.5 && stdError < 2.8) return 'B';
+    if (am < 2.5 && stdError < 3.5) return 'C';
+    return 'D';
+}
+
+function updateReliabilityCells() {
+    document.querySelectorAll('.reliability-cell[data-city]').forEach(cell => {
+        const city = cell.dataset.city;
+        const ed = errorDistData[city];
+        if (!ed) return;
+        const grade = getReliabilityGrade(ed.mean_error, ed.std_error);
+        const sign = ed.mean_error > 0 ? '+' : '';
+        cell.title = 'bias=' + sign + ed.mean_error.toFixed(2) + '°F  σ=' + ed.std_error.toFixed(2) + '°F  (' + ed.samples + 'd)';
+        cell.innerHTML = '<span class="rel-badge ' + GRADE_CLASSES[grade] + '">' + grade + ' · ' + GRADE_LABELS[grade] + '</span>';
+    });
+}
+
 function updateBiasCells() {
     document.querySelectorAll('.bias-cell[data-city]').forEach(cell => {
         const city = cell.dataset.city;
@@ -469,7 +525,7 @@ async function refreshTemperatures() {
         observationData = d.observation_series || {};
         forecastData    = d.forecasts || {};
         dailyMaxData    = d.daily_maxes || {};
-        if (d.error_dists) { errorDistData = d.error_dists; updateBiasCells(); }
+        if (d.error_dists) { errorDistData = d.error_dists; updateBiasCells(); updateReliabilityCells(); }
         updateChart();
 
         // Update metric cards
