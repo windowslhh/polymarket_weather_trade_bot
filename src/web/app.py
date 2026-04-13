@@ -517,6 +517,8 @@ def create_app(store, rebalancer, config) -> Flask:
         daily_maxes = state.get("daily_maxes", {})
         # Only show cities with active market data
         active_cities = sorted(set(obs_series.keys()) | set(forecasts.keys()) | set(daily_maxes.keys()))
+        # City → IANA timezone string for local time display
+        city_tzs = {c.name: c.tz for c in cfg.cities if getattr(c, "tz", None)}
         return render_template(
             "temperatures.html",
             active_page="temperatures",
@@ -526,6 +528,7 @@ def create_app(store, rebalancer, config) -> Flask:
             forecasts=forecasts,
             daily_maxes=daily_maxes,
             trends=state.get("trends", {}),
+            city_timezones=city_tzs,
         )
 
     @app.route("/api/temperatures")
