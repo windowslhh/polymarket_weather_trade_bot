@@ -506,9 +506,15 @@ class Rebalancer:
                 # Use cached forecast for better exit decisions
                 forecast = self._cached_forecasts.get(city)
 
+                # Pull trend state for this city so exit thresholds are tighter
+                # during breakout periods (trend is updated by the main 60-min cycle
+                # and remains valid for 15-min position checks between rebalances).
+                city_trend = self._trend.get_trend(city)
+
                 # Evaluate exit signals (urgent sells) — only same-day markets
                 exit_signals = evaluate_exit_signals(
                     event_obj, observation, daily_max, held_no_slots, strat_cfg,
+                    trend=city_trend,
                     days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
                     local_hour=local_hour,
                 )

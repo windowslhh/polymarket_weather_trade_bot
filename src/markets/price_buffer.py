@@ -22,8 +22,19 @@ TWAP_WINDOW_SECONDS: int = 300  # 5 minutes
 TWAP_MAX_SAMPLES: int = 20
 
 # If a new price deviates from the current TWAP by more than this fraction,
-# treat it as an outlier and discard it (0.10 = 10%)
+# treat it as an outlier and discard it (0.10 = 10%).
 OUTLIER_THRESHOLD: float = 0.10
+
+# Absolute minimum price change that qualifies as an outlier regardless of %.
+# For low-price tokens (e.g. 0.10), a 10% deviation is only $0.01 — well within
+# normal market noise.  The absolute floor prevents the percentage check from
+# being too aggressive at extremes: a move must exceed BOTH the % threshold
+# AND this absolute floor to be discarded.
+# Examples at OUTLIER_THRESHOLD=10%:
+#   price=0.10, move=0.02 → 20% but only $0.02 → accepted (< floor)
+#   price=0.10, move=0.06 → 60% and $0.06 → discarded (both exceeded)
+#   price=0.70, move=0.08 → 11.4% and $0.08 → discarded (both exceeded)
+OUTLIER_MIN_ABSOLUTE: float = 0.05  # 5 cents
 
 # If CLOB midpoint deviates from Gamma price by more than this fraction,
 # fall back to Gamma and log a warning (0.05 = 5%)
@@ -54,11 +65,13 @@ class PriceBuffer:
         max_samples: int = TWAP_MAX_SAMPLES,
         outlier_threshold: float = OUTLIER_THRESHOLD,
         min_samples: int = TWAP_MIN_SAMPLES,
+        min_absolute: float = OUTLIER_MIN_ABSOLUTE,
     ) -> None:
         self._window = window_seconds
         self._max = max_samples
         self._outlier = outlier_threshold
         self._min = min_samples
+        self._min_absolute = min_absolute
         self._data: dict[str, list[_PriceSample]] = defaultdict(list)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -78,13 +91,19 @@ class PriceBuffer:
         samples = self._data[token_id]
         current_twap = self._compute_twap(samples)
 
-        # Outlier check: only applies when there are enough reference points
+        # Outlier check: only applies when there are enough reference points.
+        # Uses a HYBRID threshold: both the percentage deviation AND the absolute
+        # change must exceed their respective floors before a sample is discarded.
+        # This prevents the percentage check from being too aggressive on low-price
+        # tokens where 10% is only a few cents of normal market noise.
         if current_twap is not None and len(samples) >= self._min:
-            deviation = abs(price - current_twap) / current_twap if current_twap != 0 else 0.0
-            if deviation > self._outlier:
+            abs_change = abs(price - current_twap)
+            pct_deviation = abs_change / current_twap if current_twap != 0 else 0.0
+            if pct_deviation > self._outlier and abs_change >= self._min_absolute:
                 logger.warning(
-                    "Price outlier discarded for %s: %.4f vs TWAP %.4f (dev=%.1f%%)",
-                    token_id[:16], price, current_twap, deviation * 100,
+                    "Price outlier discarded for %s: %.4f vs TWAP %.4f "
+                    "(dev=%.1f%%, abs=%.4f)",
+                    token_id[:16], price, current_twap, pct_deviation * 100, abs_change,
                 )
                 return current_twap
 

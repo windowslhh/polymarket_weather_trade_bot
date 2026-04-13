@@ -37,8 +37,8 @@ def compute_size(
         return 0.0
 
     # Kelly criterion: f* = (p * net_odds - q) / net_odds
-    # where p = win probability, q = 1-p, net_odds = profit per $1 bet
-    # For binary markets: net_odds = (1 - price) / price
+    # where p = win probability, q = 1-p, net_odds = (1-price)/price
+    # Result is a fraction in [0, 1] representing signal strength.
     net_odds = (1.0 - price) / price
     q = 1.0 - win_prob
     kelly_full = (win_prob * net_odds - q) / net_odds if net_odds > 0 else 0.0
@@ -50,9 +50,18 @@ def compute_size(
     frac = config.locked_win_kelly_fraction if signal.is_locked_win else config.kelly_fraction
     slot_cap = config.max_locked_win_per_slot_usd if signal.is_locked_win else config.max_position_per_slot_usd
 
+    # Signal-proportional sizing (intentional design choice):
+    # size = kelly_full × frac × slot_cap
+    #
+    # This is NOT the traditional "fraction of bankroll" Kelly formula.
+    # Instead, kelly_full (0→1) acts as a signal-strength scalar that scales
+    # the maximum per-slot bet down based on how confident the strategy is:
+    #   - High-EV signal (kelly_full ≈ 0.5): invest ~25% of slot cap (× 0.5 frac)
+    #   - Weak signal (kelly_full ≈ 0.1): invest ~5% of slot cap
+    #   - Maximum bet (kelly_full = 1.0, locked win): up to full slot cap
+    #
+    # Exposure caps in apply_caps() enforce the hard risk limits regardless.
     kelly_fraction = kelly_full * frac
-
-    # Convert fraction to USD (fraction of slot cap)
     size_usd = kelly_fraction * slot_cap
 
     # Apply caps

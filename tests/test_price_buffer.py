@@ -8,6 +8,7 @@ import pytest
 
 from src.markets.price_buffer import (
     CLOB_GAMMA_DIVERGENCE_THRESHOLD,
+    OUTLIER_MIN_ABSOLUTE,
     OUTLIER_THRESHOLD,
     TWAP_MIN_SAMPLES,
     TWAP_WINDOW_SECONDS,
@@ -128,6 +129,44 @@ class TestOutlierFiltering:
         pre = buf.update("tok", 0.70, now=_ts(60))
 
         result = buf.update("tok", 0.30, now=_ts(120))  # -57% → outlier
+        assert abs(result - pre) < 1e-9
+
+    def test_low_price_small_absolute_move_accepted(self):
+        """For a low-price token, a large % move that is tiny in absolute terms
+        must be ACCEPTED (hybrid threshold requires both % and absolute to trigger).
+
+        TWAP=0.10, new=0.12: +20% but only $0.02 absolute < $0.05 floor → accept.
+        """
+        buf = PriceBuffer(outlier_threshold=0.10, min_samples=2, min_absolute=0.05)
+        buf.update("tok", 0.10, now=_ts(0))
+        buf.update("tok", 0.10, now=_ts(60))
+
+        result = buf.update("tok", 0.12, now=_ts(120))  # 20% but $0.02 abs
+        # Must be accepted — should shift TWAP toward 0.12
+        assert result > 0.10, "Small absolute move on low-price token must be accepted"
+
+    def test_low_price_large_absolute_move_discarded(self):
+        """For a low-price token, a move exceeding BOTH % and absolute floor IS discarded.
+
+        TWAP=0.10, new=0.17: +70% and $0.07 absolute > $0.05 floor → discard.
+        """
+        buf = PriceBuffer(outlier_threshold=0.10, min_samples=2, min_absolute=0.05)
+        buf.update("tok", 0.10, now=_ts(0))
+        pre = buf.update("tok", 0.10, now=_ts(60))
+
+        result = buf.update("tok", 0.17, now=_ts(120))  # 70% and $0.07 abs
+        assert abs(result - pre) < 1e-9, "Move exceeding both thresholds must be discarded"
+
+    def test_high_price_large_pct_and_absolute_discarded(self):
+        """For a mid/high-price token, large % + large absolute both trigger rejection.
+
+        TWAP=0.70, new=0.85: 21.4% and $0.15 → discarded.
+        """
+        buf = PriceBuffer(outlier_threshold=0.10, min_samples=2, min_absolute=0.05)
+        buf.update("tok", 0.70, now=_ts(0))
+        pre = buf.update("tok", 0.70, now=_ts(60))
+
+        result = buf.update("tok", 0.85, now=_ts(120))
         assert abs(result - pre) < 1e-9
 
 
