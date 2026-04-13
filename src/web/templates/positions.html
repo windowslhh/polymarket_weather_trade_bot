@@ -59,16 +59,16 @@
         <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Reason</th><th>Opened</th></tr></thead>
         <tbody>
         {% for p in strat_positions %}
-        <tr>
+        <tr data-token="{{ p.token_id }}" data-entry="{{ p.entry_price }}" data-shares="{{ p.shares }}">
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
-            <td class="td-mono" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > p.entry_price else 'var(--red-text)' if p.current_price < p.entry_price else 'var(--text)' }}{% endif %}">
+            <td class="td-mono price-cell" data-token="{{ p.token_id }}" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > p.entry_price else 'var(--red-text)' if p.current_price < p.entry_price else 'var(--text)' }}{% endif %}">
                 {{ "%.3f"|format(p.current_price) if p.current_price is not none else '-' }}
             </td>
-            <td class="td-mono" style="font-weight:600;{% if p.unrealized_pnl is not none %}color:{{ 'var(--green-text)' if p.unrealized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">
+            <td class="td-mono pnl-cell" data-token="{{ p.token_id }}" style="font-weight:600;{% if p.unrealized_pnl is not none %}color:{{ 'var(--green-text)' if p.unrealized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">
                 {% if p.unrealized_pnl is not none %}
                 {{ '+' if p.unrealized_pnl > 0 else '' }}${{ "%.3f"|format(p.unrealized_pnl) }}
                 {% else %}-{% endif %}
@@ -150,4 +150,58 @@
     </table>
 </div>
 {% endif %}
+
+<div style="margin-top:8px;font-size:11px;color:var(--text-dim);text-align:right;" id="price-updated-at">Prices loading...</div>
+
+<script>
+// ── Live price polling ────────────────────────────────────────────────────────
+// Fetches fresh prices from /api/prices every 30 seconds and updates cells
+// without a full page reload. Server caches Gamma API responses for 30s.
+
+function _priceColor(current, entry) {
+    if (current > entry) return 'var(--green-text)';
+    if (current < entry) return 'var(--red-text)';
+    return 'var(--text)';
+}
+
+async function refreshPrices() {
+    try {
+        const r = await fetch('/api/prices');
+        if (!r.ok) return;
+        const prices = await r.json();
+
+        document.querySelectorAll('tr[data-token]').forEach(row => {
+            const tokenId = row.dataset.token;
+            const entry   = parseFloat(row.dataset.entry);
+            const shares  = parseFloat(row.dataset.shares);
+            const current = prices[tokenId];
+            if (current === undefined) return;
+
+            const priceCell = row.querySelector('.price-cell');
+            const pnlCell   = row.querySelector('.pnl-cell');
+
+            if (priceCell) {
+                priceCell.textContent = current.toFixed(3);
+                priceCell.style.color = _priceColor(current, entry);
+            }
+
+            if (pnlCell && !isNaN(shares)) {
+                const pnl = (current - entry) * shares;
+                pnlCell.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(3);
+                pnlCell.style.color = pnl >= 0 ? 'var(--green-text)' : 'var(--red-text)';
+            }
+        });
+
+        const el = document.getElementById('price-updated-at');
+        if (el) el.textContent = 'Prices updated: ' + new Date().toLocaleTimeString();
+    } catch(e) {
+        console.warn('Price refresh failed:', e);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    refreshPrices();
+    setInterval(refreshPrices, 30000);
+});
+</script>
 {% endblock %}
