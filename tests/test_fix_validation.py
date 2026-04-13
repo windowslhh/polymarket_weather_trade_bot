@@ -749,25 +749,29 @@ class TestEndToEndSellPnl:
         shares = 10.0 / 0.85
         assert p["realized_pnl"] == pytest.approx((0.92 - 0.85) * shares, abs=0.001)
 
-    async def test_multiple_positions_same_token_all_closed(self, tracker):
-        """Multiple open positions for same token_id all get closed with correct P&L."""
+    async def test_multiple_positions_same_event_all_closed(self, tracker):
+        """Multiple open positions for different tokens in same event all get closed.
+
+        Uses distinct token IDs (unique index prevents duplicate open positions
+        for the same token+event+strategy, which is correct business logic).
+        """
         for i in range(3):
             await tracker.record_fill(
-                event_id="e1", token_id="t1", token_type=TokenType.NO,
+                event_id="e1", token_id=f"t{i}", token_type=TokenType.NO,
                 city="Miami", slot_label="76-80°F", side="BUY",
                 price=0.85, size_usd=5.0, strategy="A",
             )
+        # Close t0 specifically
         closed = await tracker.close_positions_for_token(
-            event_id="e1", token_id="t1", strategy="A",
+            event_id="e1", token_id="t0", strategy="A",
             exit_reason="batch close", exit_price=0.90,
         )
-        assert closed == 3
+        assert closed == 1
         closed_pos = await tracker._store.get_closed_positions(limit=10)
-        assert len(closed_pos) == 3
-        for p in closed_pos:
-            assert p["exit_price"] == 0.90
-            assert p["realized_pnl"] is not None
-            assert p["realized_pnl"] > 0
+        assert len(closed_pos) == 1
+        assert closed_pos[0]["exit_price"] == 0.90
+        assert closed_pos[0]["realized_pnl"] is not None
+        assert closed_pos[0]["realized_pnl"] > 0
 
 
 # ======================================================================

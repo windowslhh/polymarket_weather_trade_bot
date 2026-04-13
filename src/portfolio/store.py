@@ -119,6 +119,8 @@ class Store:
 
         # Migrate existing tables: add columns that may be missing
         await self._migrate_columns()
+        # Migrate missing indexes (best-effort; fails silently if duplicates exist)
+        await self._migrate_indexes()
 
         logger.info("Database initialized at %s", self._db_path)
 
@@ -144,6 +146,39 @@ class Store:
                     logger.info("Migration: added column '%s' to table '%s'", column, table)
             except Exception:
                 logger.exception("Migration failed for %s.%s", table, column)
+
+    async def _migrate_indexes(self) -> None:
+        """Create indexes that may be missing on older databases.
+
+        Uses IF NOT EXISTS so re-runs are safe.  Logs a warning (not error) if
+        a UNIQUE index cannot be created because existing rows violate it — the
+        bot can still run; deduplication just falls to application logic.
+        """
+        index_migrations = [
+            (
+                "idx_positions_no_dup",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_no_dup "
+                "ON positions(event_id, token_id, strategy) WHERE status = 'open'",
+                "deduplication index on open positions(event_id, token_id, strategy)",
+            ),
+        ]
+        async with self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ) as cursor:
+            existing = {row[0] async for row in cursor}
+
+        for idx_name, sql, description in index_migrations:
+            if idx_name not in existing:
+                try:
+                    await self.db.execute(sql)
+                    await self.db.commit()
+                    logger.info("Migration: created %s", description)
+                except Exception as exc:
+                    logger.warning(
+                        "Migration: could not create %s — %s. "
+                        "Duplicate-position guard is application-side only.",
+                        description, exc,
+                    )
 
     async def close(self) -> None:
         if self._db:

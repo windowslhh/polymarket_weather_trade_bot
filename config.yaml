@@ -25,6 +25,19 @@ strategy:
   day_ahead_ev_discount: 0.7
   # Only trade markets settling within N days (远期预报不准)
   max_days_ahead: 2
+  # Maximum number of open positions per event (across all slots)
+  max_positions_per_event: 4
+  # Auto-calibrate distance threshold from historical forecast error data
+  auto_calibrate_distance: true
+  calibration_confidence: 0.90
+  # Locked-win signals: buy NO on slots where daily max already exceeded upper bound
+  enable_locked_wins: true
+  locked_win_kelly_fraction: 1.0
+  max_locked_win_per_slot_usd: 10.0
+  # Hybrid exit: force-sell within N hours of settlement when distance is close
+  force_exit_hours: 1.0
+  # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
+  exit_cooldown_hours: 4.0
 
 scheduling:
   # How often to discover new markets (minutes)
