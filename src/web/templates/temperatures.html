@@ -61,7 +61,8 @@
         </div>
     </div>
     <div class="panel-body">
-        <div id="forecast-info" class="forecast-badges" style="margin-bottom:12px;"></div>
+        <div id="forecast-info" class="forecast-badges" style="margin-bottom:8px;"></div>
+        <div id="chart-date-label" style="font-size:11px;color:var(--text-dim);margin-bottom:8px;min-height:16px;"></div>
         <div class="chart-lg"><canvas id="tempChart"></canvas></div>
         <div class="refresh-note">Auto-refreshes every 60s &middot; METAR updates at :57 and :03 past each hour</div>
     </div>
@@ -128,13 +129,48 @@ let tempChart       = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Convert UTC ISO string → Beijing HH:MM for chart x-axis labels */
-function toBeijingHM(isoStr) {
+/**
+ * Convert UTC ISO string → HH:MM in the given IANA timezone.
+ * Falls back to UTC if tz is null/undefined.
+ */
+function toLocalHM(isoStr, tz) {
     try {
         const d = new Date(isoStr);
-        const bj = new Date(d.getTime() + 8 * 3600000);
-        return bj.getHours().toString().padStart(2,'0') + ':' + bj.getMinutes().toString().padStart(2,'0');
-    } catch(e) { return isoStr; }
+        return d.toLocaleTimeString('en-GB', {
+            timeZone: tz || 'UTC',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
+    } catch(e) {
+        // Fallback: manual UTC HH:MM
+        const d = new Date(isoStr);
+        return d.getUTCHours().toString().padStart(2,'0') + ':' + d.getUTCMinutes().toString().padStart(2,'0');
+    }
+}
+
+/**
+ * Return local date string (YYYY-MM-DD) for a city in its own timezone.
+ * Used to show which day's data is being displayed.
+ */
+function cityLocalDate(tz) {
+    try {
+        return new Date().toLocaleDateString('en-CA', { timeZone: tz || 'UTC' }); // en-CA → YYYY-MM-DD
+    } catch(e) { return null; }
+}
+
+/**
+ * Return a short timezone abbreviation label for the x-axis title,
+ * e.g. "MDT", "EDT", "PDT".
+ */
+function cityTzAbbr(tz) {
+    if (!tz) return 'UTC';
+    try {
+        // Extract abbreviated timezone name from a formatted date string
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date());
+        const tzPart = parts.find(p => p.type === 'timeZoneName');
+        return tzPart ? tzPart.value : 'local';
+    } catch(e) { return 'local'; }
 }
 
 /**
@@ -151,11 +187,21 @@ function computeRunningMax(obs) {
 
 // ── Chart building ────────────────────────────────────────────────────────────
 
+/**
+ * Build chart datasets and x-axis labels.
+ * Returns { datasets, labels, rawLabels, xAxisTitle, dateLabel }
+ *
+ * Single city:  labels = city local time (HH:MM), x-axis title = "Time (TZ)"
+ * All cities:   labels = UTC HH:MM (common axis), x-axis title = "Time (UTC)"
+ */
 function buildDatasets(selectedCity, showForecast, showRunMax) {
     const datasets = [];
     const allLabels = new Set();
+    let xAxisTitle = 'Time (UTC)';
+    let dateLabel = '';
 
     if (selectedCity === '__all__') {
+        // All cities: use UTC for the shared x-axis so all cities align correctly
         let colorIdx = 0;
         const sortedCities = Object.keys(observationData).sort();
         for (const city of sortedCities) {
@@ -175,7 +221,6 @@ function buildDatasets(selectedCity, showForecast, showRunMax) {
                 fill: false,
                 spanGaps: true,
             });
-            // Running max (thin, same color, dashed) in all-cities mode
             if (showRunMax) {
                 const runMaxSeries = computeRunningMax(obs);
                 datasets.push({
@@ -189,14 +234,19 @@ function buildDatasets(selectedCity, showForecast, showRunMax) {
                     stepped: 'before',
                     spanGaps: true,
                     showInLegend: false,
-                    // hide from tooltip to avoid clutter
                     tooltip: { enabled: false },
                 });
             }
             colorIdx++;
         }
+        xAxisTitle = 'Time (UTC)';
+        dateLabel = 'All cities — UTC date: ' + new Date().toISOString().slice(0, 10);
     } else {
-        // ── Single city mode ──────────────────────────────────────────────────
+        // Single city: convert all timestamps to the city's local timezone
+        const cityTz = cityTimezones[selectedCity] || null;
+        const tzAbbr = cityTzAbbr(cityTz);
+        const localDate = cityLocalDate(cityTz);
+
         const obs = observationData[selectedCity] || [];
         obs.forEach(o => allLabels.add(o[0]));
 
@@ -214,7 +264,7 @@ function buildDatasets(selectedCity, showForecast, showRunMax) {
             spanGaps: true,
         });
 
-        // 2. Running daily-max curve (step function) — the key signal for locked wins
+        // 2. Running daily-max curve (step function)
         if (showRunMax && obs.length > 0) {
             const runMaxSeries = computeRunningMax(obs);
             runMaxSeries.forEach(([ts]) => allLabels.add(ts));
@@ -227,7 +277,7 @@ function buildDatasets(selectedCity, showForecast, showRunMax) {
                 borderWidth: 2,
                 pointRadius: 0,
                 pointHoverRadius: 4,
-                stepped: 'before',   // step function — max only rises
+                stepped: 'before',
                 fill: false,
                 spanGaps: true,
             });
@@ -246,10 +296,20 @@ function buildDatasets(selectedCity, showForecast, showRunMax) {
                 fill: false,
             });
         }
+
+        xAxisTitle = 'Time (' + tzAbbr + ')';
+        dateLabel = selectedCity + ' local date: ' + (localDate || '—') +
+                    (cityTz ? ' (' + cityTz + ')' : '');
     }
 
-    const sortedLabels = Array.from(allLabels).sort();
-    return { datasets, labels: sortedLabels.map(toBeijingHM), rawLabels: sortedLabels };
+    // Build sorted label arrays.
+    // For single city: convert UTC timestamps → city local HH:MM.
+    // For all cities: convert UTC timestamps → UTC HH:MM.
+    const sortedRaw = Array.from(allLabels).sort();
+    const cityTz = (selectedCity !== '__all__') ? (cityTimezones[selectedCity] || null) : null;
+    const displayLabels = sortedRaw.map(ts => toLocalHM(ts, cityTz));  // null tz → UTC
+
+    return { datasets, labels: displayLabels, rawLabels: sortedRaw, xAxisTitle, dateLabel };
 }
 
 function updateForecastInfo(selectedCity) {
@@ -263,27 +323,36 @@ function updateForecastInfo(selectedCity) {
     el.innerHTML = html;
 }
 
+/** Map dataset points onto the fixed rawLabels index array (Chart.js requires aligned arrays). */
+function alignDatasets(datasets, rawLabels) {
+    for (const ds of datasets) {
+        const mapped = new Array(rawLabels.length).fill(null);
+        for (const pt of ds.data) {
+            const idx = rawLabels.indexOf(pt.x);
+            if (idx >= 0) mapped[idx] = pt.y;
+        }
+        ds.data = mapped;
+    }
+}
+
 function updateChart() {
     const selectedCity  = document.getElementById('city-select').value;
     const showForecast  = document.getElementById('show-forecast').checked;
     const showRunMax    = document.getElementById('show-runmax').checked;
-    const { datasets, labels, rawLabels } = buildDatasets(selectedCity, showForecast, showRunMax);
+    const { datasets, labels, rawLabels, xAxisTitle, dateLabel } = buildDatasets(selectedCity, showForecast, showRunMax);
 
     updateForecastInfo(selectedCity);
 
+    // Update date subtitle
+    const dateLabelEl = document.getElementById('chart-date-label');
+    if (dateLabelEl) dateLabelEl.textContent = dateLabel;
+
     if (tempChart) {
-        for (const ds of datasets) {
-            const mapped = new Array(rawLabels.length).fill(null);
-            for (const pt of ds.data) {
-                const idx = rawLabels.indexOf(pt.x);
-                if (idx >= 0) mapped[idx] = pt.y;
-            }
-            ds.data = mapped;
-        }
+        alignDatasets(datasets, rawLabels);
         tempChart.data.labels   = labels;
         tempChart.data.datasets = datasets;
-        // In single-city mode legend is still useful (obs / max / forecast)
         tempChart.options.plugins.legend.display = true;
+        tempChart.options.scales.x.title.text = xAxisTitle;
         tempChart.update();
     }
 }
@@ -293,16 +362,13 @@ function initChart() {
     const selectedCity  = document.getElementById('city-select').value;
     const showForecast  = document.getElementById('show-forecast').checked;
     const showRunMax    = document.getElementById('show-runmax').checked;
-    const { datasets, labels, rawLabels } = buildDatasets(selectedCity, showForecast, showRunMax);
+    const { datasets, labels, rawLabels, xAxisTitle, dateLabel } = buildDatasets(selectedCity, showForecast, showRunMax);
 
-    for (const ds of datasets) {
-        const mapped = new Array(rawLabels.length).fill(null);
-        for (const pt of ds.data) {
-            const idx = rawLabels.indexOf(pt.x);
-            if (idx >= 0) mapped[idx] = pt.y;
-        }
-        ds.data = mapped;
-    }
+    alignDatasets(datasets, rawLabels);
+
+    // Set initial date subtitle
+    const dateLabelEl = document.getElementById('chart-date-label');
+    if (dateLabelEl) dateLabelEl.textContent = dateLabel;
 
     tempChart = new Chart(ctx, {
         type: 'line',
@@ -326,7 +392,6 @@ function initChart() {
                     callbacks: {
                         label: function(ctx) {
                             if (ctx.parsed.y === null) return null;
-                            // Suppress per-city max curves in all-city tooltip
                             if (ctx.dataset.label && ctx.dataset.label.endsWith(' Max') && selectedCity === '__all__') return null;
                             return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + '°F';
                         }
@@ -335,7 +400,7 @@ function initChart() {
             },
             scales: {
                 x: {
-                    title: { display: true, text: 'Time (Beijing)', color: '#5e6278', font: { size: 11 } },
+                    title: { display: true, text: xAxisTitle, color: '#5e6278', font: { size: 11 } },
                     ticks: { color: '#5e6278', font: { size: 10 }, maxRotation: 45 },
                     grid: { color: 'rgba(42,45,58,0.5)' },
                 },
