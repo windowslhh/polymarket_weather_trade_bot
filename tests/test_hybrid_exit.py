@@ -182,17 +182,22 @@ class TestLayer2EVBasedExit:
         # EV should be negative (that's why we're exiting)
         assert sigs[0].expected_value < 0
 
-    def test_without_forecast_falls_back_to_sell(self):
-        """Without forecast data, close distance → sell (conservative fallback)."""
+    def test_without_forecast_holds(self):
+        """Without forecast data, cannot evaluate EV → hold (do not sell blind).
+
+        Fixed: previously generated a SELL signal when forecast=None, treating
+        "unknown EV" the same as "negative EV".  The correct behaviour is to
+        hold until a forecast is available — selling without EV data risks
+        exiting a winning position unnecessarily.
+        """
         config = StrategyConfig(no_distance_threshold_f=10)
         held = _slot(76, 80, price_no=0.90)
         event = _event([held])
-        # No forecast → can't compute EV → sell by default
         sigs = evaluate_exit_signals(
             event, _obs(77.0), 77.0, [held], config,
             forecast=None,
         )
-        assert len(sigs) == 1
+        assert len(sigs) == 0, "Should not SELL without forecast — hold is safer"
 
     def test_with_empirical_dist(self):
         """EV computation should use empirical distribution when provided."""
@@ -322,18 +327,20 @@ class TestBackwardCompatibility:
     """Old-style calls without new params still work."""
 
     def test_old_style_call_no_new_params(self):
-        """Call without forecast/error_dist/hours_to_settlement → old behavior."""
+        """Call without forecast/error_dist/hours_to_settlement → holds (no blind sell).
+
+        After the forecast=None fix: missing forecast → hold, not sell.
+        The old "backward compat" test assumed the pre-fix behaviour (blind sell).
+        Updated to match the corrected behaviour.
+        """
         config = StrategyConfig(no_distance_threshold_f=8)
-        # exit_distance = 8 * 0.25 = 2.0
         held = _slot(80, 84)
         event = _event([held])
-        # daily_max=81, distance=0 < 2.0 → should exit
         sigs = evaluate_exit_signals(
             event, _obs(81.0), 81.0, [held], config,
         )
-        # Without forecast → falls back to sell on close distance
-        assert len(sigs) == 1
-        assert sigs[0].side == Side.SELL
+        # Without forecast we cannot evaluate EV → hold (don't sell blind)
+        assert len(sigs) == 0
 
     def test_old_guards_still_work(self):
         """None observation/daily_max → empty, days_ahead>0 → empty."""
@@ -346,22 +353,29 @@ class TestBackwardCompatibility:
         assert evaluate_exit_signals(event, _obs(), 81.0, [held], config, days_ahead=1) == []
 
     def test_trend_adjustment_still_works(self):
-        """Trend-based exit distance adjustment preserved."""
+        """Trend-based exit distance adjustment preserved.
+
+        Must supply a forecast so Layer 2 EV can be evaluated (after the
+        forecast=None fix, no forecast → hold unconditionally).
+        The forecast high is set far from the slot (60°F) so EV is very
+        negative and the SELL fires once the distance threshold is crossed.
+        """
         config = StrategyConfig(no_distance_threshold_f=10)
         # New multipliers: default=0.25→2.5, STABLE=0.3→3.0
         held = _slot(80, 84)
         event = _event([held])
-        # daily_max=78, distance=2
-        # STABLE: exit_distance=3.0 → 2 < 3 → exit
-        # default: exit_distance=2.5 → 2 < 2.5 → exit
+        # Forecast high=60°F → slot [80,84] is far above → win_prob≈1 → EV positive?
+        # Actually we want EV negative so the exit fires. Use high=82°F (inside slot).
+        fc = _forecast(high=82.0)
         # daily_max=77.5, distance=2.5
-        # default: 2.5 < 2.5 is False → no exit; STABLE: 2.5 < 3 → exit
+        # default: 2.5 < 2.5 is False → no exit; STABLE: 2.5 < 3 → EV check → exit
         sig_stable = evaluate_exit_signals(
             event, _obs(77.5), 77.5, [held], config,
-            trend=TrendState.STABLE,
+            trend=TrendState.STABLE, forecast=fc,
         )
         sig_default = evaluate_exit_signals(
             event, _obs(77.5), 77.5, [held], config,
+            forecast=fc,
         )
         assert len(sig_stable) == 1
         assert len(sig_default) == 0

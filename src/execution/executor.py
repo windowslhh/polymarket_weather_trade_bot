@@ -39,8 +39,22 @@ class Executor:
         if signal.side == Side.BUY and size_usd <= 0:
             return
 
-        # For SELL signals, use current price; for BUY, use the signal price
-        shares = size_usd / price if price > 0 else 0
+        if signal.side == Side.SELL:
+            # SELL signals carry suggested_size_usd=0 (sizing is unknown at signal time).
+            # Look up the actual held shares so we sell the real position, not 0 shares.
+            shares = await self._portfolio.get_total_shares_for_token(
+                signal.event.event_id, signal.token_id, signal.strategy,
+            )
+            if shares <= 0:
+                logger.warning(
+                    "SELL signal for %s but no open shares found (already closed?), skipping",
+                    signal.slot.outcome_label,
+                )
+                return
+            # size_usd for logging: approximate current market value
+            size_usd = shares * price
+        else:
+            shares = size_usd / price if price > 0 else 0
 
         logger.info(
             "Executing: %s %s %s @ %.4f ($%.2f, ~%.2f shares) EV=%.4f city=%s",

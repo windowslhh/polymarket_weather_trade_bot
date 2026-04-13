@@ -320,6 +320,9 @@ class TestSellFlowPnl:
         )
         mock_portfolio = MagicMock(spec=PortfolioTracker)
         mock_portfolio.close_positions_for_token = AsyncMock(return_value=1)
+        # Executor now looks up actual held shares for SELL orders (EX-01 fix).
+        # 5.0 USD / 0.90 price ≈ 5.56 shares
+        mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=5.56)
 
         executor = Executor(mock_clob, mock_portfolio)
         signal = TradeSignal(

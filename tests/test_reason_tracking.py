@@ -341,6 +341,8 @@ class TestExecutorReasonThreading:
         mock_portfolio = MagicMock()
         mock_portfolio.record_fill = AsyncMock(return_value=1)
         mock_portfolio.close_positions_for_token = AsyncMock(return_value=1)
+        # Executor now looks up held shares for SELL orders (EX-01 fix)
+        mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=5.0)
         mock_clob.place_limit_order = AsyncMock(return_value=MagicMock(success=True, order_id="ord_1"))
         executor = Executor(mock_clob, mock_portfolio)
         return executor, mock_portfolio
@@ -551,13 +553,17 @@ class TestReasonFailureBranches:
         mock_clob = MagicMock()
         mock_portfolio = MagicMock()
         mock_portfolio.close_positions_for_token = AsyncMock(return_value=0)  # no matches
+        # Executor now looks up held shares (EX-01 fix); return 0 → skip with warning
+        mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=0.0)
         mock_clob.place_limit_order = AsyncMock(return_value=MagicMock(success=True, order_id="ord_1"))
         executor = Executor(mock_clob, mock_portfolio)
 
         sig = _make_signal(side=Side.SELL, reason="[A] EXIT: approaching slot")
         await executor.execute_signals([sig])
 
-        mock_portfolio.close_positions_for_token.assert_called_once()
+        # With EX-01 fix: get_total_shares returns 0 → executor skips early,
+        # so close_positions_for_token is NOT called (no shares to sell)
+        mock_portfolio.close_positions_for_token.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_order_failure_doesnt_persist_reason(self):

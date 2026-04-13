@@ -505,6 +505,16 @@ def evaluate_exit_signals(
         if distance >= exit_distance:
             continue  # still far enough, no exit needed
 
+        # Without a forecast we cannot compute EV, so we cannot tell whether
+        # the position is genuinely threatened or just near a slot boundary.
+        # Holding is safer than selling blind — skip until forecast is available.
+        if forecast is None:
+            logger.debug(
+                "EXIT skip (no forecast): %s slot %s — cannot evaluate EV, holding",
+                event.city, slot.outcome_label,
+            )
+            continue
+
         # ── Layer 2: EV-based exit ──
         # Re-compute current EV using the more conservative reference
         # (the closer of daily_max and forecast) for distance/probability.
