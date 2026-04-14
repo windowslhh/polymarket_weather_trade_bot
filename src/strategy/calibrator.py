@@ -42,6 +42,21 @@ _STD_LIMIT_F: float = 2.5          # std of forecast errors below this → accur
 _K_LOW: float = 1.2   # accurate cities — tighter threshold, more trade opportunities
 _K_HIGH: float = 2.0  # uncertain cities — wider threshold, higher safety margin
 
+# ── Ensemble spread adjustment ──────────────────────────────────────────────
+# Per-city average ensemble spread from 93-day backtest (2026-01-12 to 2026-04-14).
+# Only cities with Pearson r >= 0.4 between spread and forecast error are included.
+# Cities not in this dict are unaffected by spread adjustment.
+_AVG_SPREAD: dict[str, float] = {
+    "Denver": 1.56,       # r=0.824
+    "Dallas": 1.04,       # r=0.744
+    "Atlanta": 1.05,      # r=0.721
+    "Los Angeles": 2.16,  # r=0.570
+    "Chicago": 1.33,      # r=0.525
+}
+# Spread ratio clamp bounds — prevent extreme threshold swings
+_SPREAD_RATIO_MIN: float = 0.5
+_SPREAD_RATIO_MAX: float = 2.0
+
 
 def calibrate_distance_threshold(
     error_dist: ForecastErrorDistribution,
@@ -91,6 +106,9 @@ def calibrate_distance_threshold(
 
 def calibrate_distance_dynamic(
     error_dist: ForecastErrorDistribution,
+    *,
+    ensemble_spread_f: float | None = None,
+    enable_spread_adjustment: bool = True,
 ) -> float:
     """Compute distance threshold using the k×std formula.
 
@@ -99,6 +117,12 @@ def calibrate_distance_dynamic(
 
         accurate  (|mean| < 1.5°F AND std < 2.5°F): threshold = K_LOW  × std = 1.2 × std
         uncertain (|mean| ≥ 1.5°F  OR  std ≥ 2.5°F): threshold = K_HIGH × std = 2.0 × std
+
+    When ``enable_spread_adjustment`` is True **and** the city has a known
+    average spread (from backtest), the threshold is further scaled by
+    ``clamp(current_spread / avg_spread, 0.5, 2.0)``.  This widens the
+    threshold when ensemble models disagree (high spread → larger error
+    expected) and tightens it when they agree (low spread → smaller error).
 
     Both are clamped to [MIN_THRESHOLD_F, MAX_THRESHOLD_F].
     Returns DEFAULT_THRESHOLD_F if insufficient data (< MIN_CALIBRATION_SAMPLES).
@@ -132,4 +156,25 @@ def calibrate_distance_dynamic(
         "accurate" if is_accurate else "uncertain",
         error_dist._count,
     )
+
+    # Spread adjustment: scale threshold by (current_spread / avg_spread)
+    avg_spread = _AVG_SPREAD.get(error_dist.city)
+    if (
+        enable_spread_adjustment
+        and ensemble_spread_f is not None
+        and avg_spread is not None
+    ):
+        ratio = ensemble_spread_f / avg_spread
+        ratio_clamped = max(_SPREAD_RATIO_MIN, min(_SPREAD_RATIO_MAX, ratio))
+        pre_adjust = threshold
+        threshold = float(
+            max(MIN_THRESHOLD_F, min(MAX_THRESHOLD_F, threshold * ratio_clamped))
+        )
+        logger.info(
+            "Spread adjustment for %s: ratio=%.2f (spread=%.2f/avg=%.2f), "
+            "threshold %.1f→%.1f°F",
+            error_dist.city, ratio_clamped, ensemble_spread_f, avg_spread,
+            pre_adjust, threshold,
+        )
+
     return threshold

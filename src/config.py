@@ -53,6 +53,8 @@ class StrategyConfig:
     force_exit_hours: float = 1.0
     # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
     exit_cooldown_hours: float = 4.0
+    # Dynamic threshold: scale distance by real-time ensemble spread ratio
+    enable_spread_adjustment: bool = True
 
 
 def get_strategy_variants() -> dict[str, dict]:

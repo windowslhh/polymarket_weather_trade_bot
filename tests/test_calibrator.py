@@ -13,9 +13,12 @@ from src.strategy.calibrator import (
     MAX_THRESHOLD_F,
     MIN_CALIBRATION_SAMPLES,
     MIN_THRESHOLD_F,
+    _AVG_SPREAD,
     _K_HIGH,
     _K_LOW,
     _MEAN_BIAS_LIMIT_F,
+    _SPREAD_RATIO_MAX,
+    _SPREAD_RATIO_MIN,
     _STD_LIMIT_F,
     calibrate_distance_dynamic,
     calibrate_distance_threshold,
@@ -263,6 +266,16 @@ class TestConfigIntegration:
         cfg = StrategyConfig(auto_calibrate_distance=False, calibration_confidence=0.75)
         assert cfg.auto_calibrate_distance is False
         assert cfg.calibration_confidence == 0.75
+
+    def test_spread_adjustment_default_on(self):
+        from src.config import StrategyConfig
+        cfg = StrategyConfig()
+        assert cfg.enable_spread_adjustment is True
+
+    def test_spread_adjustment_override(self):
+        from src.config import StrategyConfig
+        cfg = StrategyConfig(enable_spread_adjustment=False)
+        assert cfg.enable_spread_adjustment is False
 
     def test_dataclass_replace_works(self):
         """Verify replace() with new fields works (used in rebalancer)."""
@@ -571,3 +584,104 @@ class TestCalibratePerformance:
         elapsed = time.monotonic() - t0
         assert elapsed < 0.1, f"5000 samples took {elapsed:.3f}s"
         assert MIN_THRESHOLD_F <= threshold <= MAX_THRESHOLD_F
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Ensemble spread adjustment
+# ──────────────────────────────────────────────────────────────────────
+
+class TestSpreadAdjustment:
+    """Tests for the dynamic ensemble-spread scaling in calibrate_distance_dynamic."""
+
+    def _denver_dist(self) -> ForecastErrorDistribution:
+        """Denver-like dist: mean=+2.04, std=3.59 → uncertain → base=2.0×3.59=7.18°F."""
+        errors = ([2.04 + 3.59] * 365) + ([2.04 - 3.59] * 366)
+        return _make_dist(errors, "Denver")
+
+    def _dallas_dist(self) -> ForecastErrorDistribution:
+        """Dallas-like dist: mean=+0.8, std=1.86 → accurate → base=1.2×1.86=2.23 → clamped 3.0°F."""
+        errors = ([0.8 + 1.86] * 365) + ([0.8 - 1.86] * 366)
+        return _make_dist(errors, "Dallas")
+
+    def test_high_spread_widens_threshold(self):
+        """When spread > avg_spread, threshold increases (ratio > 1)."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        # spread=3.12 / avg=1.56 → ratio=2.0 → threshold doubles
+        adjusted = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=3.12, enable_spread_adjustment=True,
+        )
+        assert adjusted > base
+
+    def test_low_spread_tightens_threshold(self):
+        """When spread < avg_spread, threshold decreases (ratio < 1)."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        # spread=0.78 / avg=1.56 → ratio=0.5 → threshold halves
+        adjusted = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=0.78, enable_spread_adjustment=True,
+        )
+        assert adjusted < base
+
+    def test_ratio_clamped_high(self):
+        """Spread ratio above 2.0 is clamped to 2.0."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        # spread=10.0 / avg=1.56 → raw ratio=6.41 → clamped to 2.0
+        adj = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=10.0, enable_spread_adjustment=True,
+        )
+        expected = min(MAX_THRESHOLD_F, base * _SPREAD_RATIO_MAX)
+        assert abs(adj - expected) < 1e-9
+
+    def test_ratio_clamped_low(self):
+        """Spread ratio below 0.5 is clamped to 0.5."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        # spread=0.01 / avg=1.56 → raw ratio=0.006 → clamped to 0.5
+        adj = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=0.01, enable_spread_adjustment=True,
+        )
+        expected = max(MIN_THRESHOLD_F, base * _SPREAD_RATIO_MIN)
+        assert abs(adj - expected) < 1e-9
+
+    def test_unknown_city_no_adjustment(self):
+        """City not in _AVG_SPREAD → spread adjustment has no effect."""
+        dist = _make_dist(([3.0] * 365) + ([-3.0] * 366), "UnknownCity")
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        adjusted = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=5.0, enable_spread_adjustment=True,
+        )
+        assert adjusted == base
+
+    def test_disabled_no_adjustment(self):
+        """enable_spread_adjustment=False → no adjustment even for known city."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        adjusted = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=3.0, enable_spread_adjustment=False,
+        )
+        assert adjusted == base
+
+    def test_none_spread_no_adjustment(self):
+        """ensemble_spread_f=None → no adjustment."""
+        dist = self._denver_dist()
+        base = calibrate_distance_dynamic(dist, enable_spread_adjustment=False)
+        adjusted = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=None, enable_spread_adjustment=True,
+        )
+        assert adjusted == base
+
+    def test_adjusted_threshold_respects_clamp(self):
+        """After spread adjustment, result is still clamped to [MIN, MAX]."""
+        # Dallas: base threshold = 3.0 (floor). ratio=0.5 → 1.5 → clamped back to 3.0
+        dist = self._dallas_dist()
+        adj = calibrate_distance_dynamic(
+            dist, ensemble_spread_f=0.52, enable_spread_adjustment=True,
+        )
+        assert adj >= MIN_THRESHOLD_F
+        assert adj <= MAX_THRESHOLD_F
+
+    def test_avg_spread_dict_has_expected_cities(self):
+        """Sanity check: _AVG_SPREAD contains the 5 cities from backtest."""
+        assert set(_AVG_SPREAD.keys()) == {"Denver", "Dallas", "Atlanta", "Los Angeles", "Chicago"}

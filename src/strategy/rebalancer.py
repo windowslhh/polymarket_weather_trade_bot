@@ -533,7 +533,12 @@ class Rebalancer:
 
                     # Auto-calibrate distance if enabled (k×std dynamic formula)
                     if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                        cal_dist = calibrate_distance_dynamic(error_dist)
+                        _fc = self._cached_forecasts.get(city)
+                        cal_dist = calibrate_distance_dynamic(
+                            error_dist,
+                            ensemble_spread_f=_fc.ensemble_spread_f if _fc else None,
+                            enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
+                        )
                         strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
 
                     # Build a lightweight event object for signal evaluation
@@ -819,7 +824,11 @@ class Rebalancer:
             # Compute calibrated distance threshold for dashboard display (k×std formula)
             cal_threshold = None
             if self._config.strategy.auto_calibrate_distance and error_dist is not None:
-                cal_threshold = round(calibrate_distance_dynamic(error_dist), 1)
+                cal_threshold = round(calibrate_distance_dynamic(
+                    error_dist,
+                    ensemble_spread_f=forecast.ensemble_spread_f if forecast else None,
+                    enable_spread_adjustment=self._config.strategy.enable_spread_adjustment,
+                ), 1)
             self._last_markets.append({
                 "city": event.city,
                 "market_date": event.market_date.isoformat(),
@@ -831,6 +840,8 @@ class Rebalancer:
                 "volume": event.volume,
                 "hours_to_settle": round(hours_to_settle, 1) if hours_to_settle else None,
                 "calibrated_threshold_f": cal_threshold,
+                "forecast_bias": round(error_dist.mean, 2) if error_dist is not None else None,
+                "ensemble_spread": forecast.ensemble_spread_f,
                 "slots": market_slots,
             })
 
@@ -848,6 +859,7 @@ class Rebalancer:
                         ev=slot_data["ev"] or 0,
                         distance_f=slot_data["distance"],
                         trend_state=trend_state.value,
+                        ensemble_spread_f=forecast.ensemble_spread_f,
                     )
                 except Exception:
                     logger.debug("Failed to insert edge snapshot for %s %s", event.city, slot_data["label"])
@@ -882,7 +894,11 @@ class Rebalancer:
 
                 # Auto-calibrate distance threshold from historical error data (k×std formula)
                 if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                    cal_dist = calibrate_distance_dynamic(error_dist)
+                    cal_dist = calibrate_distance_dynamic(
+                        error_dist,
+                        ensemble_spread_f=forecast.ensemble_spread_f if forecast else None,
+                        enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
+                    )
                     strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
 
                 # Build current prices map from refreshed event slot data

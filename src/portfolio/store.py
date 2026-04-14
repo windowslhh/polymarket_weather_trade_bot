@@ -140,6 +140,7 @@ class Store:
             ("positions", "exit_price", "ALTER TABLE positions ADD COLUMN exit_price REAL"),
             ("positions", "realized_pnl", "ALTER TABLE positions ADD COLUMN realized_pnl REAL"),
             ("decision_log", "strategy", "ALTER TABLE decision_log ADD COLUMN strategy TEXT DEFAULT ''"),
+            ("edge_history", "ensemble_spread_f", "ALTER TABLE edge_history ADD COLUMN ensemble_spread_f REAL"),
         ]
         for table, column, sql in migrations:
             try:
@@ -343,13 +344,16 @@ class Store:
         self, cycle_at: str, city: str, market_date: str, slot_label: str,
         forecast_high_f: float, price_yes: float, price_no: float,
         win_prob: float, ev: float, distance_f: float, trend_state: str,
+        ensemble_spread_f: float | None = None,
     ) -> None:
         await self.db.execute(
             """INSERT INTO edge_history (cycle_at, city, market_date, slot_label,
-               forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
+               ensemble_spread_f)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cycle_at, city, market_date, slot_label,
-             forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state),
+             forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
+             ensemble_spread_f),
         )
 
     async def flush_edge_batch(self) -> None:

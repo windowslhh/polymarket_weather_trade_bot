@@ -1,0 +1,389 @@
+[
+  {
+    "city": "Denver",
+    "aligned_days": 93,
+    "avg_spread": 1.56,
+    "hist_std": 2.34,
+    "pearson_r": 0.824,
+    "spearman_r": 0.7487,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          1.16
+        ],
+        "mean_abs_error": 1.12,
+        "median_abs_error": 1.0,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          1.19,
+          1.77
+        ],
+        "mean_abs_error": 1.86,
+        "median_abs_error": 2.0,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.78,
+          5.74
+        ],
+        "mean_abs_error": 4.15,
+        "median_abs_error": 3.7,
+        "p_large_error": 0.226
+      }
+    },
+    "fixed_threshold": 4.7,
+    "false_alarm_fixed": 0.086,
+    "false_alarm_dynamic": 0.0
+  },
+  {
+    "city": "Miami",
+    "aligned_days": 93,
+    "avg_spread": 1.27,
+    "hist_std": 1.3,
+    "pearson_r": 0.1121,
+    "spearman_r": 0.1484,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.99
+        ],
+        "mean_abs_error": 0.89,
+        "median_abs_error": 0.8,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          1.0,
+          1.44
+        ],
+        "mean_abs_error": 1.1,
+        "median_abs_error": 0.8,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.45,
+          2.79
+        ],
+        "mean_abs_error": 1.24,
+        "median_abs_error": 1.2,
+        "p_large_error": 0.0
+      }
+    },
+    "fixed_threshold": 3.0,
+    "false_alarm_fixed": 0.022,
+    "false_alarm_dynamic": 0.011
+  },
+  {
+    "city": "Chicago",
+    "aligned_days": 93,
+    "avg_spread": 1.33,
+    "hist_std": 2.02,
+    "pearson_r": 0.5247,
+    "spearman_r": 0.3948,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.78
+        ],
+        "mean_abs_error": 0.81,
+        "median_abs_error": 0.6,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          0.79,
+          1.52
+        ],
+        "mean_abs_error": 1.31,
+        "median_abs_error": 1.2,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.55,
+          3.81
+        ],
+        "mean_abs_error": 2.24,
+        "median_abs_error": 2.2,
+        "p_large_error": 0.065
+      }
+    },
+    "fixed_threshold": 4.0,
+    "false_alarm_fixed": 0.054,
+    "false_alarm_dynamic": 0.0
+  },
+  {
+    "city": "Los Angeles",
+    "aligned_days": 93,
+    "avg_spread": 2.16,
+    "hist_std": 3.42,
+    "pearson_r": 0.5703,
+    "spearman_r": 0.5875,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          1.43
+        ],
+        "mean_abs_error": 1.28,
+        "median_abs_error": 0.8,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          1.44,
+          2.56
+        ],
+        "mean_abs_error": 2.92,
+        "median_abs_error": 2.9,
+        "p_large_error": 0.032
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          2.65,
+          5.12
+        ],
+        "mean_abs_error": 4.3,
+        "median_abs_error": 4.1,
+        "p_large_error": 0.387
+      }
+    },
+    "fixed_threshold": 6.8,
+    "false_alarm_fixed": 0.075,
+    "false_alarm_dynamic": 0.0
+  },
+  {
+    "city": "Seattle",
+    "aligned_days": 93,
+    "avg_spread": 0.85,
+    "hist_std": 1.76,
+    "pearson_r": 0.3645,
+    "spearman_r": 0.3456,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.5
+        ],
+        "mean_abs_error": 0.97,
+        "median_abs_error": 0.8,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          0.52,
+          0.97
+        ],
+        "mean_abs_error": 1.52,
+        "median_abs_error": 1.4,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.02,
+          2.05
+        ],
+        "mean_abs_error": 1.77,
+        "median_abs_error": 1.7,
+        "p_large_error": 0.0
+      }
+    },
+    "fixed_threshold": 3.5,
+    "false_alarm_fixed": 0.043,
+    "false_alarm_dynamic": 0.011
+  },
+  {
+    "city": "Dallas",
+    "aligned_days": 93,
+    "avg_spread": 1.04,
+    "hist_std": 1.86,
+    "pearson_r": 0.7444,
+    "spearman_r": 0.7157,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.74
+        ],
+        "mean_abs_error": 0.9,
+        "median_abs_error": 0.5,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          0.75,
+          1.13
+        ],
+        "mean_abs_error": 1.25,
+        "median_abs_error": 1.0,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.14,
+          2.5
+        ],
+        "mean_abs_error": 3.24,
+        "median_abs_error": 3.4,
+        "p_large_error": 0.065
+      }
+    },
+    "fixed_threshold": 3.7,
+    "false_alarm_fixed": 0.151,
+    "false_alarm_dynamic": 0.011
+  },
+  {
+    "city": "San Francisco",
+    "aligned_days": 93,
+    "avg_spread": 3.9,
+    "hist_std": 2.33,
+    "pearson_r": 0.3148,
+    "spearman_r": 0.3984,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          1.79
+        ],
+        "mean_abs_error": 0.93,
+        "median_abs_error": 0.8,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          1.81,
+          4.27
+        ],
+        "mean_abs_error": 2.09,
+        "median_abs_error": 1.8,
+        "p_large_error": 0.065
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          4.34,
+          12.64
+        ],
+        "mean_abs_error": 2.82,
+        "median_abs_error": 2.3,
+        "p_large_error": 0.161
+      }
+    },
+    "fixed_threshold": 4.7,
+    "false_alarm_fixed": 0.086,
+    "false_alarm_dynamic": 0.097
+  },
+  {
+    "city": "Atlanta",
+    "aligned_days": 93,
+    "avg_spread": 1.05,
+    "hist_std": 1.73,
+    "pearson_r": 0.7214,
+    "spearman_r": 0.6712,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.85
+        ],
+        "mean_abs_error": 0.75,
+        "median_abs_error": 0.7,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          0.87,
+          1.19
+        ],
+        "mean_abs_error": 1.77,
+        "median_abs_error": 1.7,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.19,
+          2.31
+        ],
+        "mean_abs_error": 2.75,
+        "median_abs_error": 2.9,
+        "p_large_error": 0.032
+      }
+    },
+    "fixed_threshold": 3.5,
+    "false_alarm_fixed": 0.108,
+    "false_alarm_dynamic": 0.011
+  },
+  {
+    "city": "Houston",
+    "aligned_days": 93,
+    "avg_spread": 1.18,
+    "hist_std": 1.78,
+    "pearson_r": 0.4515,
+    "spearman_r": 0.4359,
+    "group_stats": {
+      "LOW": {
+        "n": 31,
+        "spread_range": [
+          0.5,
+          0.87
+        ],
+        "mean_abs_error": 1.16,
+        "median_abs_error": 1.0,
+        "p_large_error": 0.0
+      },
+      "MID": {
+        "n": 31,
+        "spread_range": [
+          0.91,
+          1.36
+        ],
+        "mean_abs_error": 1.89,
+        "median_abs_error": 1.7,
+        "p_large_error": 0.0
+      },
+      "HIGH": {
+        "n": 31,
+        "spread_range": [
+          1.36,
+          2.54
+        ],
+        "mean_abs_error": 2.63,
+        "median_abs_error": 2.6,
+        "p_large_error": 0.097
+      }
+    },
+    "fixed_threshold": 3.6,
+    "false_alarm_fixed": 0.14,
+    "false_alarm_dynamic": 0.075
+  }
+]

@@ -13,6 +13,12 @@
         </span>
         {% if event.forecast_high %}
         <span class="td-mono" style="font-size:12px;color:var(--accent-light);margin-right:8px;">{{ "%.1f"|format(event.forecast_high) }}°F ±{{ "%.1f"|format(event.confidence) if event.confidence else '?' }}°F</span>
+        {% if event.forecast_bias is not none %}
+        <span class="td-mono" style="font-size:11px;color:var(--text-muted);margin-right:8px;">bias {{ "%+.1f"|format(event.forecast_bias) }}°F</span>
+        {% endif %}
+        {% if event.calibrated_threshold_f is not none %}
+        <span class="td-mono" style="font-size:11px;color:var(--text-dim);margin-right:8px;">thr {{ "%.1f"|format(event.calibrated_threshold_f) }}°F</span>
+        {% endif %}
         {% endif %}
         {% if event.trend and event.trend != 'STABLE' %}
         <span class="tag tag-{{ event.trend|lower|replace('_','-') }}" style="margin-right:8px;">{{ event.trend }}</span>
