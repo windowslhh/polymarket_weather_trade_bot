@@ -821,9 +821,13 @@ class Rebalancer:
                     "ev": ev,
                     "is_forecast_slot": distance < 3,
                 })
-            # Compute calibrated distance threshold for dashboard display (k×std formula)
+            # Compute calibrated distance thresholds for dashboard display
             cal_threshold = None
+            base_threshold = None
             if self._config.strategy.auto_calibrate_distance and error_dist is not None:
+                base_threshold = round(calibrate_distance_dynamic(
+                    error_dist, enable_spread_adjustment=False,
+                ), 1)
                 cal_threshold = round(calibrate_distance_dynamic(
                     error_dist,
                     ensemble_spread_f=forecast.ensemble_spread_f if forecast else None,
@@ -840,6 +844,7 @@ class Rebalancer:
                 "volume": event.volume,
                 "hours_to_settle": round(hours_to_settle, 1) if hours_to_settle else None,
                 "calibrated_threshold_f": cal_threshold,
+                "base_threshold_f": base_threshold,
                 "forecast_bias": round(error_dist.mean, 2) if error_dist is not None else None,
                 "ensemble_spread": forecast.ensemble_spread_f,
                 "slots": market_slots,

@@ -17,7 +17,7 @@
         <span class="td-mono" style="font-size:11px;color:var(--text-muted);margin-right:8px;">bias {{ "%+.1f"|format(event.forecast_bias) }}°F</span>
         {% endif %}
         {% if event.calibrated_threshold_f is not none %}
-        <span class="td-mono" style="font-size:11px;color:var(--text-dim);margin-right:8px;">thr {{ "%.1f"|format(event.calibrated_threshold_f) }}°F</span>
+        <span class="td-mono" style="font-size:11px;color:var(--text-dim);margin-right:8px;">thr {% if event.base_threshold_f is not none and event.base_threshold_f != event.calibrated_threshold_f %}<span style="text-decoration:line-through;opacity:0.5;">{{ "%.1f"|format(event.base_threshold_f) }}</span>→{% endif %}{{ "%.1f"|format(event.calibrated_threshold_f) }}°F</span>
         {% endif %}
         {% endif %}
         {% if event.trend and event.trend != 'STABLE' %}
