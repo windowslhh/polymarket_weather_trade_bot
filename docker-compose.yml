@@ -4,7 +4,7 @@ services:
     container_name: weather-bot
     restart: unless-stopped
     ports:
-      - "5001:5001"
+      - "127.0.0.1:5001:5001"
     volumes:
       - ./data:/app/data          # Persist SQLite DB + cache
       - ./.env:/app/.env:ro       # Inject secrets
