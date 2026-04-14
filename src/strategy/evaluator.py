@@ -210,6 +210,19 @@ def evaluate_no_signals(
         if distance < config.no_distance_threshold_f:
             continue
 
+        # Same-day guard: if the observed daily_max has already reached or
+        # entered the slot's lower boundary, NO is almost certainly a loser.
+        # (Temperature in [lower, upper] → YES wins; temperature above upper
+        # is the locked-win case, handled by evaluate_locked_win_signals.)
+        # Guard applies to both range slots [L,U] and "≥X°F" open-upper slots.
+        if (
+            days_ahead == 0
+            and daily_max_f is not None
+            and slot.temp_lower_f is not None
+            and wu_round(daily_max_f) >= int(slot.temp_lower_f)
+        ):
+            continue
+
         if slot.price_no <= 0 or slot.price_no >= 1:
             continue
 
@@ -604,7 +617,7 @@ def evaluate_exit_signals(
                 # Positive EV → hold (unless Layer 3 overrides)
                 # ── Layer 3: Pre-settlement force exit ──
                 if (hours_to_settlement is not None
-                        and hours_to_settlement <= config.force_exit_hours
+                        and 0 <= hours_to_settlement <= config.force_exit_hours
                         and distance < exit_distance):
                     signals.append(TradeSignal(
                         token_type=TokenType.NO,

@@ -29,8 +29,9 @@ async def get_latest_metar(
     """
     params = {"ids": icao, "format": "json"}
 
+    _TIMEOUT_S = 15
     should_close = client is None
-    client = client or httpx.AsyncClient(timeout=15)
+    client = client or httpx.AsyncClient(timeout=_TIMEOUT_S)
     try:
         resp = await client.get(METAR_URL, params=params)
         resp.raise_for_status()
@@ -58,6 +59,12 @@ async def get_latest_metar(
             observation_time=obs_time,
             raw_metar=latest.get("rawOb", ""),
         )
+    except httpx.TimeoutException:
+        logger.warning(
+            "METAR fetch timed out for %s (timeout=%ds) — will retry next cycle",
+            icao, _TIMEOUT_S,
+        )
+        return None
     except Exception:
         logger.exception("Failed to fetch METAR for %s", icao)
         return None
@@ -78,8 +85,9 @@ async def get_today_metar_history(
     """
     params = {"ids": icao, "format": "json", "hours": 24}
 
+    _TIMEOUT_S = 15
     should_close = client is None
-    client = client or httpx.AsyncClient(timeout=15)
+    client = client or httpx.AsyncClient(timeout=_TIMEOUT_S)
     try:
         resp = await client.get(METAR_URL, params=params)
         resp.raise_for_status()
@@ -118,6 +126,12 @@ async def get_today_metar_history(
         observations.sort(key=lambda o: o.observation_time)
         logger.info("METAR history for %s: %d observations for %s", icao, len(observations), today_local)
         return observations
+    except httpx.TimeoutException:
+        logger.warning(
+            "METAR history fetch timed out for %s (timeout=%ds) — will retry next cycle",
+            icao, _TIMEOUT_S,
+        )
+        return []
     except Exception:
         logger.exception("Failed to fetch METAR history for %s", icao)
         return []
