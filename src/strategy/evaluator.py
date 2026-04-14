@@ -190,6 +190,18 @@ def evaluate_no_signals(
         ):
             continue
 
+        # For range slots [L, U]: when wu_round(daily_max) is inside the range,
+        # the actual high has entered the slot → YES is almost certainly winning
+        # → NO is almost certainly a loser. Block immediately.
+        if (
+            days_ahead == 0
+            and daily_max_f is not None
+            and slot.temp_lower_f is not None
+            and slot.temp_upper_f is not None
+            and int(slot.temp_lower_f) <= wu_round(daily_max_f) <= int(slot.temp_upper_f)
+        ):
+            continue
+
         # Bias-corrected reference temperature for the distance pre-filter.
         # When the empirical distribution shows a systematic bias (e.g. forecasts
         # run +2°F hot), the expected actual temperature is lower than the raw
@@ -604,7 +616,7 @@ def evaluate_exit_signals(
                 # Positive EV → hold (unless Layer 3 overrides)
                 # ── Layer 3: Pre-settlement force exit ──
                 if (hours_to_settlement is not None
-                        and hours_to_settlement <= config.force_exit_hours
+                        and 0 <= hours_to_settlement <= config.force_exit_hours
                         and distance < exit_distance):
                     signals.append(TradeSignal(
                         token_type=TokenType.NO,
