@@ -77,10 +77,12 @@ class ForecastErrorDistribution:
     def prob_actual_in_range(
         self, lower_f: float, upper_f: float, forecast_high_f: float
     ) -> float:
-        """P(lower <= actual_high <= upper) given the forecast high.
+        """P(lower <= wu_round(actual_high) <= upper) given the forecast high.
 
-        This is the key function: probability that the actual temperature
-        lands in a specific slot's range.
+        Settlement uses whole-degree half-up rounding (wu_round).  A raw
+        temperature lands in slot [L, U] when wu_round(raw) is in [L, U],
+        which means raw is in [L - 0.5, U + 0.5).  We use +0.5 inclusive
+        on the upper end to capture the half-up boundary.
         """
         p_below_upper = self.prob_actual_below(upper_f + 0.5, forecast_high_f)  # inclusive
         p_below_lower = self.prob_actual_below(lower_f - 0.5, forecast_high_f)  # exclusive
