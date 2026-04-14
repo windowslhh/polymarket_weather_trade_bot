@@ -223,21 +223,40 @@ class TestLockedWinWuRoundBoundary:
             f"slot={slot_range}: expected locked={expect_locked}, got {got}"
         )
 
-    def test_time_factor_blocks_lock(self):
-        """Same temperature at 13:00 vs 18:00 — only 18:00 (final) locks."""
-        slot = _slot(54, 55)
-        event = _event([slot])
-        # daily_max=58.0, wu_round=58, 58-55=3 >= 2 margin → condition A
-        # But daily_max_final=False → no lock
-        sigs_not_final = evaluate_locked_win_signals(
-            event, 58.0, self.CFG, daily_max_final=False,
-        )
-        assert len(sigs_not_final) == 0, "Should NOT lock when daily_max not final"
+    def test_time_factor_asymmetric(self):
+        """Condition A (below-slot) fires without time gate; Condition B (above-slot) needs final.
 
-        sigs_final = evaluate_locked_win_signals(
-            event, 58.0, self.CFG, daily_max_final=True,
+        daily_max=58 with slot [54,55] — Condition A (58 > 55, margin 3 >= 2):
+            fires regardless of daily_max_final (monotonically-increasing daily_max).
+        daily_max=50 with slot [54,55] — Condition B (54-50=4 >= 2 margin, but < lower):
+            only fires when daily_max_final=True.
+        """
+        # --- Condition A: no time gate ---
+        slot_a = _slot(54, 55)
+        event_a = _event([slot_a])
+        # 13:00, not final — Condition A still locks
+        sigs_not_final_a = evaluate_locked_win_signals(
+            event_a, 58.0, self.CFG, daily_max_final=False,
         )
-        assert len(sigs_final) == 1, "Should lock when daily_max is final"
+        assert len(sigs_not_final_a) == 1, "Condition A must lock even before peak window"
+        sigs_final_a = evaluate_locked_win_signals(
+            event_a, 58.0, self.CFG, daily_max_final=True,
+        )
+        assert len(sigs_final_a) == 1, "Condition A must lock when final too"
+
+        # --- Condition B: requires daily_max_final ---
+        slot_b = _slot(54, 55)
+        event_b = _event([slot_b])
+        # 13:00, not final — Condition B blocked
+        sigs_not_final_b = evaluate_locked_win_signals(
+            event_b, 50.0, self.CFG, daily_max_final=False,
+        )
+        assert len(sigs_not_final_b) == 0, "Condition B must NOT lock before daily_max is final"
+        # 18:00, final — Condition B fires
+        sigs_final_b = evaluate_locked_win_signals(
+            event_b, 50.0, self.CFG, daily_max_final=True,
+        )
+        assert len(sigs_final_b) == 1, "Condition B must lock once daily_max is final"
 
 
 class TestLockedWinSymmetric:

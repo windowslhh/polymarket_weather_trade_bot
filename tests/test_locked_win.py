@@ -1,9 +1,11 @@
 """Tests for locked-win signals.
 
-Updated for wu_round + time factor + condition B (above-slot) semantics.
-All tests pass daily_max_final=True and use locked_win_margin_f=0 to test
-core locked-win logic without margin interference.  Margin-specific tests
-are in test_temperature_boundaries.py.
+Updated for wu_round + asymmetric time-gate semantics:
+- Condition A (below-slot: daily_max > upper): fires immediately, no time gate.
+- Condition B (above-slot: daily_max < lower): requires daily_max_final=True.
+
+All tests use locked_win_margin_f=0 to test core locking logic without margin
+interference.  Margin-specific tests are in test_temperature_boundaries.py.
 """
 from __future__ import annotations
 
@@ -73,21 +75,29 @@ class TestLockedWinDetection:
         sigs = evaluate_locked_win_signals(event, 72.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
-    def test_range_slot_not_locked_when_daily_max_below(self):
-        """[70,74] with daily_max=68, daily_max_final=True → condition B locks!
+    def test_range_slot_condition_b_locks_when_final(self):
+        """[70,74] with daily_max=68, daily_max_final=True → condition B locks.
         wu_round(68)=68 < 70, 70-68=2 >= 0 margin → locked (above-slot)."""
         slot = _slot(70, 74)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 68.0, _CFG, daily_max_final=True)
-        # With margin=0 and daily_max_final=True, condition B fires
+        # Condition B fires when daily_max_final=True
         assert len(sigs) == 1
 
-    def test_range_slot_not_locked_when_daily_max_below_not_final(self):
-        """[70,74] with daily_max=68, NOT final → no lock (temp could rise)."""
+    def test_range_slot_condition_b_not_locked_when_not_final(self):
+        """[70,74] with daily_max=68, NOT final → no lock (temp could still rise)."""
         slot = _slot(70, 74)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 68.0, _CFG, daily_max_final=False)
         assert len(sigs) == 0
+
+    def test_condition_a_locks_without_daily_max_final(self):
+        """[70,74] with daily_max=76, NOT final → Condition A fires immediately.
+        daily_max is monotonically increasing — once above upper it can never fall back."""
+        slot = _slot(70, 74)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=False)
+        assert len(sigs) == 1, "Condition A (below-slot) must lock even before peak window"
 
     def test_below_x_slot_locked(self):
         """'Below 60°F' (lower=None, upper=60) with daily_max=62 → locked win."""
@@ -225,6 +235,24 @@ class TestLockedWinBoundary:
         sigs = evaluate_locked_win_signals(event, 100.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
+    @pytest.mark.parametrize("daily_max_f,expected_locked", [
+        # Slot [50, 54]: Condition A fires when wu_round(daily_max) > 54
+        (54.4, False),   # wu_round(54.4) = 54 — NOT > 54
+        (54.5, True),    # wu_round(54.5) = 55 — 55 > 54 → Condition A locks
+        (54.6, True),    # wu_round(54.6) = 55 — 55 > 54 → Condition A locks
+        (55.0, True),    # wu_round(55.0) = 55 — 55 > 54 → Condition A locks
+        (55.5, True),    # wu_round(55.5) = 56 — 56 > 54 → Condition A locks
+    ])
+    def test_wu_round_boundary_condition_a(self, daily_max_f, expected_locked):
+        """Verify wu_round half-up semantics at slot upper boundary.
+        Condition A does not require daily_max_final."""
+        slot = _slot(50, 54)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, daily_max_f, _CFG, daily_max_final=False)
+        assert (len(sigs) == 1) == expected_locked, (
+            f"daily_max={daily_max_f}: expected locked={expected_locked}"
+        )
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Failure Branches
@@ -255,12 +283,13 @@ class TestLockedWinFailure:
         sigs = evaluate_locked_win_signals(event, 76.0, cfg, daily_max_final=True)
         assert sigs == []
 
-    def test_daily_max_not_final_returns_empty(self):
-        """daily_max_final=False → no signals regardless of temperature."""
-        slot = _slot(70, 74)
+    def test_condition_b_not_final_returns_empty(self):
+        """daily_max_final=False blocks Condition B (above-slot) but not Condition A.
+        Use a slot where daily_max is BELOW its lower bound to isolate Condition B."""
+        slot = _slot(80, 84)  # daily_max=76 < 80 → Condition B scenario
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=False)
-        assert sigs == []
+        assert sigs == [], "Condition B must NOT fire without daily_max_final"
 
     def test_empty_slots_returns_empty(self):
         event = _event([])

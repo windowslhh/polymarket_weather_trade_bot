@@ -357,22 +357,22 @@ def evaluate_locked_win_signals(
 ) -> list[TradeSignal]:
     """Generate BUY NO signals for slots where NO is guaranteed to win.
 
-    Two symmetric conditions (both require daily_max to be final):
+    Two asymmetric conditions with different time requirements:
 
     Condition A (below-slot): wu_round(daily_max) > slot.upper + margin
         The actual high already exceeded this range → NO wins.
+        No time gate needed: daily_max is monotonically increasing by definition,
+        so once it exceeds the upper bound it can never fall back below it.
 
     Condition B (above-slot): wu_round(daily_max) < slot.lower - margin
-        The actual high is finalized below this range → NO wins.
-        Requires daily_max_final=True because temp could still rise.
-
-    Condition A also requires daily_max_final for safety: an early-morning
-    reading of 50°F doesn't mean the afternoon won't reach 55°F.
+        The daily max is finalized below this range → NO wins.
+        Requires daily_max_final=True: the afternoon peak (14:00–17:00) could
+        still push the observed max up into or above the slot's lower bound.
 
     Rules:
     - Only same-day markets (days_ahead == 0)
     - daily_max_f must exist
-    - daily_max_final must be True (past peak window + stable)
+    - Condition A fires any time of day; Condition B requires daily_max_final=True
     - "≥X°F" slot (upper=None): if daily_max >= X then YES wins → NO loses → SKIP
     - Skip already-held tokens
     - Skip if price_no <= 0 or >= 1
@@ -383,9 +383,6 @@ def evaluate_locked_win_signals(
         return []
 
     if not config.enable_locked_wins:
-        return []
-
-    if not daily_max_final:
         return []
 
     rounded_max = wu_round(daily_max_f)
@@ -407,15 +404,17 @@ def evaluate_locked_win_signals(
             # Range slot [L, U]
             upper_int = int(slot.temp_upper_f)
             lower_int = int(slot.temp_lower_f)
-            # Condition A: daily max exceeded this range (below-slot lock)
+            # Condition A: daily max exceeded this range (below-slot lock) — no time gate
             if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
                 is_locked = True
                 lock_reason = (
                     f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
                     f"> upper {upper_int} + margin {margin}"
                 )
-            # Condition B: daily max finalized below this range (above-slot lock)
-            elif rounded_max < lower_int and (lower_int - rounded_max) >= margin:
+            # Condition B: daily max finalized below this range (above-slot lock) — needs final
+            elif (daily_max_final
+                  and rounded_max < lower_int
+                  and (lower_int - rounded_max) >= margin):
                 is_locked = True
                 lock_reason = (
                     f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
@@ -425,7 +424,7 @@ def evaluate_locked_win_signals(
         elif slot.temp_lower_f is None and slot.temp_upper_f is not None:
             # "Below X°F" slot (lower=None, upper=X)
             upper_int = int(slot.temp_upper_f)
-            # Condition A: daily max exceeded this range
+            # Condition A: daily max exceeded this range — no time gate
             if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
                 is_locked = True
                 lock_reason = (
@@ -440,8 +439,8 @@ def evaluate_locked_win_signals(
             # If daily_max >= X, YES wins → NO loses → skip entirely
             if rounded_max >= lower_int:
                 continue
-            # Condition B: daily max finalized below this threshold
-            if (lower_int - rounded_max) >= margin:
+            # Condition B: daily max finalized below this threshold — needs final
+            if daily_max_final and (lower_int - rounded_max) >= margin:
                 is_locked = True
                 lock_reason = (
                     f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
