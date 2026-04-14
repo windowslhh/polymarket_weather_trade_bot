@@ -28,6 +28,7 @@ from src.strategy.evaluator import (
     evaluate_trim_signals,
 )
 from src.strategy.calibrator import calibrate_distance_dynamic, calibrate_distance_threshold
+from src.strategy.temperature import is_daily_max_final
 from src.strategy.sizing import compute_size
 from src.strategy.trend import ForecastTrend
 from src.weather.forecast import get_forecasts_batch
@@ -544,9 +545,24 @@ class Rebalancer:
                         slots=held_no_slots,
                     )
 
+                    # Determine if daily max is final (past peak + stable)
+                    _dm_final = False
+                    if city_tz and daily_max is not None:
+                        _city_icao = next(
+                            (c.icao for c in self._config.cities if c.name == city), None,
+                        )
+                        if _city_icao:
+                            _obs_series = self._max_tracker.get_observations(_city_icao)
+                            _dm_final = is_daily_max_final(
+                                datetime.now(city_tz), _obs_series,
+                                post_peak_hour=strat_cfg.post_peak_hour,
+                                stability_window_minutes=strat_cfg.stability_window_minutes,
+                            )
+
                     # Evaluate locked-win signals (new BUY opportunities)
                     locked_signals = evaluate_locked_win_signals(
-                        event_obj, daily_max, strat_cfg, held_token_ids_set, days_ahead=days_ahead,
+                        event_obj, daily_max, strat_cfg, held_token_ids_set,
+                        days_ahead=days_ahead, daily_max_final=_dm_final,
                     )
 
                     # Use cached forecast for better exit decisions
@@ -903,9 +919,24 @@ class Rebalancer:
                     daily_max_f=daily_max, local_hour=local_hour,
                 )
 
+                # Determine if daily max is final (past peak + stable)
+                _dm_final_main = False
+                if city_tz and daily_max is not None:
+                    _city_icao_main = next(
+                        (c.icao for c in self._config.cities if c.name == event.city), None,
+                    )
+                    if _city_icao_main:
+                        _obs_series_main = self._max_tracker.get_observations(_city_icao_main)
+                        _dm_final_main = is_daily_max_final(
+                            datetime.now(city_tz), _obs_series_main,
+                            post_peak_hour=strat_cfg.post_peak_hour,
+                            stability_window_minutes=strat_cfg.stability_window_minutes,
+                        )
+
                 # Locked-win signals: NO guaranteed on slots where daily max > upper bound
                 locked_signals = evaluate_locked_win_signals(
                     event, daily_max, strat_cfg, held_token_ids, days_ahead,
+                    daily_max_final=_dm_final_main,
                 )
 
                 # Identify locked-win positions and entry prices from DB

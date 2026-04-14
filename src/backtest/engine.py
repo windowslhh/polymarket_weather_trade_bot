@@ -21,6 +21,7 @@ from pathlib import Path
 import httpx
 
 from src.config import CityConfig, StrategyConfig, load_config
+from src.strategy.temperature import wu_round
 from src.weather.historical import (
     ForecastErrorDistribution,
     build_error_distribution,
@@ -254,7 +255,9 @@ def _run_day(
         total_fees += entry_fee
 
         # Settlement: did actual land in this slot?
-        actual_in_slot = slot.lower_f <= actual_high_f <= slot.upper_f
+        # Use wu_round (half-up) to match Weather Underground's whole-degree rounding.
+        rounded_actual = wu_round(actual_high_f)
+        actual_in_slot = int(slot.lower_f) <= rounded_actual <= int(slot.upper_f)
         if actual_in_slot:
             # NO loses — we lose our stake
             no_losses += 1

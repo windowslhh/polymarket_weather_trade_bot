@@ -271,8 +271,8 @@ class TestDifferentiatedBehavior:
         cfg_a = _build_strat_cfg("A")
         cfg_b = _build_strat_cfg("B")
 
-        locked_a = evaluate_locked_win_signals(event, 80.0, cfg_a)
-        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b)
+        locked_a = evaluate_locked_win_signals(event, 80.0, cfg_a, daily_max_final=True)
+        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b, daily_max_final=True)
 
         assert len(locked_a) == 1
         assert len(locked_b) == 1
@@ -526,8 +526,8 @@ class TestCrossStrategySignals:
         cfg_a = _build_strat_cfg("A")
         cfg_b = _build_strat_cfg("B")
 
-        locked_a = evaluate_locked_win_signals(event, 80.0, cfg_a)
-        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b)
+        locked_a = evaluate_locked_win_signals(event, 80.0, cfg_a, daily_max_final=True)
+        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b, daily_max_final=True)
 
         assert len(locked_a) == 1 and len(locked_b) == 1
 
@@ -586,7 +586,7 @@ class TestVariantPerformance:
             for name in ["A", "B", "C", "D"]:
                 cfg = _build_strat_cfg(name)
                 _ = evaluate_no_signals(event, forecast, cfg)
-                _ = evaluate_locked_win_signals(event, 80.0, cfg)
+                _ = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
                 _ = evaluate_exit_signals(
                     event, obs, 74.0, event.slots[:5], cfg,
                     days_ahead=0, forecast=forecast,

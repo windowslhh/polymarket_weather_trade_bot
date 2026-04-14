@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from src.config import StrategyConfig
 from src.markets.models import Side, TempSlot, TokenType, TradeSignal, WeatherMarketEvent
 from src.weather.historical import ForecastErrorDistribution
+from src.strategy.temperature import is_daily_max_final, wu_round
 from src.strategy.trend import TrendState
 from src.weather.models import Forecast, Observation
 
@@ -177,7 +178,7 @@ def evaluate_no_signals(
         if held_token_ids and slot.token_id_no in held_token_ids:
             continue
 
-        # For "≥X°F" slots (upper=None): when daily_max already >= X, YES is a
+        # For "≥X°F" slots (upper=None): when wu_round(daily_max) >= X, YES is a
         # guaranteed winner → NO is a guaranteed loser. Block immediately.
         # (evaluate_locked_win_signals already skips these; mirror the guard here.)
         if (
@@ -185,7 +186,7 @@ def evaluate_no_signals(
             and daily_max_f is not None
             and slot.temp_upper_f is None
             and slot.temp_lower_f is not None
-            and daily_max_f >= slot.temp_lower_f
+            and wu_round(daily_max_f) >= int(slot.temp_lower_f)
         ):
             continue
 
@@ -306,10 +307,10 @@ def evaluate_trim_signals(
             )
             continue
 
-        # Also protect slots where daily_max currently exceeds upper bound
+        # Also protect slots where wu_round(daily_max) currently exceeds upper bound
         # (locked-win condition is true NOW, even if not bought as locked win)
         if daily_max_f is not None and slot.temp_upper_f is not None:
-            if daily_max_f > slot.temp_upper_f:
+            if wu_round(daily_max_f) > int(slot.temp_upper_f):
                 logger.debug(
                     "TRIM skip (daily_max %.1f > upper %.1f): %s slot %s",
                     daily_max_f, slot.temp_upper_f, event.city, slot.outcome_label,
@@ -351,27 +352,44 @@ def evaluate_locked_win_signals(
     config: StrategyConfig,
     held_token_ids: set[str] | None = None,
     days_ahead: int = 0,
+    *,
+    daily_max_final: bool = False,
 ) -> list[TradeSignal]:
     """Generate BUY NO signals for slots where NO is guaranteed to win.
 
-    When today's observed daily max exceeds a slot's upper bound, the actual
-    high temperature is already above that range, so the slot's YES cannot win.
-    NO is a locked win — the daily max can only go up, never down.
+    Two symmetric conditions (both require daily_max to be final):
+
+    Condition A (below-slot): wu_round(daily_max) > slot.upper + margin
+        The actual high already exceeded this range → NO wins.
+
+    Condition B (above-slot): wu_round(daily_max) < slot.lower - margin
+        The actual high is finalized below this range → NO wins.
+        Requires daily_max_final=True because temp could still rise.
+
+    Condition A also requires daily_max_final for safety: an early-morning
+    reading of 50°F doesn't mean the afternoon won't reach 55°F.
 
     Rules:
     - Only same-day markets (days_ahead == 0)
     - daily_max_f must exist
-    - Range slot [L, U]: locked if daily_max_f > U
-    - "Below X°F" slot (lower=None, upper=X): locked if daily_max_f > X
-    - "≥X°F" slot (upper=None): daily_max >= L means YES wins, so NO loses — SKIP
+    - daily_max_final must be True (past peak window + stable)
+    - "≥X°F" slot (upper=None): if daily_max >= X then YES wins → NO loses → SKIP
     - Skip already-held tokens
     - Skip if price_no <= 0 or >= 1
+    - Safety margin: wu_round(daily_max) must differ from slot boundary by
+      at least config.locked_win_margin_f degrees
     """
     if daily_max_f is None or days_ahead > 0:
         return []
 
     if not config.enable_locked_wins:
         return []
+
+    if not daily_max_final:
+        return []
+
+    rounded_max = wu_round(daily_max_f)
+    margin = config.locked_win_margin_f
 
     signals: list[TradeSignal] = []
     for slot in event.slots:
@@ -382,17 +400,53 @@ def evaluate_locked_win_signals(
         if slot.price_no <= 0 or slot.price_no >= 1:
             continue
 
-        # Determine if NO is locked win
         is_locked = False
+        lock_reason = ""
 
-        if slot.temp_upper_f is not None:
-            # Range slot [L, U] or "Below U" slot (L=None)
-            # daily_max > upper_bound → actual high already exceeded this range → NO wins
-            if daily_max_f > slot.temp_upper_f:
+        if slot.temp_upper_f is not None and slot.temp_lower_f is not None:
+            # Range slot [L, U]
+            upper_int = int(slot.temp_upper_f)
+            lower_int = int(slot.temp_lower_f)
+            # Condition A: daily max exceeded this range (below-slot lock)
+            if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
                 is_locked = True
-        # "≥X°F" slot (upper=None, lower set): daily_max >= lower means YES wins → skip
-        # If daily_max < lower, it's not locked yet (temp could still rise)
-        # → no locked win either way for open-upper slots
+                lock_reason = (
+                    f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
+                    f"> upper {upper_int} + margin {margin}"
+                )
+            # Condition B: daily max finalized below this range (above-slot lock)
+            elif rounded_max < lower_int and (lower_int - rounded_max) >= margin:
+                is_locked = True
+                lock_reason = (
+                    f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
+                    f"< lower {lower_int} - margin {margin}"
+                )
+
+        elif slot.temp_lower_f is None and slot.temp_upper_f is not None:
+            # "Below X°F" slot (lower=None, upper=X)
+            upper_int = int(slot.temp_upper_f)
+            # Condition A: daily max exceeded this range
+            if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
+                is_locked = True
+                lock_reason = (
+                    f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
+                    f"> upper {upper_int} + margin {margin}"
+                )
+            # Condition B not applicable: "Below X" has no lower bound to be above
+
+        elif slot.temp_upper_f is None and slot.temp_lower_f is not None:
+            # "≥X°F" slot (lower=X, upper=None)
+            lower_int = int(slot.temp_lower_f)
+            # If daily_max >= X, YES wins → NO loses → skip entirely
+            if rounded_max >= lower_int:
+                continue
+            # Condition B: daily max finalized below this threshold
+            if (lower_int - rounded_max) >= margin:
+                is_locked = True
+                lock_reason = (
+                    f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
+                    f"< lower {lower_int} - margin {margin}"
+                )
 
         if not is_locked:
             continue
@@ -429,9 +483,8 @@ def evaluate_locked_win_signals(
         signals.append(signal)
 
         logger.info(
-            "LOCKED WIN: %s slot %s (daily max %.1f > upper %.1f), EV=%.4f",
-            event.city, slot.outcome_label, daily_max_f,
-            slot.temp_upper_f, ev,
+            "%s: %s slot %s, EV=%.4f",
+            lock_reason, event.city, slot.outcome_label, ev,
         )
 
     return signals
@@ -491,9 +544,9 @@ def evaluate_exit_signals(
     signals: list[TradeSignal] = []
     for slot in held_no_slots:
         # ── Layer 1: Locked-win protection ──
-        # If daily_max already exceeded the slot's upper bound, NO wins for certain.
-        # Never exit a guaranteed winner.
-        if slot.temp_upper_f is not None and daily_max_f > slot.temp_upper_f:
+        # If wu_round(daily_max) already exceeded the slot's upper bound,
+        # NO wins for certain. Never exit a guaranteed winner.
+        if slot.temp_upper_f is not None and wu_round(daily_max_f) > int(slot.temp_upper_f):
             logger.debug(
                 "EXIT skip (locked win): %s slot %s — daily max %.1f > upper %.1f",
                 event.city, slot.outcome_label, daily_max_f, slot.temp_upper_f,

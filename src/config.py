@@ -42,6 +42,13 @@ class StrategyConfig:
     enable_locked_wins: bool = True
     locked_win_kelly_fraction: float = 1.0
     max_locked_win_per_slot_usd: float = 10.0
+    # Safety margin: wu_round(daily_max) must differ from slot boundary by at least
+    # this many integer degrees to trigger locked-win (avoids X.5 rounding ambiguity)
+    locked_win_margin_f: int = 2
+    # Hour (local) after which peak temperature window is considered over
+    post_peak_hour: int = 17
+    # Minutes without a new high (after post_peak_hour) to confirm daily max is final
+    stability_window_minutes: int = 60
     # Hybrid exit: force-sell within N hours of settlement when distance is close
     force_exit_hours: float = 1.0
     # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
