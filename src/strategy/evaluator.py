@@ -493,10 +493,10 @@ def evaluate_locked_win_signals(
 
         # Reject locked wins where NO price is too high — thin margin gets
         # eaten by fees.  E.g. $0.97 → only $0.03 profit per share, ~1% ROI
-        # after fees.  Cap at 0.90 to ensure at least ~10% gross return.
-        if slot.price_no > 0.90:
+        # after fees.  Cap at 0.95 to ensure at least ~4% gross return.
+        if slot.price_no > 0.95:
             logger.debug(
-                "LOCKED WIN skip (price %.3f > 0.90): %s slot %s — margin too thin",
+                "LOCKED WIN skip (price %.3f > 0.95): %s slot %s — margin too thin",
                 slot.price_no, event.city, slot.outcome_label,
             )
             continue
