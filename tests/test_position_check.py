@@ -373,7 +373,8 @@ class TestPositionCheckTrackerIntegration:
             return None
 
         # Before: no max for KLGA today
-        assert reb._max_tracker.get_max("KLGA") is None
+        local_today_pre = datetime.now(ZoneInfo("America/New_York")).date()
+        assert reb._max_tracker.get_max("KLGA", day=local_today_pre) is None
 
         with patch("src.strategy.rebalancer.fetch_settlement_temp", side_effect=mock_fetch):
             await reb.run_position_check()
@@ -381,7 +382,7 @@ class TestPositionCheckTrackerIntegration:
         # After: tracker should have updated
         # Use local date (Eastern) — tracker now groups by station's local date
         local_today = datetime.now(ZoneInfo("America/New_York")).date()
-        assert reb._max_tracker.get_max("KLGA", local_today) == 72.0
+        assert reb._max_tracker.get_max("KLGA", day=local_today) == 72.0
 
     @pytest.mark.asyncio
     async def test_tracker_preserves_higher_max(self):
@@ -405,7 +406,7 @@ class TestPositionCheckTrackerIntegration:
         # Max should still be 85, not 72
         # Use local date (Eastern) — tracker now groups by station's local date
         local_today = datetime.now(ZoneInfo("America/New_York")).date()
-        assert reb._max_tracker.get_max("KLGA", local_today) == 85.0
+        assert reb._max_tracker.get_max("KLGA", day=local_today) == 85.0
 
 
 # ──────────────────────────────────────────────────────────────────────

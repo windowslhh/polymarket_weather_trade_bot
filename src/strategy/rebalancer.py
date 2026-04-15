@@ -158,13 +158,16 @@ class Rebalancer:
                     observations = await get_today_metar_history(
                         city_cfg.icao, city_cfg.tz, client,
                     )
+                    local_today = datetime.now(ZoneInfo(city_cfg.tz)).date()
                     for obs in observations:
                         self._max_tracker.update(obs)
                     if observations:
-                        self._last_daily_maxes[city_cfg.name] = self._max_tracker.get_max(city_cfg.icao)
+                        self._last_daily_maxes[city_cfg.name] = self._max_tracker.get_max(
+                            city_cfg.icao, day=local_today,
+                        )
             total = sum(
-                len(self._max_tracker.get_observations(c.icao))
-                for c in city_configs
+                len(self._max_tracker.get_observations(c.icao, day=datetime.now(ZoneInfo(c.tz)).date()))
+                for c in city_configs if c.tz
             )
             logger.info("Backfilled %d total observations across %d cities", total, len(city_configs))
 
@@ -212,11 +215,12 @@ class Rebalancer:
         # Build observation time series per city for temperature dashboard
         # Only include cities with active markets
         observation_series: dict[str, list[tuple[str, float]]] = {}
-        active_icaos = {c.icao: c.name for c in (self._active_city_configs or self._config.cities)}
-        for icao, city_name in active_icaos.items():
-            obs = self._max_tracker.get_observations(icao)
+        active_cfgs = {c.icao: c for c in (self._active_city_configs or self._config.cities)}
+        for icao, cfg in active_cfgs.items():
+            local_day = datetime.now(ZoneInfo(cfg.tz)).date() if cfg.tz else date.today()
+            obs = self._max_tracker.get_observations(icao, day=local_day)
             if obs:
-                observation_series[city_name] = obs
+                observation_series[cfg.name] = obs
 
         # Build per-city forecast error distribution summary for dashboard
         error_dist_summary: dict[str, dict] = {}

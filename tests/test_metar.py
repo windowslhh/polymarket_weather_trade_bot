@@ -31,14 +31,14 @@ class TestDailyMaxTracker:
                           observation_time=datetime(2026, 4, 4, 18, 0, tzinfo=timezone.utc))
 
         tracker.update(obs1)
-        assert tracker.get_max("KLGA", date(2026, 4, 4)) == 72.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 4)) == 72.0
 
         tracker.update(obs2)
-        assert tracker.get_max("KLGA", date(2026, 4, 4)) == 78.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 4)) == 78.0
 
         # Lower temp doesn't reduce max
         tracker.update(obs3)
-        assert tracker.get_max("KLGA", date(2026, 4, 4)) == 78.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 4)) == 78.0
 
     def test_separate_days(self):
         tracker = DailyMaxTracker()
@@ -50,8 +50,8 @@ class TestDailyMaxTracker:
         tracker.update(obs1)
         tracker.update(obs2)
 
-        assert tracker.get_max("KLGA", date(2026, 4, 4)) == 80.0
-        assert tracker.get_max("KLGA", date(2026, 4, 5)) == 70.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 4)) == 80.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 5)) == 70.0
 
     def test_separate_stations(self):
         tracker = DailyMaxTracker()
@@ -63,12 +63,12 @@ class TestDailyMaxTracker:
         tracker.update(obs1)
         tracker.update(obs2)
 
-        assert tracker.get_max("KLGA", date(2026, 4, 4)) == 80.0
-        assert tracker.get_max("KLAX", date(2026, 4, 4)) == 90.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 4)) == 80.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 4)) == 90.0
 
     def test_get_max_no_data(self):
         tracker = DailyMaxTracker()
-        assert tracker.get_max("KLGA") is None
+        assert tracker.get_max("KLGA", day=date(2026, 1, 1)) is None
 
     def test_cleanup(self):
         tracker = DailyMaxTracker()
@@ -78,7 +78,7 @@ class TestDailyMaxTracker:
 
         # cleanup_old has 1-day buffer, so keep_date=4/5 removes 4/3
         tracker.cleanup_old(keep_date=date(2026, 4, 5))
-        assert tracker.get_max("KLGA", date(2026, 4, 3)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 4, 3)) is None
 
     def test_observations_recorded(self):
         tracker = DailyMaxTracker()
@@ -93,7 +93,7 @@ class TestDailyMaxTracker:
         tracker.update(obs2)
         tracker.update(obs3)
 
-        series = tracker.get_observations("KLGA", date(2026, 4, 4))
+        series = tracker.get_observations("KLGA", day=date(2026, 4, 4))
         assert len(series) == 3
         assert series[0] == (obs1.observation_time.isoformat(), 65.0)
         assert series[1] == (obs2.observation_time.isoformat(), 70.0)
@@ -108,7 +108,7 @@ class TestDailyMaxTracker:
         tracker.update(obs1)
         tracker.update(obs2)
 
-        series = tracker.get_observations("KLGA", date(2026, 4, 4))
+        series = tracker.get_observations("KLGA", day=date(2026, 4, 4))
         assert len(series) == 1
 
     def test_observations_cleanup(self):
@@ -117,15 +117,15 @@ class TestDailyMaxTracker:
                          observation_time=datetime(2026, 4, 3, 14, 0, tzinfo=timezone.utc))
         tracker.update(obs)
 
-        assert len(tracker.get_observations("KLGA", date(2026, 4, 3))) == 1
+        assert len(tracker.get_observations("KLGA", day=date(2026, 4, 3))) == 1
         # 1-day buffer: keep_date=4/5 removes 4/3 (4/5 - 1 = 4/4, and 4/3 < 4/4)
         tracker.cleanup_old(keep_date=date(2026, 4, 5))
-        assert tracker.get_observations("KLGA", date(2026, 4, 3)) == []
+        assert tracker.get_observations("KLGA", day=date(2026, 4, 3)) == []
 
     def test_observations_empty(self):
         tracker = DailyMaxTracker()
-        assert tracker.get_observations("KXYZ") == []
-        assert tracker.get_observations("KXYZ", date(2026, 1, 1)) == []
+        assert tracker.get_observations("KXYZ", day=date(2026, 1, 1)) == []
+        assert tracker.get_observations("KXYZ", day=date(2026, 1, 2)) == []
 
 
 class TestTimezoneAwareDailyMax:
@@ -148,8 +148,8 @@ class TestTimezoneAwareDailyMax:
         tracker.update(obs)
 
         # Should be under April 11 (local), NOT April 12
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) == 66.0
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) is None
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) == 66.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) is None
 
     def test_utc_midnight_crossover_eastern(self):
         """KLGA at 03:30 UTC Apr 12 = 11:30 PM EDT Apr 11."""
@@ -163,8 +163,8 @@ class TestTimezoneAwareDailyMax:
         )
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 4, 11)) == 60.0
-        assert tracker.get_max("KLGA", date(2026, 4, 12)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 4, 11)) == 60.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 12)) is None
 
     def test_local_afternoon_stays_same_day(self):
         """KLAX obs at 22:00 UTC Apr 11 = 3:00 PM PDT Apr 11 → same day."""
@@ -177,8 +177,8 @@ class TestTimezoneAwareDailyMax:
         )
         tracker.update(obs)
 
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) == 75.0
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) is None
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) == 75.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) is None
 
     def test_local_morning_after_midnight_utc(self):
         """KLAX obs at 15:00 UTC Apr 12 = 8:00 AM PDT Apr 12 → Apr 12."""
@@ -191,8 +191,8 @@ class TestTimezoneAwareDailyMax:
         )
         tracker.update(obs)
 
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) == 58.0
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) is None
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) == 58.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) is None
 
     def test_mixed_days_correct_max(self):
         """Observations spanning UTC midnight should split correctly."""
@@ -213,8 +213,8 @@ class TestTimezoneAwareDailyMax:
         tracker.update(obs_apr11_evening)
         tracker.update(obs_apr12_morning)
 
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) == 66.0
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) == 55.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) == 66.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) == 55.0
 
     def test_no_timezone_registered_falls_back_to_utc(self):
         """Without register_timezone, falls back to UTC date (old behavior)."""
@@ -228,7 +228,7 @@ class TestTimezoneAwareDailyMax:
         tracker.update(obs)
 
         # Fallback: uses UTC date, so it goes under Apr 12
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) == 66.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) == 66.0
 
     def test_observations_grouped_by_local_date(self):
         """Observation series should be grouped by local date."""
@@ -248,8 +248,8 @@ class TestTimezoneAwareDailyMax:
         tracker.update(obs1)
         tracker.update(obs2)
 
-        series_11 = tracker.get_observations("KLAX", date(2026, 4, 11))
-        series_12 = tracker.get_observations("KLAX", date(2026, 4, 12))
+        series_11 = tracker.get_observations("KLAX", day=date(2026, 4, 11))
+        series_12 = tracker.get_observations("KLAX", day=date(2026, 4, 12))
 
         assert len(series_11) == 1
         assert series_11[0][1] == 66.0
@@ -277,7 +277,7 @@ class TestTimezoneAwareDailyMax:
             observation_time=datetime(2026, 4, 14, 19, 0, tzinfo=timezone.utc),
         )
         tracker.update(peak_obs)
-        assert tracker.get_max("KATL", date(2026, 4, 14)) == 85.0
+        assert tracker.get_max("KATL", day=date(2026, 4, 14)) == 85.0
 
         # Live METAR just after midnight EDT:
         # 04:03 UTC Apr 15 = 00:03 EDT Apr 15 → keyed to Apr 15
@@ -291,8 +291,8 @@ class TestTimezoneAwareDailyMax:
         assert max_from_update == 69.0
 
         # But get_max with explicit day= still returns the correct values:
-        assert tracker.get_max("KATL", date(2026, 4, 14)) == 85.0
-        assert tracker.get_max("KATL", date(2026, 4, 15)) == 69.0
+        assert tracker.get_max("KATL", day=date(2026, 4, 14)) == 85.0
+        assert tracker.get_max("KATL", day=date(2026, 4, 15)) == 69.0
 
     def test_pre_midnight_update_returns_correct_day(self):
         """Just before midnight EDT (03:53 UTC), update() still returns
@@ -330,8 +330,8 @@ class TestTimezoneAwareDailyMax:
 
         # keep_date=Apr 12 with 1-day buffer → cutoff = Apr 11 → Apr 11 data survives
         tracker.cleanup_old(keep_date=date(2026, 4, 12))
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) == 70.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) == 70.0
 
         # keep_date=Apr 13 with 1-day buffer → cutoff = Apr 12 → Apr 11 cleaned up
         tracker.cleanup_old(keep_date=date(2026, 4, 13))
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) is None
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) is None

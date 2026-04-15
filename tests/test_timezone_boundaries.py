@@ -130,8 +130,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KDEN", 65.0, _utc(2026, 4, 14, 5, 0))  # 23:00 MDT Apr 13
         tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 65.0
-        assert tracker.get_max("KDEN", date(2026, 4, 14)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 65.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 14)) is None
 
     def test_denver_23_59_mdt_is_utc_next_day_05_59(self):
         """Denver 23:59 MDT = UTC 05:59 next day → still local Apr 13."""
@@ -141,8 +141,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KDEN", 68.0, _utc(2026, 4, 14, 5, 59))  # 23:59 MDT Apr 13
         tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 68.0
-        assert tracker.get_max("KDEN", date(2026, 4, 14)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 68.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 14)) is None
 
     def test_denver_00_01_mdt_stays_on_apr_14(self):
         """Denver 00:01 MDT Apr 14 = UTC 06:01 Apr 14 → local Apr 14."""
@@ -152,8 +152,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KDEN", 55.0, _utc(2026, 4, 14, 6, 1))  # 00:01 MDT Apr 14
         tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 14)) == 55.0
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 14)) == 55.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) is None
 
     def test_los_angeles_pdt_00_23_utc_grouped_correctly(self):
         """KLAX 00:23 UTC Apr 12 = 17:23 PDT Apr 11 → local Apr 11.
@@ -166,8 +166,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KLAX", 66.0, _utc(2026, 4, 12, 0, 23))
         tracker.update(obs)
 
-        assert tracker.get_max("KLAX", date(2026, 4, 11)) == 66.0
-        assert tracker.get_max("KLAX", date(2026, 4, 12)) is None
+        assert tracker.get_max("KLAX", day=date(2026, 4, 11)) == 66.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 12)) is None
 
     def test_chicago_cdt_crossover(self):
         """Chicago CDT (UTC-5): 00:30 UTC Apr 12 = 19:30 CDT Apr 11."""
@@ -177,8 +177,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KORD", 58.0, _utc(2026, 4, 12, 0, 30))
         tracker.update(obs)
 
-        assert tracker.get_max("KORD", date(2026, 4, 11)) == 58.0
-        assert tracker.get_max("KORD", date(2026, 4, 12)) is None
+        assert tracker.get_max("KORD", day=date(2026, 4, 11)) == 58.0
+        assert tracker.get_max("KORD", day=date(2026, 4, 12)) is None
 
     def test_new_york_edt_still_same_day_at_03_30_utc(self):
         """NYC EDT (UTC-4): 03:30 UTC = 23:30 EDT same night → local Apr 11."""
@@ -188,8 +188,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KLGA", 60.0, _utc(2026, 4, 12, 3, 30))
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 4, 11)) == 60.0
-        assert tracker.get_max("KLGA", date(2026, 4, 12)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 4, 11)) == 60.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 12)) is None
 
     def test_new_york_edt_clean_morning_is_new_day(self):
         """NYC EDT: 12:00 UTC = 08:00 EDT → local Apr 12, not Apr 11."""
@@ -199,8 +199,8 @@ class TestUTCMidnightCrossoverDailyMax:
         obs = _make_obs("KLGA", 55.0, _utc(2026, 4, 12, 12, 0))
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 4, 12)) == 55.0
-        assert tracker.get_max("KLGA", date(2026, 4, 11)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 4, 12)) == 55.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 11)) is None
 
 
 # ── 3. DST spring-forward (March 2026) ───────────────────────────────────────
@@ -217,7 +217,7 @@ class TestDSTSpringForward:
         obs = _make_obs("KLGA", 42.0, _utc(2026, 3, 8, 6, 59))
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 3, 8)) == 42.0
+        assert tracker.get_max("KLGA", day=date(2026, 3, 8)) == 42.0
 
     def test_observation_just_after_spring_forward(self):
         """2026-03-08 07:01 UTC = 03:01 EDT → local March 8 (jumped from 2 AM)."""
@@ -228,7 +228,7 @@ class TestDSTSpringForward:
         obs = _make_obs("KLGA", 43.0, _utc(2026, 3, 8, 7, 1))
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 3, 8)) == 43.0
+        assert tracker.get_max("KLGA", day=date(2026, 3, 8)) == 43.0
 
     def test_spring_forward_no_cross_day_split(self):
         """Both observations (before and after DST transition) stay on March 8."""
@@ -242,9 +242,9 @@ class TestDSTSpringForward:
         tracker.update(obs_after)
 
         # Both on March 8 local — max = 44.0
-        assert tracker.get_max("KLGA", date(2026, 3, 8)) == 44.0
-        assert tracker.get_max("KLGA", date(2026, 3, 7)) is None
-        assert tracker.get_max("KLGA", date(2026, 3, 9)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 3, 8)) == 44.0
+        assert tracker.get_max("KLGA", day=date(2026, 3, 7)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 3, 9)) is None
 
     def test_spring_forward_denver(self):
         """Denver (America/Denver) spring forward: 2026-03-08 09:00 UTC = 03:00 MDT."""
@@ -258,8 +258,8 @@ class TestDSTSpringForward:
         tracker.update(obs_pre)
         tracker.update(obs_post)
 
-        assert tracker.get_max("KDEN", date(2026, 3, 8)) == 31.0
-        assert tracker.get_max("KDEN", date(2026, 3, 7)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 3, 8)) == 31.0
+        assert tracker.get_max("KDEN", day=date(2026, 3, 7)) is None
 
 
 # ── 4. DST fall-back (November 2026) ─────────────────────────────────────────
@@ -285,9 +285,9 @@ class TestDSTFallBack:
         tracker.update(obs_est)
 
         # Both land on November 1 local — no cross-day split
-        assert tracker.get_max("KLGA", date(2026, 11, 1)) == 55.0
-        assert tracker.get_max("KLGA", date(2026, 10, 31)) is None
-        assert tracker.get_max("KLGA", date(2026, 11, 2)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 11, 1)) == 55.0
+        assert tracker.get_max("KLGA", day=date(2026, 10, 31)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 11, 2)) is None
 
     def test_fall_back_afternoon_obs_stays_nov_1(self):
         """Nov 1 afternoon (15:00 EST = 20:00 UTC) stays on Nov 1."""
@@ -297,7 +297,7 @@ class TestDSTFallBack:
         obs = _make_obs("KLGA", 62.0, _utc(2026, 11, 1, 20, 0))  # 15:00 EST
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 11, 1)) == 62.0
+        assert tracker.get_max("KLGA", day=date(2026, 11, 1)) == 62.0
 
     def test_fall_back_midnight_crossover_nov_2(self):
         """Nov 2 00:30 EST = UTC 05:30 → local Nov 2 (not Nov 1)."""
@@ -307,8 +307,8 @@ class TestDSTFallBack:
         obs = _make_obs("KLGA", 50.0, _utc(2026, 11, 2, 5, 30))  # 00:30 EST Nov 2
         tracker.update(obs)
 
-        assert tracker.get_max("KLGA", date(2026, 11, 2)) == 50.0
-        assert tracker.get_max("KLGA", date(2026, 11, 1)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 11, 2)) == 50.0
+        assert tracker.get_max("KLGA", day=date(2026, 11, 1)) is None
 
 
 # ── 5. days_ahead UTC midnight crossover scenarios ───────────────────────────
@@ -524,8 +524,8 @@ class TestZoneInfoFallback:
         tracker.update(obs)
 
         # Falls back to UTC: Apr 12 (even though Denver local is still Apr 11)
-        assert tracker.get_max("KDEN", date(2026, 4, 12)) == 65.0
-        assert tracker.get_max("KDEN", date(2026, 4, 11)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 12)) == 65.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 11)) is None
 
     def test_days_ahead_fallback_when_tz_missing(self):
         """When city not in _city_tz dict, simulate fallback to date.today()-equivalent.
@@ -557,7 +557,7 @@ class TestZoneInfoFallback:
         # First obs WITHOUT tz: UTC Apr 12 00:30 → stored under Apr 12 (UTC)
         obs1 = _make_obs("KDEN", 60.0, _utc(2026, 4, 12, 0, 30))
         tracker.update(obs1)
-        assert tracker.get_max("KDEN", date(2026, 4, 12)) == 60.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 12)) == 60.0
 
         # Register timezone
         tracker.register_timezone("KDEN", "America/Denver")
@@ -565,10 +565,10 @@ class TestZoneInfoFallback:
         # New obs WITH tz: UTC Apr 12 01:00 = 19:00 MDT Apr 11 → stored under Apr 11
         obs2 = _make_obs("KDEN", 65.0, _utc(2026, 4, 12, 1, 0))
         tracker.update(obs2)
-        assert tracker.get_max("KDEN", date(2026, 4, 11)) == 65.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 11)) == 65.0
 
         # Old obs still under Apr 12 (UTC key)
-        assert tracker.get_max("KDEN", date(2026, 4, 12)) == 60.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 12)) == 60.0
 
 
 # ── 8. METAR missing / delayed ───────────────────────────────────────────────
@@ -581,15 +581,13 @@ class TestMETARMissingOrDelayed:
         tracker = DailyMaxTracker()
         tracker.register_timezone("KDEN", "America/Denver")
 
-        assert tracker.get_max("KDEN") is None
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) is None
 
     def test_get_observations_returns_empty_when_no_data(self):
         tracker = DailyMaxTracker()
         tracker.register_timezone("KDEN", "America/Denver")
 
-        assert tracker.get_observations("KDEN") == []
-        assert tracker.get_observations("KDEN", date(2026, 4, 13)) == []
+        assert tracker.get_observations("KDEN", day=date(2026, 4, 13)) == []
 
     def test_daily_max_none_does_not_block_no_signals(self):
         """daily_max_f=None (METAR delayed): evaluate_no_signals still works."""
@@ -612,7 +610,7 @@ class TestMETARMissingOrDelayed:
         obs = _make_obs("KDEN", 71.5, _utc(2026, 4, 13, 18, 0))  # 12:00 MDT
         tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 71.5
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 71.5
 
     def test_daily_max_not_decreased_by_later_cooler_obs(self):
         """Running maximum never decreases — METAR data invariant."""
@@ -627,7 +625,7 @@ class TestMETARMissingOrDelayed:
         tracker.update(obs_cool)
         tracker.update(obs_night)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 80.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 80.0
 
 
 # ── 9. Multi-day stability ───────────────────────────────────────────────────
@@ -647,9 +645,9 @@ class TestMultiDayStability:
             obs = _make_obs("KDEN", peak_temp, _utc(2026, 4, 13 + day_offset, 21, 0))
             tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 85.0
-        assert tracker.get_max("KDEN", date(2026, 4, 14)) == 75.0
-        assert tracker.get_max("KDEN", date(2026, 4, 15)) == 65.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 85.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 14)) == 75.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 15)) == 65.0
 
     def test_midnight_obs_do_not_bleed_into_next_day(self):
         """Observations near Denver midnight are always on the correct day."""
@@ -671,10 +669,10 @@ class TestMultiDayStability:
             obs = _make_obs("KDEN", temp, utc_dt)
             tracker.update(obs)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 66.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 66.0
         # Apr 14 has two observations: 54.0 and 72.0 → max is 72.0
-        assert tracker.get_max("KDEN", date(2026, 4, 14)) == 72.0
-        assert tracker.get_max("KDEN", date(2026, 4, 15)) == 48.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 14)) == 72.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 15)) == 48.0
 
     def test_cleanup_does_not_remove_today_data(self):
         """cleanup_old(keep_date=today) preserves today's observations."""
@@ -687,7 +685,7 @@ class TestMultiDayStability:
 
         tracker.cleanup_old(keep_date=date(2026, 4, 13))
         # 1-day buffer: cutoff = Apr 12, Apr 13 survives
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 80.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 80.0
 
     def test_cleanup_removes_stale_days(self):
         """cleanup_old removes data more than 1 day old."""
@@ -703,8 +701,8 @@ class TestMultiDayStability:
         # keep_date=Apr 13, buffer=1 → cutoff=Apr 12 → Apr 11 removed
         tracker.cleanup_old(keep_date=date(2026, 4, 13))
 
-        assert tracker.get_max("KDEN", date(2026, 4, 11)) is None
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 80.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 11)) is None
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 80.0
 
     def test_multiple_cities_independent(self):
         """Two cities' daily max data don't interfere with each other."""
@@ -720,6 +718,6 @@ class TestMultiDayStability:
         tracker.update(obs_den)
         tracker.update(obs_lax)
 
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) == 85.0
-        assert tracker.get_max("KLAX", date(2026, 4, 13)) == 75.0
-        assert tracker.get_max("KDEN", date(2026, 4, 13)) != tracker.get_max("KLAX", date(2026, 4, 13))
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) == 85.0
+        assert tracker.get_max("KLAX", day=date(2026, 4, 13)) == 75.0
+        assert tracker.get_max("KDEN", day=date(2026, 4, 13)) != tracker.get_max("KLAX", day=date(2026, 4, 13))

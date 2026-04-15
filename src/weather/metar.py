@@ -180,19 +180,17 @@ class DailyMaxTracker:
 
         return self._maxes[key], is_new_high
 
-    def get_max(self, icao: str, day: date | None = None) -> float | None:
+    def get_max(self, icao: str, *, day: date) -> float | None:
         """Get the current daily max. Returns None if no data."""
-        d = day.isoformat() if day else self._local_today(icao)
-        val = self._maxes.get((icao, d))
+        val = self._maxes.get((icao, day.isoformat()))
         return val if val != -999.0 else None
 
-    def get_observations(self, icao: str, day: date | None = None) -> list[tuple[str, float]]:
+    def get_observations(self, icao: str, *, day: date) -> list[tuple[str, float]]:
         """Get the observation time series for a station and date.
 
         Returns a list of (iso_timestamp, temp_f) tuples, or empty list if no data.
         """
-        d = day.isoformat() if day else self._local_today(icao)
-        return list(self._observations.get((icao, d), []))
+        return list(self._observations.get((icao, day.isoformat()), []))
 
     def cleanup_old(self, keep_date: date | None = None) -> None:
         """Remove entries older than keep_date (with 1-day buffer for timezone safety)."""

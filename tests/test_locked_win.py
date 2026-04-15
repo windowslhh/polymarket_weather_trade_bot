@@ -471,8 +471,8 @@ class TestDailyMaxTrackerReturnType:
         obs = Observation(icao="KLGA", temp_f=80.0,
                          observation_time=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
         tracker.update(obs)
-        assert tracker.get_max("KLGA", date(2026, 4, 10)) == 80.0
-        assert tracker.get_max("KLGA", date(2026, 4, 9)) is None
+        assert tracker.get_max("KLGA", day=date(2026, 4, 10)) == 80.0
+        assert tracker.get_max("KLGA", day=date(2026, 4, 9)) is None
 
 
 # ──────────────────────────────────────────────────────────────────────
