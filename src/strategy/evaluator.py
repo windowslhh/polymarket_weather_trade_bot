@@ -143,6 +143,7 @@ def evaluate_no_signals(
     days_ahead: int = 0,
     daily_max_f: float | None = None,
     local_hour: int | None = None,
+    hours_to_settlement: float | None = None,
 ) -> list[TradeSignal]:
     """Phase 4: Generate BUY NO signals for slots far from forecast.
 
@@ -159,6 +160,14 @@ def evaluate_no_signals(
     - BREAKOUT_UP/DOWN: boost signals on the opposite side of the breakout
     """
     signals: list[TradeSignal] = []
+
+    # Block new entries when market is close to settlement
+    if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
+        logger.debug(
+            "Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
+            event.city, hours_to_settlement, config.force_exit_hours,
+        )
+        return signals
 
     # Adjust EV threshold based on trend and days ahead
     ev_threshold = config.min_no_ev
@@ -219,6 +228,13 @@ def evaluate_no_signals(
 
         distance = _slot_distance(slot, bias_corrected_f)
 
+        # Post-peak: also compute distance from observed daily_max and take the
+        # smaller value (conservative).  When forecast is stale/wrong but the
+        # actual temperature is near the slot, obs_distance catches it.
+        if peak_conf is not None and daily_max_f is not None:
+            obs_distance = _slot_distance(slot, daily_max_f)
+            distance = min(distance, obs_distance)
+
         if distance < config.no_distance_threshold_f:
             continue
 
@@ -260,6 +276,16 @@ def evaluate_no_signals(
               - _entry_fee_per_dollar(slot.price_no))
 
         if ev < ev_threshold:
+            continue
+
+        # Price divergence guard: when model and market disagree by >50pp,
+        # the model input (forecast) is likely stale or wrong.
+        market_implied_no_win = slot.price_no
+        if abs(win_prob - market_implied_no_win) > 0.50:
+            logger.warning(
+                "PRICE DIVERGENCE: %s slot %s — model=%.1f%% vs market=%.1f%%, skipping",
+                event.city, slot.outcome_label, win_prob * 100, market_implied_no_win * 100,
+            )
             continue
 
         signals.append(TradeSignal(

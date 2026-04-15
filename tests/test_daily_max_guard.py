@@ -22,7 +22,7 @@ from src.weather.models import Forecast, Observation
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def _slot(lower, upper, price_no=0.10, tid_no="no_1"):
+def _slot(lower, upper, price_no=0.80, tid_no="no_1"):
     label = ""
     if lower is not None and upper is not None:
         label = f"{lower}°F to {upper}°F"

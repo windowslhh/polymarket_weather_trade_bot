@@ -938,6 +938,7 @@ class Rebalancer:
                 no_signals = evaluate_no_signals(
                     event, forecast, strat_cfg, error_dist, trend_state, held_token_ids, days_ahead,
                     daily_max_f=daily_max, local_hour=local_hour,
+                    hours_to_settlement=hours_to_settle,
                 )
 
                 # Determine if daily max is final (past peak + stable)
