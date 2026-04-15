@@ -61,16 +61,17 @@ _CFG = StrategyConfig(no_distance_threshold_f=3, min_no_ev=-1.0, max_no_price=0.
 class TestPostPeakObsDistance:
     """After peak hours, distance filter should also consider daily_max."""
 
-    def test_post_peak_obs_distance_blocks_close_slot(self):
-        """forecast=67, daily_max=58, slot=[56,57], hour=18.
+    def test_post_peak_obs_distance_blocks_when_inside_slot(self):
+        """forecast=67, daily_max=56.5, slot=[56,57], hour=18.
         Forecast distance = min(|67-56|,|67-57|) = 10.
-        Obs distance = min(|58-56|,|58-57|) = 1.
-        min(10, 1) = 1 < 3 → blocked."""
+        daily_max=56.5 ≤ slot.upper=57 → obs_distance used.
+        Obs distance = min(|56.5-56|,|56.5-57|) = 0.5.
+        min(10, 0.5) = 0.5 < 3 → blocked."""
         slot = _slot(56, 57, price_no=0.80)
         event = _event([slot])
         sigs = evaluate_no_signals(
             event, _forecast(67.0), _CFG,
-            days_ahead=0, daily_max_f=58.0, local_hour=18,
+            days_ahead=0, daily_max_f=56.5, local_hour=18,
         )
         assert len(sigs) == 0
 
@@ -120,6 +121,31 @@ class TestPostPeakObsDistance:
             days_ahead=1, daily_max_f=58.0, local_hour=18,
         )
         assert len(sigs) == 1
+
+    def test_daily_max_above_upper_skips_obs_distance(self):
+        """forecast=67, daily_max=58, slot=[56,57], hour=18.
+        daily_max=58 > slot.upper=57 → temp already passed through slot,
+        NO is safe → obs_distance NOT used.
+        Forecast distance=10 >= 3 → signal generated (not blocked)."""
+        slot = _slot(56, 57, price_no=0.80)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(67.0), _CFG,
+            days_ahead=0, daily_max_f=58.0, local_hour=18,
+        )
+        assert len(sigs) == 1
+
+    def test_open_ended_slot_always_uses_obs_distance(self):
+        """Open-ended slot (upper=None, e.g. '≥56°F') always uses obs_distance.
+        forecast=67, daily_max=56.5, slot=[56,None], hour=18.
+        Obs distance = |56.5-56| = 0.5, distance = min(11, 0.5) = 0.5 < 3 → blocked."""
+        slot = _slot(56, None, price_no=0.80)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(67.0), _CFG,
+            days_ahead=0, daily_max_f=56.5, local_hour=18,
+        )
+        assert len(sigs) == 0
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -226,3 +252,38 @@ class TestPriceDivergenceGuard:
             days_ahead=0,
         )
         assert len(sigs) == 1
+
+    def test_exactly_50pp_allowed(self):
+        """model≈99% (capped), price_no=0.49 → |0.99-0.49|=0.50 → exactly 50pp.
+        Guard uses > 0.50, so exactly 50pp is NOT blocked."""
+        slot = _slot(56, 57, price_no=0.49)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(67.0), _CFG,
+            days_ahead=0,
+        )
+        assert len(sigs) == 1
+
+    def test_just_over_50pp_blocked(self):
+        """model≈99% (capped), price_no=0.48 → |0.99-0.48|=0.51 → 51pp > 50pp → blocked."""
+        slot = _slot(56, 57, price_no=0.48)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(67.0), _CFG,
+            days_ahead=0,
+        )
+        assert len(sigs) == 0
+
+    def test_post_peak_boost_triggers_divergence(self):
+        """Post-peak boost inflates win_prob past divergence threshold.
+        slot=[40,45], forecast=48 → distance=3, z=1.0, win_prob≈0.84
+        price_no=0.35 → |0.84-0.35|=0.49 < 0.50 → would pass.
+        But daily_max=80, hour=18 → obs_prob=0.99 → boosted win_prob=0.99
+        → |0.99-0.35|=0.64 > 0.50 → blocked by divergence guard."""
+        slot = _slot(40, 45, price_no=0.35)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(48.0), _CFG,
+            days_ahead=0, daily_max_f=80.0, local_hour=18,
+        )
+        assert len(sigs) == 0

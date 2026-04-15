@@ -231,9 +231,12 @@ def evaluate_no_signals(
         # Post-peak: also compute distance from observed daily_max and take the
         # smaller value (conservative).  When forecast is stale/wrong but the
         # actual temperature is near the slot, obs_distance catches it.
+        # Skip when daily_max already exceeds slot upper bound — NO is safe
+        # (temp can't fall back), so obs_distance would be misleadingly small.
         if peak_conf is not None and daily_max_f is not None:
-            obs_distance = _slot_distance(slot, daily_max_f)
-            distance = min(distance, obs_distance)
+            if slot.temp_upper_f is None or daily_max_f <= slot.temp_upper_f:
+                obs_distance = _slot_distance(slot, daily_max_f)
+                distance = min(distance, obs_distance)
 
         if distance < config.no_distance_threshold_f:
             continue
