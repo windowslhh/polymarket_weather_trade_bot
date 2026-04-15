@@ -256,6 +256,67 @@ class TestTimezoneAwareDailyMax:
         assert len(series_12) == 1
         assert series_12[0][1] == 55.0
 
+    def test_midnight_crossover_update_returns_wrong_day_max(self):
+        """Production bug 2026-04-15: near midnight EDT, tracker.update() returns
+        the max for the NEXT local day (just a nighttime reading) instead of
+        the current day's actual peak.
+
+        At 04:03 UTC = 00:03 EDT Apr 15, a METAR observation maps to local
+        date Apr 15.  tracker.update() returns the Apr 15 max (69°F nighttime),
+        not the Apr 14 max (85°F daytime peak from backfill).
+
+        The rebalancer must use get_max(icao, day=event.market_date) instead of
+        the return value from update() to avoid this mismatch.
+        """
+        tracker = DailyMaxTracker()
+        tracker.register_timezone("KATL", "America/New_York")
+
+        # Backfill: daytime peak on Apr 14 (EDT) at 19:00 UTC = 15:00 EDT
+        peak_obs = Observation(
+            icao="KATL", temp_f=85.0,
+            observation_time=datetime(2026, 4, 14, 19, 0, tzinfo=timezone.utc),
+        )
+        tracker.update(peak_obs)
+        assert tracker.get_max("KATL", date(2026, 4, 14)) == 85.0
+
+        # Live METAR just after midnight EDT:
+        # 04:03 UTC Apr 15 = 00:03 EDT Apr 15 → keyed to Apr 15
+        midnight_obs = Observation(
+            icao="KATL", temp_f=69.0,
+            observation_time=datetime(2026, 4, 15, 4, 3, tzinfo=timezone.utc),
+        )
+        max_from_update, _ = tracker.update(midnight_obs)
+
+        # update() returns Apr 15 max (69°F) — NOT the Apr 14 max (85°F)!
+        assert max_from_update == 69.0
+
+        # But get_max with explicit day= still returns the correct values:
+        assert tracker.get_max("KATL", date(2026, 4, 14)) == 85.0
+        assert tracker.get_max("KATL", date(2026, 4, 15)) == 69.0
+
+    def test_pre_midnight_update_returns_correct_day(self):
+        """Just before midnight EDT (03:53 UTC), update() still returns
+        the correct day's max because the observation maps to Apr 14 local."""
+        tracker = DailyMaxTracker()
+        tracker.register_timezone("KATL", "America/New_York")
+
+        # Backfill peak
+        peak_obs = Observation(
+            icao="KATL", temp_f=85.0,
+            observation_time=datetime(2026, 4, 14, 19, 0, tzinfo=timezone.utc),
+        )
+        tracker.update(peak_obs)
+
+        # METAR at 03:53 UTC = 23:53 EDT Apr 14 → still Apr 14
+        pre_midnight_obs = Observation(
+            icao="KATL", temp_f=69.0,
+            observation_time=datetime(2026, 4, 15, 3, 53, tzinfo=timezone.utc),
+        )
+        max_from_update, _ = tracker.update(pre_midnight_obs)
+
+        # update() returns Apr 14 max including the backfilled peak
+        assert max_from_update == 85.0
+
     def test_cleanup_with_timezone_buffer(self):
         """cleanup_old has 1-day buffer to protect cross-timezone entries."""
         tracker = DailyMaxTracker()

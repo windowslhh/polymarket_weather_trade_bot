@@ -519,6 +519,7 @@ def evaluate_locked_win_signals(
             expected_value=ev,
             estimated_win_prob=win_prob,
             is_locked_win=True,
+            reason=lock_reason,
         )
         signals.append(signal)
 

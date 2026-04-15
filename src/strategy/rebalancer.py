@@ -468,16 +468,13 @@ class Rebalancer:
                         local_hour = None
                         local_today = date.today()
 
-                    daily_max = daily_maxes.get(city)
                     observation = city_observations.get(city)
                     error_dist = self._error_dists.get(city)
 
-                    if not observation or daily_max is None:
-                        skipped_no_obs += 1
-                        continue
-
                     # Infer market_date from slot_label (e.g. "...on April 11?")
                     # to correctly compute days_ahead for exit logic.
+                    # Must be computed BEFORE daily_max lookup so we query the
+                    # tracker for the correct event date.
                     market_date = local_today
                     sample_label = positions[0].get("slot_label", "")
                     m = re.search(r'on (\w+ \d+)\??$', sample_label)
@@ -499,6 +496,22 @@ class Rebalancer:
                             sample_label, event_id,
                         )
                     days_ahead = (market_date - local_today).days
+
+                    # Get daily max for the EVENT's market date (not the latest
+                    # observation's date).  Near midnight local time, the live
+                    # METAR may map to the next day, returning a stale nighttime
+                    # max instead of the actual peak for this event's date.
+                    _city_icao_pc = next(
+                        (c.icao for c in self._config.cities if c.name == city), None,
+                    )
+                    daily_max = (
+                        self._max_tracker.get_max(_city_icao_pc, day=market_date)
+                        if _city_icao_pc else daily_maxes.get(city)
+                    )
+
+                    if not observation or daily_max is None:
+                        skipped_no_obs += 1
+                        continue
 
                     # Build held NO slots from positions, using cached Gamma prices
                     # when available so exit signals carry the current market price
@@ -550,19 +563,18 @@ class Rebalancer:
                         slots=held_no_slots,
                     )
 
-                    # Determine if daily max is final (past peak + stable)
+                    # Determine if daily max is final (past peak + stable).
+                    # Use market_date for observation series to match daily_max.
                     _dm_final = False
-                    if city_tz and daily_max is not None:
-                        _city_icao = next(
-                            (c.icao for c in self._config.cities if c.name == city), None,
+                    if city_tz and daily_max is not None and _city_icao_pc:
+                        _obs_series = self._max_tracker.get_observations(
+                            _city_icao_pc, day=market_date,
                         )
-                        if _city_icao:
-                            _obs_series = self._max_tracker.get_observations(_city_icao)
-                            _dm_final = is_daily_max_final(
-                                datetime.now(city_tz), _obs_series,
-                                post_peak_hour=strat_cfg.post_peak_hour,
-                                stability_window_minutes=strat_cfg.stability_window_minutes,
-                            )
+                        _dm_final = is_daily_max_final(
+                            datetime.now(city_tz), _obs_series,
+                            post_peak_hour=strat_cfg.post_peak_hour,
+                            stability_window_minutes=strat_cfg.stability_window_minutes,
+                        )
 
                     # Evaluate locked-win signals (new BUY opportunities)
                     locked_signals = evaluate_locked_win_signals(
@@ -596,7 +608,7 @@ class Rebalancer:
                         if size > 0:
                             sig.suggested_size_usd = size
                             sig.strategy = strat_name
-                            sig.reason = f"[{strat_name}] LOCKED WIN: daily_max={daily_max:.0f}°F > slot upper, EV={sig.expected_value:.3f}"
+                            sig.reason = f"[{strat_name}] {sig.reason}, EV={sig.expected_value:.3f}"
                             signals.append(sig)
                             strat_city_exp += size
                             strat_total_exp += size
@@ -792,7 +804,14 @@ class Rebalancer:
             if not forecast:
                 continue
 
-            daily_max = daily_maxes.get(event.city)
+            # Get daily max for the EVENT's market date (not the latest observation's date).
+            # Near midnight local time, the live METAR may map to the next day, returning
+            # a stale/low nighttime max instead of today's actual peak.
+            _city_icao_ev = next((c.icao for c in self._config.cities if c.name == event.city), None)
+            daily_max = (
+                self._max_tracker.get_max(_city_icao_ev, day=event.market_date)
+                if _city_icao_ev else daily_maxes.get(event.city)
+            )
             observation = city_observations.get(event.city)
             error_dist = self._error_dists.get(event.city)
 
@@ -941,14 +960,18 @@ class Rebalancer:
                     hours_to_settlement=hours_to_settle,
                 )
 
-                # Determine if daily max is final (past peak + stable)
+                # Determine if daily max is final (past peak + stable).
+                # Use event.market_date to retrieve observation series for the
+                # correct day (matches the daily_max lookup above).
                 _dm_final_main = False
                 if city_tz and daily_max is not None:
                     _city_icao_main = next(
                         (c.icao for c in self._config.cities if c.name == event.city), None,
                     )
                     if _city_icao_main:
-                        _obs_series_main = self._max_tracker.get_observations(_city_icao_main)
+                        _obs_series_main = self._max_tracker.get_observations(
+                            _city_icao_main, day=event.market_date,
+                        )
                         _dm_final_main = is_daily_max_final(
                             datetime.now(city_tz), _obs_series_main,
                             post_peak_hour=strat_cfg.post_peak_hour,
@@ -1007,7 +1030,7 @@ class Rebalancer:
                         # Attach buy reason to signal for persistence
                         dist = _slot_distance(signal.slot, forecast.predicted_high_f)
                         if signal.is_locked_win:
-                            signal.reason = f"[{strat_name}] LOCKED WIN: daily_max={daily_max:.0f}°F > slot upper, EV={signal.expected_value:.3f}"
+                            signal.reason = f"[{strat_name}] {signal.reason}, EV={signal.expected_value:.3f}"
                         else:
                             signal.reason = f"[{strat_name}] NO: dist={dist:.0f}°F, EV={signal.expected_value:.3f}, win={signal.estimated_win_prob:.0%}"
                         all_signals.append(signal)
