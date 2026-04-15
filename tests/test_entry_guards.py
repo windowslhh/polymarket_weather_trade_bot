@@ -287,3 +287,70 @@ class TestPriceDivergenceGuard:
             days_ahead=0, daily_max_f=80.0, local_hour=18,
         )
         assert len(sigs) == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Bug 3: "below X°F" slot — daily_max in-slot guard (post-peak)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBelowSlotDailyMaxInSlot:
+    """Block NO entry on 'below X°F' slots when daily_max is inside the slot post-peak.
+
+    'Below X°F' means YES wins when actual < X.  If daily_max (post-peak,
+    near-final) is still < X, the actual high is inside the slot → YES likely
+    wins → NO is a loser → block entry.
+    """
+
+    def test_post_peak_daily_max_inside_slot_blocked(self):
+        """Post-peak, daily_max=70 < 75 → inside 'below 75' → block NO."""
+        slot = _slot(None, 75, price_no=0.50)
+        event = _event([slot])
+        # forecast=85 is far above slot → distance filter passes → only
+        # the in-slot guard should block this entry
+        sigs = evaluate_no_signals(
+            event, _forecast(85.0), _CFG,
+            days_ahead=0, daily_max_f=70.0, local_hour=18,
+        )
+        assert len(sigs) == 0, (
+            "Post-peak daily_max=70 inside 'below 75' slot → should block NO entry"
+        )
+
+    def test_post_peak_daily_max_above_slot_allowed(self):
+        """Post-peak, daily_max=76 > 75 → outside 'below 75' → allow NO."""
+        slot = _slot(None, 75, price_no=0.50)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(85.0), _CFG,
+            days_ahead=0, daily_max_f=76.0, local_hour=18,
+        )
+        assert len(sigs) == 1, (
+            "Post-peak daily_max=76 outside 'below 75' slot → should allow NO entry"
+        )
+
+    def test_pre_peak_daily_max_inside_slot_allowed(self):
+        """Pre-peak (hour=12), daily_max=70 < 75 → temp may still rise → allow NO."""
+        slot = _slot(None, 75, price_no=0.50)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(85.0), _CFG,
+            days_ahead=0, daily_max_f=70.0, local_hour=12,
+        )
+        assert len(sigs) == 1, (
+            "Pre-peak daily_max=70 inside 'below 75' but temp may rise → allow NO"
+        )
+
+    def test_boundary_wu_round_equals_upper_allowed(self):
+        """Post-peak, wu_round(daily_max)=75 == upper=75 → NOT inside (< not <=) → allow.
+
+        Use daily_max=75.4 so wu_round=75 (boundary test) AND daily_max > upper
+        (avoids obs_distance collapsing distance to 0 in the post-peak filter).
+        """
+        slot = _slot(None, 75, price_no=0.50)
+        event = _event([slot])
+        sigs = evaluate_no_signals(
+            event, _forecast(85.0), _CFG,
+            days_ahead=0, daily_max_f=75.4, local_hour=18,
+        )
+        assert len(sigs) == 1, (
+            "wu_round(75.4)==75 not < 75 → boundary case should allow NO entry"
+        )

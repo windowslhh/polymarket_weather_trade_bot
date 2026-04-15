@@ -211,6 +211,20 @@ def evaluate_no_signals(
         ):
             continue
 
+        # For "below X°F" slots (lower=None, upper=X): post-peak, if
+        # wu_round(daily_max) < X then the daily max is still inside this
+        # slot's range (-∞, X) → YES is likely winning → NO is a loser.
+        # Only checked post-peak because earlier in the day the temperature
+        # may still rise above X, making NO viable.
+        if (
+            peak_conf is not None
+            and daily_max_f is not None
+            and slot.temp_lower_f is None
+            and slot.temp_upper_f is not None
+            and wu_round(daily_max_f) < int(slot.temp_upper_f)
+        ):
+            continue
+
         # Bias-corrected reference temperature for the distance pre-filter.
         # When the empirical distribution shows a systematic bias (e.g. forecasts
         # run +2°F hot), the expected actual temperature is lower than the raw
@@ -242,6 +256,10 @@ def evaluate_no_signals(
             continue
 
         if slot.price_no <= 0 or slot.price_no >= 1:
+            continue
+
+        # Skip extremely cheap NO — poor liquidity and inflated odds
+        if slot.price_no < config.min_no_price:
             continue
 
         # Skip overpriced NO — risk/reward too asymmetric at high prices
@@ -349,12 +367,17 @@ def evaluate_trim_signals(
             continue
 
         # Also protect slots where wu_round(daily_max) currently exceeds upper bound
-        # (locked-win condition is true NOW, even if not bought as locked win)
+        # by at least locked_win_margin_f (locked-win condition is true NOW,
+        # even if not bought as locked win).  Must match the same margin
+        # threshold as locked_win_signals to avoid a dead zone where the
+        # position is neither locked-win-protected nor trimmable.
         if daily_max_f is not None and slot.temp_upper_f is not None:
-            if wu_round(daily_max_f) > int(slot.temp_upper_f):
+            gap = wu_round(daily_max_f) - int(slot.temp_upper_f)
+            if gap >= config.locked_win_margin_f:
                 logger.debug(
-                    "TRIM skip (daily_max %.1f > upper %.1f): %s slot %s",
-                    daily_max_f, slot.temp_upper_f, event.city, slot.outcome_label,
+                    "TRIM skip (daily_max %.1f > upper %.1f + margin %d): %s slot %s",
+                    daily_max_f, slot.temp_upper_f, config.locked_win_margin_f,
+                    event.city, slot.outcome_label,
                 )
                 continue
 
@@ -436,6 +459,9 @@ def evaluate_locked_win_signals(
             continue
 
         if slot.price_no <= 0 or slot.price_no >= 1:
+            continue
+
+        if slot.price_no < config.min_no_price:
             continue
 
         is_locked = False
@@ -585,14 +611,20 @@ def evaluate_exit_signals(
     signals: list[TradeSignal] = []
     for slot in held_no_slots:
         # ── Layer 1: Locked-win protection ──
-        # If wu_round(daily_max) already exceeded the slot's upper bound,
-        # NO wins for certain. Never exit a guaranteed winner.
-        if slot.temp_upper_f is not None and wu_round(daily_max_f) > int(slot.temp_upper_f):
-            logger.debug(
-                "EXIT skip (locked win): %s slot %s — daily max %.1f > upper %.1f",
-                event.city, slot.outcome_label, daily_max_f, slot.temp_upper_f,
-            )
-            continue
+        # If wu_round(daily_max) already exceeded the slot's upper bound
+        # by at least locked_win_margin_f, NO wins for certain. Never exit
+        # a guaranteed winner.  Without the margin check, positions in the
+        # dead zone (exceeded by <margin) would be protected from exit
+        # despite not qualifying as locked wins.
+        if slot.temp_upper_f is not None:
+            gap = wu_round(daily_max_f) - int(slot.temp_upper_f)
+            if gap >= config.locked_win_margin_f:
+                logger.debug(
+                    "EXIT skip (locked win): %s slot %s — daily max %.1f > upper %.1f + margin %d",
+                    event.city, slot.outcome_label, daily_max_f, slot.temp_upper_f,
+                    config.locked_win_margin_f,
+                )
+                continue
 
         distance = _slot_distance(slot, daily_max_f)
 

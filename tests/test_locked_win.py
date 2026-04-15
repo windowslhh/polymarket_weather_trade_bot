@@ -220,13 +220,20 @@ class TestLockedWinBoundary:
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
-    def test_price_no_very_low_high_ev(self):
-        """price_no=0.10 → high EV → signal."""
+    def test_price_no_very_low_filtered(self):
+        """price_no=0.10 < min_no_price(0.20) → filtered out."""
         slot = _slot(70, 74, price_no=0.10)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 0
+
+    def test_price_no_at_min_accepted(self):
+        """price_no=0.20 == min_no_price → accepted (not filtered)."""
+        slot = _slot(70, 74, price_no=0.20)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1
-        assert sigs[0].expected_value > 0.8
+        assert sigs[0].expected_value > 0
 
     def test_both_bounds_none_slot_no_lock(self):
         """Degenerate slot (both None) → no lock."""

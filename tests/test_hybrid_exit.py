@@ -77,17 +77,32 @@ class TestLayer1LockedWinProtection:
     """Layer 1: Never exit a slot where daily_max > slot.upper_bound."""
 
     def test_locked_win_not_exited(self):
-        """daily_max=85 > upper=84 → slot is locked win → NO exit."""
+        """daily_max=87 > upper=84 + margin(2) → slot is locked win → NO exit."""
         config = StrategyConfig(no_distance_threshold_f=8)
         held = _slot(80, 84)
         event = _event([held])
-        # daily_max=85 is inside slot distance-wise (distance=0 from [80,84] perspective
-        # since 85 > 84), but locked-win protection should prevent exit
+        # wu_round(87)=87, gap=87-84=3 >= margin(2) → locked-win protected
         sigs = evaluate_exit_signals(
-            event, _obs(85.0), 85.0, [held], config,
+            event, _obs(87.0), 87.0, [held], config,
             forecast=_forecast(75.0),
         )
         assert len(sigs) == 0
+
+    def test_locked_win_dead_zone_not_protected(self):
+        """daily_max=85 > upper=84 but gap(1) < margin(2) → NOT protected → exit fires."""
+        config = StrategyConfig(no_distance_threshold_f=8)
+        held = _slot(80, 84)
+        event = _event([held])
+        # wu_round(85)=85, gap=85-84=1 < margin(2) → dead zone
+        # forecast=82 inside [80,84] → distance=0 < exit_distance → EV negative → SELL
+        sigs = evaluate_exit_signals(
+            event, _obs(85.0), 85.0, [held], config,
+            forecast=_forecast(82.0),
+        )
+        assert len(sigs) == 1, (
+            "Dead zone (gap=1 < margin=2): Layer 1 must not block, "
+            "forecast inside slot should produce exit signal"
+        )
 
     def test_locked_win_protection_below_x_slot(self):
         """'Below 60°F' with daily_max=62 → locked → no exit."""

@@ -32,6 +32,7 @@ class StrategyConfig:
     max_slot_spread: float = 0.15
     min_trim_ev: float = 0.02
     max_no_price: float = 0.85
+    min_no_price: float = 0.20
     day_ahead_ev_discount: float = 0.7
     max_days_ahead: int = 2
     max_positions_per_event: int = 4

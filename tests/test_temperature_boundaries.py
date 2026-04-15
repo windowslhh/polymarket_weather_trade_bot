@@ -366,15 +366,30 @@ class TestExitWuRound:
     """Exit Layer 1 locked-win protection uses wu_round."""
 
     def test_exit_protected_when_wu_round_exceeds(self):
-        """daily_max=84.5, slot [80,84]: wu_round(84.5)=85 > 84 → protected."""
+        """daily_max=86.5, slot [80,84]: wu_round(86.5)=87, gap=3 >= margin(2) → protected."""
         cfg = StrategyConfig(no_distance_threshold_f=10)
         held = _slot(80, 84, price_no=0.90)
         event = _event([held])
         sigs = evaluate_exit_signals(
-            event, _obs(84.5), 84.5, [held], cfg,
+            event, _obs(86.5), 86.5, [held], cfg,
             forecast=_forecast(75.0),
         )
-        assert len(sigs) == 0, "Should be protected (wu_round=85 > 84)"
+        assert len(sigs) == 0, "Should be protected (wu_round=87, gap=3 >= margin=2)"
+
+    def test_exit_dead_zone_not_protected(self):
+        """daily_max=84.5, slot [80,84]: wu_round=85, gap=1 < margin(2) → NOT protected → exit fires."""
+        cfg = StrategyConfig(no_distance_threshold_f=10)
+        held = _slot(80, 84, price_no=0.90)
+        event = _event([held])
+        # forecast=82 inside [80,84] → distance=0 < exit_distance → EV negative → SELL
+        sigs = evaluate_exit_signals(
+            event, _obs(84.5), 84.5, [held], cfg,
+            forecast=_forecast(82.0),
+        )
+        assert len(sigs) == 1, (
+            "Dead zone (gap=1 < margin=2): Layer 1 must not block, "
+            "forecast inside slot should produce exit signal"
+        )
 
     def test_exit_not_protected_when_wu_round_at_boundary(self):
         """daily_max=84.4, slot [80,84]: wu_round(84.4)=84 NOT > 84 → NOT protected."""
@@ -393,13 +408,25 @@ class TestTrimWuRound:
     """Trim locked-win protection uses wu_round."""
 
     def test_trim_protected_when_wu_round_exceeds(self):
-        """daily_max=74.5, slot [70,74]: wu_round=75 > 74 → never trim."""
+        """daily_max=76.5, slot [70,74]: wu_round=77, gap=3 >= margin(2) → never trim."""
         cfg = StrategyConfig()
         held = _slot(70, 74, price_no=0.90)
         event = _event([held])
         fc = _forecast(high=72.0)  # forecast inside slot → low win_prob → trim candidate
+        sigs = evaluate_trim_signals(event, fc, [held], cfg, daily_max_f=76.5)
+        assert len(sigs) == 0, "Should be protected by wu_round trim guard (gap=3 >= margin=2)"
+
+    def test_trim_dead_zone_not_protected(self):
+        """daily_max=74.5, slot [70,74]: wu_round=75, gap=1 < margin(2) → trim fires."""
+        cfg = StrategyConfig()
+        held = _slot(70, 74, price_no=0.90)
+        event = _event([held])
+        fc = _forecast(high=72.0)  # forecast inside slot → negative EV
         sigs = evaluate_trim_signals(event, fc, [held], cfg, daily_max_f=74.5)
-        assert len(sigs) == 0, "Should be protected by wu_round trim guard"
+        assert len(sigs) == 1, (
+            "Dead zone (gap=1 < margin=2): trim guard must not block, "
+            "forecast inside slot should produce trim signal"
+        )
 
     def test_trim_not_protected_when_wu_round_at_boundary(self):
         """daily_max=74.4, slot [70,74]: wu_round=74 NOT > 74 → can trim."""
