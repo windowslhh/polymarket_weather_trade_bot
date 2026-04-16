@@ -913,6 +913,10 @@ class Rebalancer:
             # Collect all evaluated signals across all strategy variants for decision logging
             # P0-1 FIX: store (signal, strat_name, source, strat_cfg, forecast) to avoid stale refs
             all_evaluated_for_event: list[tuple[TradeSignal, str, str, StrategyConfig, float]] = []
+            # Sampled NO rejects per strategy (capped to avoid flooding decision_log).
+            # See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
+            _REJECT_SAMPLE_PER_STRATEGY = 3
+            all_rejects_for_event: list[tuple[dict, str, float]] = []  # (reject_item, strat_name, forecast_high)
 
             # Run all strategy variants
             variants = get_strategy_variants()
@@ -958,11 +962,20 @@ class Rebalancer:
                 event_pos_count = len(existing_positions)
 
                 # Phase 4: NO signals (forecast-based entry, post-peak boost)
+                # Collect rejected slots for observability (sampled into decision_log below).
+                no_rejects: list[dict] = []
                 no_signals = evaluate_no_signals(
                     event, forecast, strat_cfg, error_dist, trend_state, held_token_ids, days_ahead,
                     daily_max_f=daily_max, local_hour=local_hour,
                     hours_to_settlement=hours_to_settle,
+                    rejects=no_rejects,
                 )
+
+                # Sample up to N rejects per strategy for decision_log observability.
+                # Deterministic: first-N keeps the earliest rejections in slot order
+                # (sufficient for debugging "why no signals generated today?").
+                for item in no_rejects[:_REJECT_SAMPLE_PER_STRATEGY]:
+                    all_rejects_for_event.append((item, strat_name, forecast.predicted_high_f))
 
                 # Determine if daily max is final (past peak + stable).
                 # Use event.market_date to retrieve observation series for the
@@ -1112,6 +1125,26 @@ class Rebalancer:
                     )
                 except Exception:
                     logger.debug("Failed to insert decision log for %s %s", event.city, signal.slot.outcome_label)
+
+            # Write sampled NO REJECTs for this event (observability).
+            # See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
+            for reject_item, r_strat_name, r_forecast_high in all_rejects_for_event:
+                try:
+                    await self._portfolio.insert_decision_log(
+                        cycle_at=cycle_at, city=event.city, event_id=event.event_id,
+                        signal_type="NO", slot_label=reject_item.get("slot_label", ""),
+                        forecast_high_f=r_forecast_high,
+                        daily_max_f=reject_item.get("daily_max_f", daily_max),
+                        trend_state=trend_state.value,
+                        win_prob=reject_item.get("win_prob", 0.0),
+                        expected_value=reject_item.get("expected_value", 0.0),
+                        price=reject_item.get("price_no", 0.0),
+                        size_usd=0.0, action="REJECT",
+                        reason=f"[{r_strat_name}] REJECT: {reject_item.get('reason', 'UNKNOWN')}",
+                        strategy=r_strat_name,
+                    )
+                except Exception:
+                    logger.debug("Failed to insert REJECT log for %s", event.city)
 
         # Save signal summaries for dashboard
         self._last_signals = [

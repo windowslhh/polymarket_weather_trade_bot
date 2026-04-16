@@ -144,6 +144,7 @@ def evaluate_no_signals(
     daily_max_f: float | None = None,
     local_hour: int | None = None,
     hours_to_settlement: float | None = None,
+    rejects: list[dict] | None = None,
 ) -> list[TradeSignal]:
     """Phase 4: Generate BUY NO signals for slots far from forecast.
 
@@ -158,8 +159,25 @@ def evaluate_no_signals(
     Trend state adjusts behavior:
     - SETTLING: tighter EV threshold (only high-confidence trades)
     - BREAKOUT_UP/DOWN: boost signals on the opposite side of the breakout
+
+    If ``rejects`` is provided, every slot that fails a filter gate appends
+    a dict describing the rejection reason (used by the rebalancer to
+    write sampled REJECT entries to decision_log for observability).  See
+    docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
     """
     signals: list[TradeSignal] = []
+
+    def _reject(slot: TempSlot, reason: str, **extra) -> None:
+        if rejects is None:
+            return
+        entry = {
+            "slot_label": slot.outcome_label,
+            "token_id_no": slot.token_id_no,
+            "price_no": slot.price_no,
+            "reason": reason,
+        }
+        entry.update(extra)
+        rejects.append(entry)
 
     # Block new entries when market is close to settlement
     if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
@@ -183,7 +201,7 @@ def evaluate_no_signals(
         peak_conf = _post_peak_confidence(local_hour)
 
     for slot in event.slots:
-        # Skip already-held slots
+        # Skip already-held slots (not a rejection — silent)
         if held_token_ids and slot.token_id_no in held_token_ids:
             continue
 
@@ -197,6 +215,7 @@ def evaluate_no_signals(
             and slot.temp_lower_f is not None
             and wu_round(daily_max_f) >= int(slot.temp_lower_f)
         ):
+            _reject(slot, "DAILY_MAX_ABOVE_LOWER", daily_max_f=daily_max_f)
             continue
 
         # For range slots [L, U]: when wu_round(daily_max) is inside the range,
@@ -209,6 +228,7 @@ def evaluate_no_signals(
             and slot.temp_upper_f is not None
             and int(slot.temp_lower_f) <= wu_round(daily_max_f) <= int(slot.temp_upper_f)
         ):
+            _reject(slot, "DAILY_MAX_IN_SLOT", daily_max_f=daily_max_f)
             continue
 
         # For "below X°F" slots (lower=None, upper=X): post-peak, if
@@ -223,6 +243,7 @@ def evaluate_no_signals(
             and slot.temp_upper_f is not None
             and wu_round(daily_max_f) < int(slot.temp_upper_f)
         ):
+            _reject(slot, "DAILY_MAX_BELOW_UPPER", daily_max_f=daily_max_f)
             continue
 
         # Bias-corrected reference temperature for the distance pre-filter.
@@ -253,17 +274,22 @@ def evaluate_no_signals(
                 distance = min(distance, obs_distance)
 
         if distance < config.no_distance_threshold_f:
+            _reject(slot, "DIST_TOO_CLOSE", distance_f=distance,
+                    threshold_f=config.no_distance_threshold_f)
             continue
 
         if slot.price_no <= 0 or slot.price_no >= 1:
+            _reject(slot, "PRICE_INVALID")
             continue
 
         # Skip extremely cheap NO — poor liquidity and inflated odds
         if slot.price_no < config.min_no_price:
+            _reject(slot, "PRICE_TOO_LOW", min_no_price=config.min_no_price)
             continue
 
         # Skip overpriced NO — risk/reward too asymmetric at high prices
         if slot.price_no > config.max_no_price:
+            _reject(slot, "PRICE_TOO_HIGH", max_no_price=config.max_no_price)
             continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
@@ -297,6 +323,9 @@ def evaluate_no_signals(
               - _entry_fee_per_dollar(slot.price_no))
 
         if ev < ev_threshold:
+            _reject(slot, "EV_BELOW_GATE",
+                    expected_value=ev, win_prob=win_prob,
+                    ev_threshold=ev_threshold)
             continue
 
         # Price divergence guard: when model and market disagree by >50pp,
@@ -307,6 +336,8 @@ def evaluate_no_signals(
                 "PRICE DIVERGENCE: %s slot %s — model=%.1f%% vs market=%.1f%%, skipping",
                 event.city, slot.outcome_label, win_prob * 100, market_implied_no_win * 100,
             )
+            _reject(slot, "PRICE_DIVERGENCE",
+                    win_prob=win_prob, market_implied=market_implied_no_win)
             continue
 
         signals.append(TradeSignal(
