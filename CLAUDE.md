@@ -33,7 +33,7 @@
 - **15-minute position check**: Lightweight cycle (METAR only, no market discovery) for urgent locked-win and exit signals
 - **TradeSignal.is_locked_win**: Formal bool field — do NOT use private `_is_locked_win` attribute
 - **TradeSignal.reason**: Always set before execution — executor reads `signal.strategy` and `signal.reason` directly (no getattr)
-- **decision_log REJECT sampling** (fix 3): up to 3 rejections per (strategy, event) are persisted with reason code (PRICE_TOO_HIGH / DIST_TOO_CLOSE / EV_BELOW_GATE / VOLUME_TOO_LOW / SPREAD_TOO_WIDE / PRICE_DIVERGENCE / DAILY_MAX_ABOVE_SLOT / PRICE_TOO_LOW / HELD) for post-hoc "why nothing traded?" debugging.
+- **decision_log REJECT sampling** (fix 3): up to 3 rejections per (strategy, event) are persisted with reason code (DAILY_MAX_ABOVE_LOWER / DAILY_MAX_IN_SLOT / DAILY_MAX_BELOW_UPPER / DIST_TOO_CLOSE / PRICE_INVALID / PRICE_TOO_LOW / PRICE_TOO_HIGH / EV_BELOW_GATE / PRICE_DIVERGENCE) for post-hoc "why nothing traded?" debugging.
 
 ## Workflow
 - Always `git pull` and verify latest code before making changes
