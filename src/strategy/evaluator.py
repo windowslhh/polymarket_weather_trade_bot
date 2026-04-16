@@ -466,6 +466,12 @@ def evaluate_locked_win_signals(
 
         is_locked = False
         lock_reason = ""
+        # Below-slot locks (daily max already above upper) are bounded
+        # certainties — temperature cannot fall.  Above-slot locks rely
+        # on daily_max being final, which carries residual uncertainty
+        # (late-afternoon spike).  Track which kind we have so we can
+        # pick a tighter win_prob for below-slot locks.
+        is_below_lock = False
 
         if slot.temp_upper_f is not None and slot.temp_lower_f is not None:
             # Range slot [L, U]
@@ -474,6 +480,7 @@ def evaluate_locked_win_signals(
             # Condition A: daily max exceeded this range (below-slot lock) — no time gate
             if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
                 is_locked = True
+                is_below_lock = True
                 lock_reason = (
                     f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
                     f"> upper {upper_int} + margin {margin}"
@@ -494,6 +501,7 @@ def evaluate_locked_win_signals(
             # Condition A: daily max exceeded this range — no time gate
             if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
                 is_locked = True
+                is_below_lock = True
                 lock_reason = (
                     f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
                     f"> upper {upper_int} + margin {margin}"
@@ -517,19 +525,25 @@ def evaluate_locked_win_signals(
         if not is_locked:
             continue
 
-        # Reject locked wins where NO price is too high — thin margin gets
-        # eaten by fees.  E.g. $0.97 → only $0.03 profit per share, ~1% ROI
-        # after fees.  Cap at 0.95 to ensure at least ~4% gross return.
-        if slot.price_no > 0.95:
+        # Locked wins are guaranteed or near-guaranteed bounded events,
+        # so the generic `max_no_price` cap does NOT apply here — the
+        # market correctly prices these slots at 0.95–0.999.  The only
+        # floor is price < 1.0 (price=1.0 is a no-op buy) and the EV > 0
+        # gate below, which naturally rejects slots whose fee eats the
+        # entire thin margin.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-2.
+        if slot.price_no >= 1.0:
             logger.debug(
-                "LOCKED WIN skip (price %.3f > 0.95): %s slot %s — margin too thin",
+                "LOCKED WIN skip (price %.3f >= 1.0): %s slot %s",
                 slot.price_no, event.city, slot.outcome_label,
             )
             continue
 
-        # Locked win: near-certain probability (0.99), compute EV after entry fee.
-        # Even guaranteed wins must overcome the taker fee cost.
-        win_prob = 0.99
+        # Below-slot locks: temperature can only rise, so NO is a bounded
+        # certainty.  Historical wu_round error is ≤ 0.5°F and margin ≥ 2
+        # guarantees ≥ 1.5°F real cushion → loss probability < 0.1%.
+        # Above-slot locks use 0.99 because the afternoon peak could still
+        # surge up into the slot (daily_max_final is best-effort).
+        win_prob = 0.999 if is_below_lock else 0.99
         ev = (win_prob * (1.0 - slot.price_no)
               - (1.0 - win_prob) * slot.price_no
               - _entry_fee_per_dollar(slot.price_no))

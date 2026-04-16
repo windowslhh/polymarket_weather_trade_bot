@@ -58,14 +58,16 @@ class TestLockedWinDetection:
     """Core locked-win signal generation (condition A: below-slot)."""
 
     def test_range_slot_locked_when_daily_max_above_upper(self):
-        """[70,74] with daily_max=76 → wu_round=76 > 74 → locked win."""
+        """[70,74] with daily_max=76 → wu_round=76 > 74 → below-slot lock (0.999 win_prob)."""
         slot = _slot(70, 74)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1
         assert sigs[0].token_type == TokenType.NO
         assert sigs[0].side == Side.BUY
-        assert sigs[0].estimated_win_prob == 0.99
+        # Below-slot locks are bounded certainties → win_prob = 0.999
+        # (above-slot locks retain 0.99 — see test_below_slot_above_slot_win_prob below)
+        assert sigs[0].estimated_win_prob == 0.999
         assert sigs[0].is_locked_win is True
 
     def test_range_slot_not_locked_when_daily_max_inside(self):
@@ -149,7 +151,10 @@ class TestLockedWinDetection:
         assert locked_ids == {"n1", "n2", "n3", "n5"}
 
     def test_ev_positive_for_reasonable_price(self):
-        """Locked win at price_no=0.90: EV is positive (after entry fee deduction)."""
+        """Locked win at price_no=0.90: EV is positive (after entry fee deduction).
+
+        Below-slot lock uses win_prob=0.999 (bounded certainty).
+        """
         from src.strategy.evaluator import TAKER_FEE_RATE
         slot = _slot(70, 74, price_no=0.90)
         event = _event([slot])
@@ -157,7 +162,7 @@ class TestLockedWinDetection:
         assert len(sigs) == 1
         p = 0.90
         fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
-        expected_ev = 0.99 * (1.0 - p) - 0.01 * p - fee
+        expected_ev = 0.999 * (1.0 - p) - 0.001 * p - fee
         assert abs(sigs[0].expected_value - expected_ev) < 1e-9
         assert sigs[0].expected_value > 0, "EV must remain positive after fee deduction"
 
@@ -170,6 +175,39 @@ class TestLockedWinDetection:
             assert s.token_type == TokenType.NO
             assert s.side == Side.BUY
             assert s.is_locked_win is True
+
+    def test_below_slot_lock_accepts_high_price(self):
+        """High-price below-slot locks (0.95-0.99) are accepted — no max_no_price cap.
+
+        Market prices true-locked slots at 0.95+; the old 0.95 price cap
+        created a dead zone where guaranteed wins never fired.  Below-slot
+        locks are bounded certainties, so only EV > 0 should gate them.
+        See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-2.
+        """
+        from src.strategy.evaluator import TAKER_FEE_RATE
+        # Below-slot lock: daily_max=76 > upper=74, margin=0, price=0.97
+        slot = _slot(70, 74, price_no=0.97)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 1, "High-price below-slot lock must fire (no 0.95 cap)"
+        p = 0.97
+        fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
+        expected_ev = 0.999 * (1.0 - p) - 0.001 * p - fee
+        assert abs(sigs[0].expected_value - expected_ev) < 1e-9
+        assert sigs[0].expected_value > 0
+
+    def test_above_slot_lock_uses_099_win_prob(self):
+        """Above-slot locks retain 0.99 win_prob (afternoon peak residual risk).
+
+        Above-slot lock fires only when daily_max_final=True, but the
+        afternoon peak could still surge, so we keep a 1% safety margin.
+        """
+        # Above-slot lock: slot [80,84], daily_max=76, final → locked above
+        slot = _slot(80, 84, price_no=0.90)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 1
+        assert sigs[0].estimated_win_prob == 0.99, "Above-slot locks use 0.99, not 0.999"
 
 
 # ──────────────────────────────────────────────────────────────────────
