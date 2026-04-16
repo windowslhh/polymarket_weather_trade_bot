@@ -158,6 +158,18 @@ class TestStrategyBLockedAggressor:
         cfg = _build_strat_cfg("B")
         assert cfg.max_positions_per_event > _build_strat_cfg("A").max_positions_per_event
 
+    def test_kelly_fraction_larger_than_a(self):
+        """B sizes forecast-based NO 20% larger than A (0.6 vs 0.5).
+
+        Prevents A/B duplicate positions even when locked-win signals are
+        silent — B's aggressor identity must manifest on every BUY, not
+        only on rare locked-win triggers.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-1.
+        """
+        cfg_a = _build_strat_cfg("A")
+        cfg_b = _build_strat_cfg("B")
+        assert cfg_b.kelly_fraction == 0.6
+        assert cfg_b.kelly_fraction > cfg_a.kelly_fraction
+
 
 class TestStrategyCCloseRange:
     """Strategy C: Tighter distance (75% confidence), higher EV threshold."""

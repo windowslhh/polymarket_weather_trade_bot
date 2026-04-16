@@ -88,9 +88,12 @@ def get_strategy_variants() -> dict[str, dict]:
             "max_exposure_per_city_usd": 30.0,
         },
         "B": {
-            # Locked aggressor: same entry as A, but full Kelly on locked wins
+            # Locked aggressor: same entry slots as A (same max_no_price / min_no_ev),
+            # but 20% larger forecast-based sizing (kelly 0.6 vs A's 0.5) AND
+            # full-Kelly on locked wins.  This ensures B ≠ A even when zero
+            # locked-win signals fire in a window.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-1.
             "max_no_price": 0.70,
-            "kelly_fraction": 0.5,
+            "kelly_fraction": 0.6,
             "max_positions_per_event": 6,
             "calibration_confidence": 0.90,
             "min_no_ev": 0.05,
