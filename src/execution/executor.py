@@ -88,6 +88,11 @@ class Executor:
                     size_usd=size_usd,
                     strategy=signal.strategy,
                     buy_reason=signal.reason,
+                    # Fix 4: persist entry EV so the TRIM rule can use a relative
+                    # decay threshold (EV decayed > X% of entry) in addition to
+                    # the absolute floor. See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
+                    entry_ev=signal.expected_value,
+                    entry_win_prob=signal.estimated_win_prob,
                 )
             elif signal.side == Side.SELL:
                 closed = await self._portfolio.close_positions_for_token(

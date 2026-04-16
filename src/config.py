@@ -30,7 +30,15 @@ class StrategyConfig:
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
+    # Absolute EV floor for TRIM (legacy; retained for back-compat).
+    # Fix 4 reframes TRIM in terms of two gates:
+    #   1. Relative: current EV < entry_ev * (1 - trim_ev_decay_ratio)
+    #   2. Absolute: current EV < -min_trim_ev_absolute
+    # A slot is trimmed when EITHER gate fires.  See
+    # docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
     min_trim_ev: float = 0.02
+    trim_ev_decay_ratio: float = 0.75
+    min_trim_ev_absolute: float = 0.03
     max_no_price: float = 0.85
     min_no_price: float = 0.20
     day_ahead_ev_discount: float = 0.7
@@ -56,6 +64,15 @@ class StrategyConfig:
     exit_cooldown_hours: float = 4.0
     # Dynamic threshold: scale distance by real-time ensemble spread ratio
     enable_spread_adjustment: bool = True
+    # Fix 5: thin-liquidity cities get a reduced per-city exposure cap.
+    # Rationale: Gamma-volume median for Miami / SF / Tampa / Orlando sits around
+    # $800-1500 vs $3000+ elsewhere, yet they share the same exposure cap —
+    # amplifying MTM losses when the market moves against us.  See
+    # docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+    thin_liquidity_cities: frozenset[str] = field(default_factory=lambda: frozenset({
+        "Miami", "San Francisco", "Tampa", "Orlando",
+    }))
+    thin_liquidity_exposure_ratio: float = 0.5
 
 
 def get_strategy_variants() -> dict[str, dict]:
@@ -88,9 +105,12 @@ def get_strategy_variants() -> dict[str, dict]:
             "max_exposure_per_city_usd": 30.0,
         },
         "B": {
-            # Locked aggressor: same entry as A, but full Kelly on locked wins
+            # Locked aggressor: same entry slots as A (same max_no_price / min_no_ev),
+            # but 20% larger forecast-based sizing (kelly 0.6 vs A's 0.5) AND
+            # full-Kelly on locked wins.  This ensures B ≠ A even when zero
+            # locked-win signals fire in a window.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-1.
             "max_no_price": 0.70,
-            "kelly_fraction": 0.5,
+            "kelly_fraction": 0.6,
             "max_positions_per_event": 6,
             "calibration_confidence": 0.90,
             "min_no_ev": 0.05,

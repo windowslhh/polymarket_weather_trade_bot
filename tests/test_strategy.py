@@ -598,8 +598,13 @@ class TestEvaluateTrimSignals:
         assert len(signals) == 0
 
     def test_marginal_positive_ev_held(self):
-        """Hold-to-settlement bias: slightly negative EV above -min_trim_ev is held."""
-        config = StrategyConfig(min_trim_ev=0.10)
+        """Hold-to-settlement bias: slightly negative EV above -min_trim_ev_absolute is held.
+
+        Fix 4 replaced the single `min_trim_ev` gate with a dual-gate rule
+        (relative decay OR absolute floor).  With no entry_ev_map supplied,
+        only the absolute gate is active, controlled by min_trim_ev_absolute.
+        """
+        config = StrategyConfig(min_trim_ev_absolute=0.10)
         # Need a slot where EV is between -0.10 and 0 (slightly negative but above threshold)
         # Use a slot just outside forecast with high price_no so EV is slightly negative
         held_slot = _make_slot(80, 84, price_no=0.95)
@@ -607,11 +612,11 @@ class TestEvaluateTrimSignals:
         forecast = _make_forecast(75.0)
 
         signals = evaluate_trim_signals(event, forecast, [held_slot], config)
-        # With a generous min_trim_ev=0.10, marginal negatives should be held
+        # With a generous min_trim_ev_absolute=0.10, marginal negatives should be held
         # (the exact result depends on win_prob, but we verify the bias exists)
         # Either 0 signals (held) or signal with EV < -0.10
         for s in signals:
-            assert s.expected_value < -config.min_trim_ev
+            assert s.expected_value < -config.min_trim_ev_absolute
 
     def test_empty_held_slots(self):
         config = StrategyConfig()

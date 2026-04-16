@@ -33,6 +33,8 @@ class PortfolioTracker:
         size_usd: float,
         strategy: str = "B",
         buy_reason: str = "",
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
     ) -> int:
         """Record a filled order as a new position."""
         shares = size_usd / price if price > 0 else 0
@@ -48,6 +50,8 @@ class PortfolioTracker:
             shares=shares,
             strategy=strategy,
             buy_reason=buy_reason,
+            entry_ev=entry_ev,
+            entry_win_prob=entry_win_prob,
         )
         logger.info(
             "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d]",

@@ -814,6 +814,45 @@ class TestDbMigration:
         assert "exit_price" in columns
         await s.close()
 
+    async def test_entry_ev_columns_exist_after_init(self, store):
+        """Fix 4: entry_ev and entry_win_prob columns exist in positions table."""
+        async with store.db.execute("PRAGMA table_info(positions)") as cur:
+            columns = {row[1] async for row in cur}
+        assert "entry_ev" in columns
+        assert "entry_win_prob" in columns
+
+    async def test_entry_ev_persisted_and_retrieved(self, store):
+        """Fix 4: entry_ev/entry_win_prob values round-trip through insert_position."""
+        pid = await store.insert_position(
+            event_id="e1", token_id="t1", token_type="NO",
+            city="Miami", slot_label="76-80°F",
+            side="BUY", entry_price=0.3, size_usd=5.0, shares=16.67,
+            strategy="A",
+            entry_ev=0.08,
+            entry_win_prob=0.55,
+        )
+        async with store.db.execute(
+            "SELECT entry_ev, entry_win_prob FROM positions WHERE id = ?", (pid,),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] == pytest.approx(0.08)
+        assert row[1] == pytest.approx(0.55)
+
+    async def test_entry_ev_nullable_for_legacy_callsites(self, store):
+        """Fix 4: entry_ev/entry_win_prob default to NULL when not supplied."""
+        pid = await store.insert_position(
+            event_id="e1", token_id="t1", token_type="NO",
+            city="Miami", slot_label="76-80°F",
+            side="BUY", entry_price=0.3, size_usd=5.0, shares=16.67,
+            strategy="A",
+        )
+        async with store.db.execute(
+            "SELECT entry_ev, entry_win_prob FROM positions WHERE id = ?", (pid,),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] is None
+        assert row[1] is None
+
 
 # ======================================================================
 # Review fixes: found during code review

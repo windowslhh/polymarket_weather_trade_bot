@@ -41,6 +41,17 @@ from src.weather.settlement import fetch_settlement_temp, validate_station_confi
 logger = logging.getLogger(__name__)
 
 
+def _effective_city_config(strat_cfg, city: str):
+    """Return a copy of strat_cfg with max_exposure_per_city_usd reduced for
+    thin-liquidity cities.  Non-thin cities get the original config back
+    unchanged (no allocation).  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+    """
+    if city in strat_cfg.thin_liquidity_cities:
+        reduced = strat_cfg.max_exposure_per_city_usd * strat_cfg.thin_liquidity_exposure_ratio
+        return replace(strat_cfg, max_exposure_per_city_usd=reduced)
+    return strat_cfg
+
+
 class Rebalancer:
     """Orchestrates the full rebalance cycle across all cities."""
 
@@ -606,9 +617,12 @@ class Rebalancer:
                     strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
                     strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
 
+                    # Fix 5: reduce per-city cap for thin-liquidity cities
+                    effective_cfg = _effective_city_config(strat_cfg, city)
+
                     # Size and tag locked-win signals
                     for sig in locked_signals:
-                        size = compute_size(sig, strat_city_exp, strat_total_exp, strat_cfg)
+                        size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
                         if size > 0:
                             sig.suggested_size_usd = size
                             sig.strategy = strat_name
@@ -913,6 +927,10 @@ class Rebalancer:
             # Collect all evaluated signals across all strategy variants for decision logging
             # P0-1 FIX: store (signal, strat_name, source, strat_cfg, forecast) to avoid stale refs
             all_evaluated_for_event: list[tuple[TradeSignal, str, str, StrategyConfig, float]] = []
+            # Sampled NO rejects per strategy (capped to avoid flooding decision_log).
+            # See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
+            _REJECT_SAMPLE_PER_STRATEGY = 3
+            all_rejects_for_event: list[tuple[dict, str, float]] = []  # (reject_item, strat_name, forecast_high)
 
             # Run all strategy variants
             variants = get_strategy_variants()
@@ -958,11 +976,20 @@ class Rebalancer:
                 event_pos_count = len(existing_positions)
 
                 # Phase 4: NO signals (forecast-based entry, post-peak boost)
+                # Collect rejected slots for observability (sampled into decision_log below).
+                no_rejects: list[dict] = []
                 no_signals = evaluate_no_signals(
                     event, forecast, strat_cfg, error_dist, trend_state, held_token_ids, days_ahead,
                     daily_max_f=daily_max, local_hour=local_hour,
                     hours_to_settlement=hours_to_settle,
+                    rejects=no_rejects,
                 )
+
+                # Sample up to N rejects per strategy for decision_log observability.
+                # Deterministic: first-N keeps the earliest rejections in slot order
+                # (sufficient for debugging "why no signals generated today?").
+                for item in no_rejects[:_REJECT_SAMPLE_PER_STRATEGY]:
+                    all_rejects_for_event.append((item, strat_name, forecast.predicted_high_f))
 
                 # Determine if daily max is final (past peak + stable).
                 # Use event.market_date to retrieve observation series for the
@@ -991,11 +1018,18 @@ class Rebalancer:
                 # Identify locked-win positions and entry prices from DB
                 locked_win_token_ids: set[str] = set()
                 entry_prices: dict[str, float] = {}
+                # Fix 4: build entry_ev map so TRIM can use a relative decay gate
+                # (current EV < entry_ev * (1 - decay_ratio)) in addition to the
+                # absolute floor.  None entries (pre-migration positions) are
+                # omitted, which falls back to absolute-only semantics.
+                entry_ev_map: dict[str, float] = {}
                 for pos in existing_positions:
                     if "LOCKED WIN" in (pos.get("buy_reason") or ""):
                         locked_win_token_ids.add(pos["token_id"])
                     if pos.get("token_id") and pos.get("entry_price"):
                         entry_prices[pos["token_id"]] = pos["entry_price"]
+                    if pos.get("token_id") and pos.get("entry_ev") is not None:
+                        entry_ev_map[pos["token_id"]] = pos["entry_ev"]
 
                 # Phase 5: Exit + Trim signals (post-peak aware)
                 exit_signals = evaluate_exit_signals(
@@ -1010,6 +1044,7 @@ class Rebalancer:
                     entry_prices=entry_prices,
                     locked_win_token_ids=locked_win_token_ids,
                     daily_max_f=daily_max,
+                    entry_ev_map=entry_ev_map,
                 )
 
                 # Size and tag entry signals with strategy label
@@ -1018,6 +1053,8 @@ class Rebalancer:
                 new_count = 0
                 now = datetime.now(timezone.utc)
                 cooldown_seconds = strat_cfg.exit_cooldown_hours * 3600
+                # Fix 5: reduce per-city cap for thin-liquidity cities
+                effective_cfg = _effective_city_config(strat_cfg, event.city)
                 # Locked wins first (higher priority), then forecast-based NO
                 for signal in locked_signals + no_signals:
                     # Check exit cooldown: skip BUY if recently exited this slot
@@ -1027,7 +1064,7 @@ class Rebalancer:
                         signal._cooled_down = True  # type: ignore[attr-defined]
                         continue
 
-                    size = compute_size(signal, strat_city_exp, strat_total_exp, strat_cfg)
+                    size = compute_size(signal, strat_city_exp, strat_total_exp, effective_cfg)
                     if size > 0 and new_count < max_new:
                         signal.suggested_size_usd = size
                         signal.strategy = strat_name
@@ -1112,6 +1149,26 @@ class Rebalancer:
                     )
                 except Exception:
                     logger.debug("Failed to insert decision log for %s %s", event.city, signal.slot.outcome_label)
+
+            # Write sampled NO REJECTs for this event (observability).
+            # See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
+            for reject_item, r_strat_name, r_forecast_high in all_rejects_for_event:
+                try:
+                    await self._portfolio.insert_decision_log(
+                        cycle_at=cycle_at, city=event.city, event_id=event.event_id,
+                        signal_type="NO", slot_label=reject_item.get("slot_label", ""),
+                        forecast_high_f=r_forecast_high,
+                        daily_max_f=reject_item.get("daily_max_f", daily_max),
+                        trend_state=trend_state.value,
+                        win_prob=reject_item.get("win_prob", 0.0),
+                        expected_value=reject_item.get("expected_value", 0.0),
+                        price=reject_item.get("price_no", 0.0),
+                        size_usd=0.0, action="REJECT",
+                        reason=f"[{r_strat_name}] REJECT: {reject_item.get('reason', 'UNKNOWN')}",
+                        strategy=r_strat_name,
+                    )
+                except Exception:
+                    logger.debug("Failed to insert REJECT log for %s", event.city)
 
         # Save signal summaries for dashboard
         self._last_signals = [
