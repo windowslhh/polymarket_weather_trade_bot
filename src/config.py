@@ -64,6 +64,15 @@ class StrategyConfig:
     exit_cooldown_hours: float = 4.0
     # Dynamic threshold: scale distance by real-time ensemble spread ratio
     enable_spread_adjustment: bool = True
+    # Fix 5: thin-liquidity cities get a reduced per-city exposure cap.
+    # Rationale: Gamma-volume median for Miami / SF / Tampa / Orlando sits around
+    # $800-1500 vs $3000+ elsewhere, yet they share the same exposure cap —
+    # amplifying MTM losses when the market moves against us.  See
+    # docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+    thin_liquidity_cities: frozenset[str] = field(default_factory=lambda: frozenset({
+        "Miami", "San Francisco", "Tampa", "Orlando",
+    }))
+    thin_liquidity_exposure_ratio: float = 0.5
 
 
 def get_strategy_variants() -> dict[str, dict]:

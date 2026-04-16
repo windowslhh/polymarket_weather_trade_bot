@@ -41,6 +41,17 @@ from src.weather.settlement import fetch_settlement_temp, validate_station_confi
 logger = logging.getLogger(__name__)
 
 
+def _effective_city_config(strat_cfg, city: str):
+    """Return a copy of strat_cfg with max_exposure_per_city_usd reduced for
+    thin-liquidity cities.  Non-thin cities get the original config back
+    unchanged (no allocation).  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+    """
+    if city in strat_cfg.thin_liquidity_cities:
+        reduced = strat_cfg.max_exposure_per_city_usd * strat_cfg.thin_liquidity_exposure_ratio
+        return replace(strat_cfg, max_exposure_per_city_usd=reduced)
+    return strat_cfg
+
+
 class Rebalancer:
     """Orchestrates the full rebalance cycle across all cities."""
 
@@ -606,9 +617,12 @@ class Rebalancer:
                     strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
                     strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
 
+                    # Fix 5: reduce per-city cap for thin-liquidity cities
+                    effective_cfg = _effective_city_config(strat_cfg, city)
+
                     # Size and tag locked-win signals
                     for sig in locked_signals:
-                        size = compute_size(sig, strat_city_exp, strat_total_exp, strat_cfg)
+                        size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
                         if size > 0:
                             sig.suggested_size_usd = size
                             sig.strategy = strat_name
@@ -1039,6 +1053,8 @@ class Rebalancer:
                 new_count = 0
                 now = datetime.now(timezone.utc)
                 cooldown_seconds = strat_cfg.exit_cooldown_hours * 3600
+                # Fix 5: reduce per-city cap for thin-liquidity cities
+                effective_cfg = _effective_city_config(strat_cfg, event.city)
                 # Locked wins first (higher priority), then forecast-based NO
                 for signal in locked_signals + no_signals:
                     # Check exit cooldown: skip BUY if recently exited this slot
@@ -1048,7 +1064,7 @@ class Rebalancer:
                         signal._cooled_down = True  # type: ignore[attr-defined]
                         continue
 
-                    size = compute_size(signal, strat_city_exp, strat_total_exp, strat_cfg)
+                    size = compute_size(signal, strat_city_exp, strat_total_exp, effective_cfg)
                     if size > 0 and new_count < max_new:
                         signal.suggested_size_usd = size
                         signal.strategy = strat_name
