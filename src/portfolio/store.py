@@ -141,6 +141,9 @@ class Store:
             ("positions", "realized_pnl", "ALTER TABLE positions ADD COLUMN realized_pnl REAL"),
             ("decision_log", "strategy", "ALTER TABLE decision_log ADD COLUMN strategy TEXT DEFAULT ''"),
             ("edge_history", "ensemble_spread_f", "ALTER TABLE edge_history ADD COLUMN ensemble_spread_f REAL"),
+            # Fix 4: relative EV-decay TRIM — see docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4
+            ("positions", "entry_ev", "ALTER TABLE positions ADD COLUMN entry_ev REAL"),
+            ("positions", "entry_win_prob", "ALTER TABLE positions ADD COLUMN entry_win_prob REAL"),
         ]
         for table, column, sql in migrations:
             try:
@@ -208,11 +211,19 @@ class Store:
         shares: float,
         strategy: str = "B",
         buy_reason: str = "",
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
     ) -> int:
+        # entry_ev / entry_win_prob support the relative EV-decay TRIM
+        # rule (fix 4) — allow None so older call sites remain compatible.
         cursor = await self.db.execute(
-            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy, buy_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event_id, token_id, token_type, city, slot_label, side, entry_price, size_usd, shares, strategy, buy_reason),
+            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
+                                       entry_price, size_usd, shares, strategy, buy_reason,
+                                       entry_ev, entry_win_prob)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, token_id, token_type, city, slot_label, side,
+             entry_price, size_usd, shares, strategy, buy_reason,
+             entry_ev, entry_win_prob),
         )
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]

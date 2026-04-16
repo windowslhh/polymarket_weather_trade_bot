@@ -369,22 +369,28 @@ def evaluate_trim_signals(
     entry_prices: dict[str, float] | None = None,
     locked_win_token_ids: set[str] | None = None,
     daily_max_f: float | None = None,
+    entry_ev_map: dict[str, float] | None = None,
 ) -> list[TradeSignal]:
     """Generate SELL signals for held NO positions whose EV has decayed.
 
     Unlike exit signals (which trigger on temperature proximity), trim signals
-    fire when the expected value drops below min_trim_ev due to forecast changes.
+    fire when the expected value drops due to forecast changes.  A slot is
+    trimmed when EITHER:
+      - Relative gate: current EV < entry_ev × (1 - trim_ev_decay_ratio), OR
+      - Absolute gate: current EV < -min_trim_ev_absolute
+
+    The relative gate protects high-EV entries from being trimmed on small
+    noise (e.g. entry_ev=+0.08 → only trim once EV drops below +0.02 at
+    ratio=0.75).  The absolute gate catches hard reversals regardless of
+    how rich the original entry was.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
 
     NEVER trims locked-win positions — these are guaranteed winners where the
     forecast-based EV is misleading (daily_max already exceeded slot upper).
-
-    Hold-to-settlement bias: only trim if EV is negative. Positions with slightly
-    positive EV (between 0 and min_trim_ev) are held since the round-trip spread
-    cost of selling and re-entering is often higher than the EV decay.
     """
     signals: list[TradeSignal] = []
     locked_ids = locked_win_token_ids or set()
     ep = entry_prices or {}
+    ev_map = entry_ev_map or {}
 
     for slot in held_no_slots:
         # NEVER trim locked wins — daily_max already exceeded slot upper,
@@ -422,9 +428,20 @@ def evaluate_trim_signals(
         price_for_ev = ep.get(slot.token_id_no, slot.price_no)
         ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
 
-        # Only trim if EV has gone clearly negative — hold positions with marginal positive EV
-        # to avoid losing round-trip spread costs
-        if ev < -config.min_trim_ev:
+        # Trim when either gate fires (see fix 4 rationale in module docstring):
+        #   1. Relative: current EV < entry_ev × (1 - trim_ev_decay_ratio).
+        #      Only active when we have a positive entry_ev (legacy positions
+        #      recorded before the migration fall back to the absolute gate).
+        #   2. Absolute: current EV < -min_trim_ev_absolute (hard reversal).
+        entry_ev = ev_map.get(slot.token_id_no)
+        absolute_triggered = ev < -config.min_trim_ev_absolute
+        relative_triggered = False
+        relative_gate_ev: float | None = None
+        if entry_ev is not None and entry_ev > 0:
+            relative_gate_ev = entry_ev * (1.0 - config.trim_ev_decay_ratio)
+            relative_triggered = ev < relative_gate_ev
+
+        if absolute_triggered or relative_triggered:
             signals.append(TradeSignal(
                 token_type=TokenType.NO,
                 side=Side.SELL,
@@ -433,9 +450,14 @@ def evaluate_trim_signals(
                 expected_value=ev,
                 estimated_win_prob=win_prob,
             ))
+            trigger = "absolute" if absolute_triggered else "relative"
             logger.info(
-                "TRIM signal: %s slot %s EV=%.4f < -%.4f (win_prob=%.2f, entry_price=%.3f)",
-                event.city, slot.outcome_label, ev, config.min_trim_ev, win_prob, price_for_ev,
+                "TRIM signal [%s]: %s slot %s EV=%.4f (entry_ev=%s, rel_gate=%s, abs_gate=%.4f, "
+                "win_prob=%.2f, entry_price=%.3f)",
+                trigger, event.city, slot.outcome_label, ev,
+                f"{entry_ev:.4f}" if entry_ev is not None else "None",
+                f"{relative_gate_ev:.4f}" if relative_gate_ev is not None else "n/a",
+                -config.min_trim_ev_absolute, win_prob, price_for_ev,
             )
 
     return signals

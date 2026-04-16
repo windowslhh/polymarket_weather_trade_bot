@@ -30,7 +30,15 @@ class StrategyConfig:
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
+    # Absolute EV floor for TRIM (legacy; retained for back-compat).
+    # Fix 4 reframes TRIM in terms of two gates:
+    #   1. Relative: current EV < entry_ev * (1 - trim_ev_decay_ratio)
+    #   2. Absolute: current EV < -min_trim_ev_absolute
+    # A slot is trimmed when EITHER gate fires.  See
+    # docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
     min_trim_ev: float = 0.02
+    trim_ev_decay_ratio: float = 0.75
+    min_trim_ev_absolute: float = 0.03
     max_no_price: float = 0.85
     min_no_price: float = 0.20
     day_ahead_ev_discount: float = 0.7

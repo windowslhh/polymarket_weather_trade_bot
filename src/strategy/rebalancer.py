@@ -1004,11 +1004,18 @@ class Rebalancer:
                 # Identify locked-win positions and entry prices from DB
                 locked_win_token_ids: set[str] = set()
                 entry_prices: dict[str, float] = {}
+                # Fix 4: build entry_ev map so TRIM can use a relative decay gate
+                # (current EV < entry_ev * (1 - decay_ratio)) in addition to the
+                # absolute floor.  None entries (pre-migration positions) are
+                # omitted, which falls back to absolute-only semantics.
+                entry_ev_map: dict[str, float] = {}
                 for pos in existing_positions:
                     if "LOCKED WIN" in (pos.get("buy_reason") or ""):
                         locked_win_token_ids.add(pos["token_id"])
                     if pos.get("token_id") and pos.get("entry_price"):
                         entry_prices[pos["token_id"]] = pos["entry_price"]
+                    if pos.get("token_id") and pos.get("entry_ev") is not None:
+                        entry_ev_map[pos["token_id"]] = pos["entry_ev"]
 
                 # Phase 5: Exit + Trim signals (post-peak aware)
                 exit_signals = evaluate_exit_signals(
@@ -1023,6 +1030,7 @@ class Rebalancer:
                     entry_prices=entry_prices,
                     locked_win_token_ids=locked_win_token_ids,
                     daily_max_f=daily_max,
+                    entry_ev_map=entry_ev_map,
                 )
 
                 # Size and tag entry signals with strategy label
