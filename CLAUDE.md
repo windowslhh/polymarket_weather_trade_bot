@@ -19,18 +19,21 @@
 - Position sizing: track city exposure cumulatively across all events in a rebalance cycle
 - Skip already-held token IDs to prevent duplicate positions
 
-## Strategy Design (as of 2026-04-11)
+## Strategy Design (as of 2026-04-16)
 - **Pure NO trading**: Only BUY NO signals — no YES, no LADDER
 - **4 strategy variants** (A-D) testing different dimensions:
-  - A = Conservative far-distance, B = Locked-win aggressor, C = Close-range with high EV gate, D = Quick exit
+  - A = Conservative far-distance (kelly=0.5, locked-kelly=0.5), B = Locked-win aggressor (kelly=0.6, locked-kelly=1.0 — larger forecast-entry size than A too so B ≠ A even without locked-win fires), C = Close-range with high EV gate, D = Quick exit
 - **Signal types**: NO (forecast-based entry), LOCKED (daily_max > slot upper → guaranteed win), EXIT (3-layer hybrid), TRIM (EV decay)
 - **Auto-calibrated distance**: Per-city threshold from historical forecast error distribution (calibrator.py)
-- **Locked-win signals**: When observed daily max exceeds slot upper bound, NO is guaranteed → full Kelly sizing
+- **Locked-win signals**: When observed daily max exceeds slot upper bound by ≥ `locked_win_margin_f`, NO is guaranteed → full Kelly sizing. The legacy 0.95 hard price cap was removed — the `ev > 0` gate (win_prob 0.999 for below-slot locks, 0.99 above) naturally filters the fee-dominated dead zone.
+- **TRIM dual-gate** (fix 4): a held NO is trimmed when EITHER the absolute gate (`current_ev < -min_trim_ev_absolute`) OR the relative gate (`current_ev < entry_ev × (1 - trim_ev_decay_ratio)`) fires. Rich entries get protection from noise; hard reversals still trip the absolute floor.
+- **Thin-liquidity per-city cap** (fix 5): Miami / San Francisco / Tampa / Orlando get `max_exposure_per_city_usd × thin_liquidity_exposure_ratio` (default 0.5) because their Gamma volume is a fraction of other cities — prevents MTM blow-ups.
 - **Hybrid exit**: Layer 1 (locked-win protection) → Layer 2 (EV-based hold/sell) → Layer 3 (pre-settlement force exit)
 - **Exit cooldown**: After EXIT, same token_id blocked for `exit_cooldown_hours` to prevent BUY→EXIT churn
 - **15-minute position check**: Lightweight cycle (METAR only, no market discovery) for urgent locked-win and exit signals
 - **TradeSignal.is_locked_win**: Formal bool field — do NOT use private `_is_locked_win` attribute
 - **TradeSignal.reason**: Always set before execution — executor reads `signal.strategy` and `signal.reason` directly (no getattr)
+- **decision_log REJECT sampling** (fix 3): up to 3 rejections per (strategy, event) are persisted with reason code (PRICE_TOO_HIGH / DIST_TOO_CLOSE / EV_BELOW_GATE / VOLUME_TOO_LOW / SPREAD_TOO_WIDE / PRICE_DIVERGENCE / DAILY_MAX_ABOVE_SLOT / PRICE_TOO_LOW / HELD) for post-hoc "why nothing traded?" debugging.
 
 ## Workflow
 - Always `git pull` and verify latest code before making changes
@@ -59,3 +62,5 @@
 - Paper mode: CLOB returns empty prices, use Gamma prices as fallback for unrealized P&L
 - DailyMaxTracker uses UTC dates internally — tests must use `datetime.now(timezone.utc).date()`, not `date.today()`
 - Calibrator confidence must be in [0.5, 0.99] — values outside are clamped automatically
+- Locked-win 0.95 price cap was removed (fix 2) — do not reinstate it; the `gap ≥ margin` + `ev > 0` dual gate is the correct filter
+- `StrategyConfig.min_trim_ev` is legacy (fix 4) — `min_trim_ev_absolute` and `trim_ev_decay_ratio` are the active gates; legacy field retained only for older YAML configs
