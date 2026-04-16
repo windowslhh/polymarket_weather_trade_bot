@@ -100,6 +100,58 @@ def _match_city(event_city: str, configured_cities: list[CityConfig]) -> CityCon
     return None
 
 
+def _compute_settle_timestamp(
+    markets: list[dict],
+    market_date: date,
+    city_tz: str | None,
+) -> datetime | None:
+    """Compute the true settlement timestamp for a weather event.
+
+    Polymarket's ``event.endDate`` is a 12:00 UTC placeholder shared across all
+    markets resolving on the same calendar date — it is not the actual settle
+    moment.  The real settle for a "Highest temperature in <city> on <date>"
+    market is the end of that calendar day in the city's local timezone.
+
+    Resolution order:
+      1. ``markets[0].gameStartTime`` + 24h.  ``gameStartTime`` is set by
+         Polymarket to 00:00 city-local (UTC-shifted), so adding 24h yields
+         end-of-day local = start of next day in the city's timezone.
+      2. Fallback: ``market_date + 1`` at 00:00 in ``city_tz``, converted to UTC.
+      3. ``None`` if neither source is parseable.
+    """
+    # Source 1: gameStartTime + 24h
+    gst_raw = markets[0].get("gameStartTime") if markets else None
+    if gst_raw:
+        try:
+            # Gamma returns formats like "2026-04-16 04:00:00+00" or "...Z"
+            s = str(gst_raw).strip().replace(" ", "T")
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            elif s.endswith("+00"):
+                s = s + ":00"
+            gst_dt = datetime.fromisoformat(s)
+            if gst_dt.tzinfo is None:
+                gst_dt = gst_dt.replace(tzinfo=timezone.utc)
+            return gst_dt + timedelta(hours=24)
+        except (ValueError, TypeError):
+            pass
+
+    # Source 2: city-local midnight of (market_date + 1)
+    if city_tz:
+        try:
+            tz = ZoneInfo(city_tz)
+            local_next_midnight = datetime.combine(
+                market_date + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=tz,
+            )
+            return local_next_midnight.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    return None
+
+
 async def discover_weather_markets(
     cities: list[CityConfig],
     client: httpx.AsyncClient | None = None,
@@ -230,13 +282,14 @@ async def discover_weather_markets(
                     logger.debug("Skipping low-volume market %s (vol=$%.0f)", city_cfg.name, event_volume)
                     continue
 
-                end_ts = event_data.get("endDate")
-                end_dt = None
-                if end_ts:
-                    try:
-                        end_dt = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        pass
+                # Compute true settlement timestamp.
+                # Polymarket's event.endDate is a 12:00 UTC placeholder shared by
+                # all markets settling on the same calendar date — it is NOT the
+                # actual resolution moment. The real settle is end-of-day in the
+                # city's local timezone (e.g. NYC Apr 16 → 2026-04-17 04:00 UTC).
+                # Prefer markets[0].gameStartTime + 24h; fall back to city-tz
+                # midnight of (market_date + 1).  See docs/fixes/2026-04-16-settlement-time.md
+                end_dt = _compute_settle_timestamp(markets, market_date, city_cfg.tz)
 
                 # Parse resolution source from event description
                 resolution = parse_resolution_from_event(event_data, city_cfg.name)
