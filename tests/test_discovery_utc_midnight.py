@@ -232,3 +232,116 @@ class TestNormalDaytimeOperation:
 
         # UTC fallback: April 12 UTC same as market_date → passes
         assert len(events) == 1
+
+
+# ── 4. End-to-end: end_timestamp computed by _compute_settle_timestamp ────────
+
+def _event_with_gst(market_date: date, city: str, gst: str | None) -> list[dict]:
+    """Like _event_payload, but with a configurable gameStartTime on the inner market."""
+    month = market_date.strftime("%B")
+    day = market_date.day
+    inner_market: dict = {
+        "question": "78°F to 81°F",
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": ["0.30", "0.70"],
+        "clobTokenIds": ["tok-yes", "tok-no"],
+    }
+    if gst is not None:
+        inner_market["gameStartTime"] = gst
+    return [{
+        "id": "event-settle-test",
+        "conditionId": "cond-settle-test",
+        "title": f"Highest temperature in {city} on {month} {day}",
+        "volume": "5000",
+        # Polymarket's misleading 12:00 UTC placeholder (the original bug source)
+        "endDate": f"{market_date.isoformat()}T12:00:00Z",
+        "markets": [inner_market],
+    }]
+
+
+class TestEndTimestampE2E:
+    """End-to-end: assert ``event.end_timestamp`` lands on the city-local
+    next-day midnight (UTC), pinning down both the primary
+    ``gameStartTime`` path and the title-only fallback through the full
+    ``discover_weather_markets`` flow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_e2e_primary_path_uses_gamestarttime(self):
+        """ATL Apr 16 with gameStartTime set → end_timestamp = Apr 17 04:00 UTC.
+
+        Locks the primary path against silent regressions where someone
+        re-introduces ``endDate`` parsing — that would yield 12:00 UTC
+        instead of 04:00 UTC next-day.
+        """
+        utc_now = datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
+        market_date = date(2026, 4, 16)
+        payload = _event_with_gst(market_date, "Atlanta", "2026-04-16 04:00:00+00")
+
+        with patch("src.markets.discovery.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz=None: utc_now.astimezone(tz) if tz else utc_now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.combine = datetime.combine
+            mock_dt.min = datetime.min
+
+            events = await discover_weather_markets(
+                [CityConfig(name="Atlanta", icao="KATL", lat=33.6, lon=-84.4, tz="America/New_York")],
+                _mock_client(payload),
+                max_days_ahead=2,
+            )
+
+        assert len(events) == 1
+        assert events[0].end_timestamp == datetime(2026, 4, 17, 4, 0, tzinfo=timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_e2e_fallback_path_when_gamestarttime_missing(self):
+        """LA Apr 16 with no gameStartTime → fallback to city-tz next-day midnight."""
+        utc_now = datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
+        market_date = date(2026, 4, 16)
+        payload = _event_with_gst(market_date, "Los Angeles", gst=None)  # no GST
+
+        with patch("src.markets.discovery.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz=None: utc_now.astimezone(tz) if tz else utc_now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.combine = datetime.combine
+            mock_dt.min = datetime.min
+
+            events = await discover_weather_markets(
+                [_city()],
+                _mock_client(payload),
+                max_days_ahead=2,
+            )
+
+        assert len(events) == 1
+        # 00:00 PDT Apr 17 = 07:00 UTC
+        assert events[0].end_timestamp == datetime(2026, 4, 17, 7, 0, tzinfo=timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_e2e_endDate_no_longer_consulted(self):
+        """Even with a misleading endDate=12:00Z and no gameStartTime,
+        end_timestamp comes from the city-tz path, not from endDate."""
+        utc_now = datetime(2026, 4, 16, 15, 0, tzinfo=timezone.utc)
+        market_date = date(2026, 4, 16)
+        payload = _event_with_gst(market_date, "Atlanta", gst=None)
+        # Make endDate even more misleading — past, near-future, doesn't matter
+        payload[0]["endDate"] = "2026-04-16T12:00:00Z"
+
+        with patch("src.markets.discovery.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda tz=None: utc_now.astimezone(tz) if tz else utc_now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.combine = datetime.combine
+            mock_dt.min = datetime.min
+
+            events = await discover_weather_markets(
+                [CityConfig(name="Atlanta", icao="KATL", lat=33.6, lon=-84.4, tz="America/New_York")],
+                _mock_client(payload),
+                max_days_ahead=2,
+            )
+
+        assert len(events) == 1
+        # Comes from city-tz next-day midnight, not from the 12:00 UTC endDate
+        assert events[0].end_timestamp == datetime(2026, 4, 17, 4, 0, tzinfo=timezone.utc)
+        assert events[0].end_timestamp.hour != 12  # explicit anti-regression on endDate
