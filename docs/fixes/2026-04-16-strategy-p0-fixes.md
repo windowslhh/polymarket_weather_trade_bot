@@ -74,9 +74,9 @@
 
 ## Fix 2 — 锁定胜死区（P0，甲案）
 
-> **⚠️ 部分回退于 2026-04-17**: 价帽 `price > 0.95` 已被加回（`LOCKED_WIN_MAX_PRICE` 常量），
-> 因为生产数据证明 `ev > 0` 单门槛不足以过滤 paper→live slippage 主导的薄边际带。
-> below/above-lock win_prob 分流 (0.999 / 0.99) 保留。
+> **⚠️ 部分回退于 2026-04-17**: 价帽 `price > 0.95` 已被加回（`StrategyConfig.locked_win_max_price`,
+> 默认 0.95,通过 `config.yaml` 可调整不需重部署），因为生产数据证明 `ev > 0` 单门槛不足以
+> 过滤 paper→live slippage 主导的薄边际带。below/above-lock win_prob 分流 (0.999 / 0.99) 保留。
 > 详见 [`2026-04-17-lockedwin-price-cap-rollback.md`](./2026-04-17-lockedwin-price-cap-rollback.md)。
 
 ### 现象

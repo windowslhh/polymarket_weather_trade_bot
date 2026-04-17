@@ -191,11 +191,12 @@ class TestLockedWinDetection:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# LOCKED_WIN_MAX_PRICE hard cap (partial Fix 2 rollback, 2026-04-17)
+# locked_win_max_price hard cap (partial Fix 2 rollback, 2026-04-17;
+# promoted from module constant to StrategyConfig field by review #3)
 # ──────────────────────────────────────────────────────────────────────
 
 class TestLockedWinPriceCap:
-    """Verify the 0.95 hard price ceiling re-introduced after Fix 2.
+    """Verify the hard price ceiling re-introduced after Fix 2.
 
     Background: Fix 2 (commit 035d353) removed the 0.95 cap on the theory
     that the `ev > 0` gate would naturally filter fee-dominated entries.
@@ -203,10 +204,15 @@ class TestLockedWinPriceCap:
     fired at price 0.997-0.9985 where the technical +EV (~$0.0008/share)
     is smaller than the paper→live slippage of one Polymarket tick (0.001).
 
-    The rollback re-installs `LOCKED_WIN_MAX_PRICE = 0.95` as a hard gate
-    *in addition to* (not replacing) the `ev > 0` safety net.  Below/
-    above-lock win_prob differentiation (0.999 / 0.99) introduced by
-    Fix 2 is preserved within the [min_no_price, 0.95] price band.
+    The rollback re-installs the cap as a hard gate *in addition to* (not
+    replacing) the `ev > 0` safety net.  Below/above-lock win_prob
+    differentiation (0.999 / 0.99) introduced by Fix 2 is preserved within
+    the [min_no_price, locked_win_max_price] price band.
+
+    The cap value lives in `StrategyConfig.locked_win_max_price`
+    (default 0.95).  These tests use the default via `_CFG` for the bulk
+    of the cases and exercise an explicit override to prove the gate
+    actually reads from config rather than a hardcoded literal.
 
     See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
     """
@@ -238,15 +244,15 @@ class TestLockedWinPriceCap:
         slot = _slot(70, 74, price_no=0.96)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
-        assert len(sigs) == 0, "0.96 must be rejected by LOCKED_WIN_MAX_PRICE"
+        assert len(sigs) == 0, "0.96 must be rejected by locked_win_max_price"
 
     def test_below_lock_at_0_999_rejected_by_cap(self):
         """price=0.999 (the production-environment dead zone) → rejected.
 
         Pre-rollback: passed Fix 2's removed cap, then `ev > 0` accepted
         because EV ≈ +$0.0008/share (theoretically positive).
-        Post-rollback: rejected by 0.95 cap *before* the EV check, so the
-        razor-thin entries that triggered this rollback never fire.
+        Post-rollback: rejected by the 0.95 cap *before* the EV check,
+        so the razor-thin entries that triggered this rollback never fire.
         """
         slot = _slot(70, 74, price_no=0.999)
         event = _event([slot])
@@ -269,10 +275,40 @@ class TestLockedWinPriceCap:
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
-    def test_constant_value(self):
-        """LOCKED_WIN_MAX_PRICE is exactly 0.95 (regression guard)."""
-        from src.strategy.evaluator import LOCKED_WIN_MAX_PRICE
-        assert LOCKED_WIN_MAX_PRICE == 0.95
+    def test_default_config_value(self):
+        """StrategyConfig.locked_win_max_price defaults to 0.95 (regression guard)."""
+        assert StrategyConfig().locked_win_max_price == 0.95
+        # And the zero-margin _CFG used throughout this module inherits the default.
+        assert _CFG.locked_win_max_price == 0.95
+
+    def test_config_override_actually_takes_effect(self):
+        """Override locked_win_max_price=0.85 → entries between 0.85 and the
+        former default 0.95 are now rejected, proving the gate reads config
+        rather than the prior hardcoded constant."""
+        cfg = StrategyConfig(locked_win_margin_f=0, locked_win_max_price=0.85)
+        # Default cap (0.95) would accept this; tighter override must reject.
+        slot = _slot(70, 74, price_no=0.90)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, cfg, daily_max_final=True)
+        assert len(sigs) == 0, "price=0.90 above tighter cap 0.85 must be rejected"
+
+        # Below the tighter cap → accepted.
+        slot2 = _slot(70, 74, price_no=0.80)
+        event2 = _event([slot2])
+        sigs2 = evaluate_locked_win_signals(event2, 76.0, cfg, daily_max_final=True)
+        assert len(sigs2) == 1, "price=0.80 under tighter cap 0.85 must be accepted"
+
+    def test_config_override_can_relax_cap(self):
+        """Override locked_win_max_price=0.99 → entries that the default 0.95
+        would reject can be accepted (still subject to the `ev > 0` floor)."""
+        cfg = StrategyConfig(locked_win_margin_f=0, locked_win_max_price=0.99)
+        slot = _slot(70, 74, price_no=0.97)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, cfg, daily_max_final=True)
+        # 0.97 passes the relaxed cap; below-lock EV at 0.97 with win_prob=0.999
+        # is still slightly positive, so the `ev > 0` gate also passes.
+        assert len(sigs) == 1
+        assert sigs[0].expected_value > 0
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -317,9 +353,9 @@ class TestLockedWinBoundary:
         assert len(sigs) == 0
 
     def test_price_no_very_high_rejected(self):
-        """price_no=0.999 → rejected (post-rollback by LOCKED_WIN_MAX_PRICE cap;
-        the `ev > 0` safety net would also reject under win_prob=0.999 once
-        fees are deducted).  See TestLockedWinPriceCap for the dedicated
+        """price_no=0.999 → rejected (post-rollback by `locked_win_max_price`
+        cap; the `ev > 0` safety net would also reject under win_prob=0.999
+        once fees are deducted).  See TestLockedWinPriceCap for the dedicated
         cap-vs-EV regression coverage."""
         slot = _slot(70, 74, price_no=0.999)
         event = _event([slot])

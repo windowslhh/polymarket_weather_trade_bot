@@ -54,6 +54,14 @@ class StrategyConfig:
     # Safety margin: wu_round(daily_max) must differ from slot boundary by at least
     # this many integer degrees to trigger locked-win (avoids X.5 rounding ambiguity)
     locked_win_margin_f: int = 2
+    # Hard ceiling on NO price for locked-win entries.  Above this, the implied
+    # margin (1 - price) is so thin that one Polymarket tick of paper→live
+    # slippage (0.001) can flip the entry into negative EV.  Acts as a hard
+    # gate alongside the `ev > 0` safety net inside evaluate_locked_win_signals.
+    # Default 0.95 chosen empirically (production data 2026-04-17 — see
+    # docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md).  Tuneable via
+    # config without redeploy if future market microstructure shifts.
+    locked_win_max_price: float = 0.95
     # Hour (local) after which peak temperature window is considered over
     post_peak_hour: int = 17
     # Minutes without a new high (after post_peak_hour) to confirm daily max is final

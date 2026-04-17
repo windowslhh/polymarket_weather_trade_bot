@@ -30,17 +30,6 @@ logger = logging.getLogger(__name__)
 # Makers pay 0%; we assume all our orders execute as taker (aggressive limits).
 TAKER_FEE_RATE: float = 0.0125  # 1.25%
 
-# Hard ceiling on NO price for locked-win entries.  Above this, the implied
-# margin (1 - price) is so thin that paper→live slippage (typically ≥1 tick =
-# 0.001) and any incremental fee swing wipe out the entire EV.  Empirically
-# (2026-04-17 production cycle) every locked-win signal Fix 2 produced was
-# stuck in 0.997-0.9985 with EV ≈ 0.0008 — technically positive but
-# unrecoverable in live execution.  Acts as a *hard* gate alongside the
-# `ev > 0` safety net (two filters; either rejection blocks the entry).
-# See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
-LOCKED_WIN_MAX_PRICE: float = 0.95
-
-
 def _entry_fee_per_dollar(price: float) -> float:
     """Compute Polymarket taker fee per dollar invested at *price*.
 
@@ -588,19 +577,22 @@ def evaluate_locked_win_signals(
         if not is_locked:
             continue
 
-        # Hard ceiling: reject locked-win entries above LOCKED_WIN_MAX_PRICE
-        # (0.95).  This is a *partial rollback* of Fix 2 — we keep Fix 2's
-        # below/above-lock win_prob split (0.999 vs 0.99) but reinstate the
-        # price cap because production data (2026-04-17) showed that without
-        # it, every locked-win fired at 0.997-0.9985 where the technical
-        # +EV (≈$0.0008/share) is smaller than paper→live slippage (≥1 tick).
+        # Hard ceiling: reject locked-win entries above
+        # `config.locked_win_max_price` (default 0.95).  This is a *partial
+        # rollback* of Fix 2 — we keep Fix 2's below/above-lock win_prob
+        # split (0.999 vs 0.99) but reinstate the price cap because
+        # production data (2026-04-17) showed that without it, every
+        # locked-win fired at 0.997-0.9985 where the technical +EV
+        # (≈$0.0008/share) is smaller than paper→live slippage (≥1 tick).
         # The `ev > 0` check below remains as a safety net — both gates
-        # must pass.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
-        if slot.price_no > LOCKED_WIN_MAX_PRICE:
+        # must pass.  Promoted from module constant to config field on
+        # 2026-04-17 (review #3) so future tuning doesn't require redeploy.
+        # See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
+        if slot.price_no > config.locked_win_max_price:
             logger.debug(
-                "LOCKED WIN skip (price %.4f > LOCKED_WIN_MAX_PRICE %.2f): "
+                "LOCKED WIN skip (price %.4f > locked_win_max_price %.2f): "
                 "%s slot %s — margin too thin for live execution",
-                slot.price_no, LOCKED_WIN_MAX_PRICE,
+                slot.price_no, config.locked_win_max_price,
                 event.city, slot.outcome_label,
             )
             continue

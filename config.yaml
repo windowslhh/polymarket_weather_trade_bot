@@ -52,6 +52,10 @@ strategy:
   enable_locked_wins: true
   locked_win_kelly_fraction: 1.0
   max_locked_win_per_slot_usd: 10.0
+  # Hard NO-price ceiling for locked-win entries (partial Fix 2 rollback,
+  # 2026-04-17).  Above this, paper→live slippage of one tick (0.001) wipes
+  # out the residual EV.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
+  locked_win_max_price: 0.95
   # Hybrid exit: force-sell within N hours of settlement when distance is close
   force_exit_hours: 1.0
   # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
