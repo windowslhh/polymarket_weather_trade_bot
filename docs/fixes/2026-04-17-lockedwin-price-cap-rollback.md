@@ -30,9 +30,12 @@
 ### 2.1 Fee 计算正确，但 slippage 没被建模
 - Polymarket 的 taker fee 是概率加权 (`TAKER_FEE_RATE × 2 × p × (1-p)`)，不是 flat 2%。Fix 2 在 EV 公式里这部分是对的。
 - 但 **paper→live 的 1 tick = 0.001 的最小价位移动 (slippage)** 在 0.997+ 区间会直接吃掉整个 EV：
-  - price=0.998 时，EV ≈ 0.999 × 0.002 − 0.001 × 0.998 − fee ≈ 0.001 − 0.0006 ≈ +0.0004
-  - 如果实盘成交在 0.999 而不是 0.998（仅一 tick 的滑点），EV → −0.0006，直接负值。
-- 也就是说：纸面上 +EV，但 fill 概率非零地把整批信号变成 negative EV。
+  - price=0.998 时:
+    - gross EV = `0.999 × 0.002 − 0.001 × 0.998` = `0.001998 − 0.000998` = **+0.001** (10 bp)
+    - fee = `0.0125 × 2 × 0.998 × 0.002` ≈ **+0.00005** (约 0.5 bp)
+    - net EV ≈ **+0.00095** (约 9.5 bp)，仍小于 1 tick slippage (10 bp) → 实盘大概率反向
+  - 量化一下:成交滑到 0.999 时,gross EV = `0.999 × 0.001 − 0.001 × 0.999` = `0` (再扣 fee 直接负值)。
+- 也就是说：纸面上 +EV (亚 10 bp)，fill 概率非零地把整批信号变成 negative EV。
 
 ### 2.2 架构上 15-min cycle + mid-price ≠ orderbook sniping
 - 真要在 0.997+ 区间赚钱，需要的是 **orderbook-watcher**：实时盯着对手挂的 sell 单，在挂出的瞬间 take。
