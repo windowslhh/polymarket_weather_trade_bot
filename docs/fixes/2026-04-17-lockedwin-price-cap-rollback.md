@@ -21,7 +21,7 @@
 | 总暴露 (cost basis)        | $61.69                       |
 | 期望收益 (sum EV × shares) | ≈ $0.05                      |
 | 隐含年化                   | ~0.03%                       |
-| BE buffer                | 4.6 bp                       |
+| BE buffer (最差端, price=0.9985) | 约 4.6 bp,低于 1 tick slippage (10 bp) |
 
 — 17/17 信号都压在 NO 0.997 以上的极薄边际带，没有一笔落在我们设计 locked-win 时设想的 "市场漏标的深 OOM 锁定胜" 区间。
 
