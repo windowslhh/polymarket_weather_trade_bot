@@ -616,6 +616,12 @@ def evaluate_locked_win_signals(
               - _entry_fee_per_dollar(slot.price_no))
 
         if ev <= 0:
+            logger.debug(
+                "LOCKED WIN skip (ev=%.5f, price=%.4f, win_prob=%.3f): "
+                "%s slot %s — fee/odds wipe out positive EV",
+                ev, slot.price_no, win_prob,
+                event.city, slot.outcome_label,
+            )
             continue
 
         signal = TradeSignal(
