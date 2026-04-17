@@ -74,6 +74,11 @@
 
 ## Fix 2 — 锁定胜死区（P0，甲案）
 
+> **⚠️ 部分回退于 2026-04-17**: 价帽 `price > 0.95` 已被加回（`LOCKED_WIN_MAX_PRICE` 常量），
+> 因为生产数据证明 `ev > 0` 单门槛不足以过滤 paper→live slippage 主导的薄边际带。
+> below/above-lock win_prob 分流 (0.999 / 0.99) 保留。
+> 详见 [`2026-04-17-lockedwin-price-cap-rollback.md`](./2026-04-17-lockedwin-price-cap-rollback.md)。
+
 ### 现象
 - 过去 32h：0 次 LOCKED-WIN 入场。
 - 市场对 “几乎确定” slot 会定价到 ~0.99-1.00，被 `src/strategy/evaluator.py:523` 的 `price > 0.95` 价帽挡住。

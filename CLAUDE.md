@@ -25,7 +25,7 @@
   - A = Conservative far-distance (kelly=0.5, locked-kelly=0.5), B = Locked-win aggressor (kelly=0.6, locked-kelly=1.0 — larger forecast-entry size than A too so B ≠ A even without locked-win fires), C = Close-range with high EV gate, D = Quick exit
 - **Signal types**: NO (forecast-based entry), LOCKED (daily_max > slot upper → guaranteed win), EXIT (3-layer hybrid), TRIM (EV decay)
 - **Auto-calibrated distance**: Per-city threshold from historical forecast error distribution (calibrator.py)
-- **Locked-win signals**: When observed daily max exceeds slot upper bound by ≥ `locked_win_margin_f`, NO is guaranteed → full Kelly sizing. The legacy 0.95 hard price cap was removed — the `ev > 0` gate (win_prob 0.999 for below-slot locks, 0.99 above) naturally filters the fee-dominated dead zone.
+- **Locked-win signals**: When observed daily max exceeds slot upper bound by ≥ `locked_win_margin_f`, NO is guaranteed → full Kelly sizing. **Two gates apply**: (1) hard price cap `LOCKED_WIN_MAX_PRICE = 0.95` blocks fee-dominated entries outright; (2) `ev > 0` safety net using win_prob 0.999 for below-slot locks / 0.99 for above-slot locks (Fix 2 split). The 0.95 cap was removed in Fix 2 (035d353) then **reinstated 2026-04-17** after production showed 17/17 entries clustered at 0.997-0.9985 with EV ≈ $0.0008/share — paper→live slippage (≥1 tick = 0.001) was eating the entire margin. See `docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md`.
 - **TRIM dual-gate** (fix 4): a held NO is trimmed when EITHER the absolute gate (`current_ev < -min_trim_ev_absolute`) OR the relative gate (`current_ev < entry_ev × (1 - trim_ev_decay_ratio)`) fires. Rich entries get protection from noise; hard reversals still trip the absolute floor.
 - **Thin-liquidity per-city cap** (fix 5): Miami / San Francisco / Tampa / Orlando get `max_exposure_per_city_usd × thin_liquidity_exposure_ratio` (default 0.5) because their Gamma volume is a fraction of other cities — prevents MTM blow-ups.
 - **Hybrid exit**: Layer 1 (locked-win protection) → Layer 2 (EV-based hold/sell) → Layer 3 (pre-settlement force exit)
@@ -62,5 +62,5 @@
 - Paper mode: CLOB returns empty prices, use Gamma prices as fallback for unrealized P&L
 - DailyMaxTracker uses UTC dates internally — tests must use `datetime.now(timezone.utc).date()`, not `date.today()`
 - Calibrator confidence must be in [0.5, 0.99] — values outside are clamped automatically
-- Locked-win 0.95 price cap was removed (fix 2) — do not reinstate it; the `gap ≥ margin` + `ev > 0` dual gate is the correct filter
+- Locked-win 0.95 price cap: removed by Fix 2 (035d353), **reinstated 2026-04-17** as `LOCKED_WIN_MAX_PRICE` constant in `src/strategy/evaluator.py`. The Fix 2 rationale (let `ev > 0` gate filter alone) failed in production — paper→live slippage exceeded the razor-thin EV at 0.997+. Hard cap now runs *in addition to* the `ev > 0` safety net; Fix 2's below/above-lock win_prob split (0.999 / 0.99) is preserved within [min_no_price, 0.95].
 - `StrategyConfig.min_trim_ev` is legacy (fix 4) — `min_trim_ev_absolute` and `trim_ev_decay_ratio` are the active gates; legacy field retained only for older YAML configs
