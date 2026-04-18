@@ -181,11 +181,11 @@ class TestSettlementValidation:
 
     def test_mismatched_config(self):
         from src.weather.settlement import validate_station_config
-        # Dallas: config says KDAL but settlement uses KDFW
-        cities = [CityConfig("Dallas", "KDAL", 32.7, -96.8)]
+        # Dallas settles on KDAL (Love Field); KDFW is a common misconfiguration.
+        cities = [CityConfig("Dallas", "KDFW", 32.7, -96.8)]
         mismatches = validate_station_config(cities)
         assert len(mismatches) == 1
-        assert "KDFW" in mismatches[0].issue
+        assert "KDAL" in mismatches[0].issue
 
     def test_unknown_city(self):
         from src.weather.settlement import validate_station_config

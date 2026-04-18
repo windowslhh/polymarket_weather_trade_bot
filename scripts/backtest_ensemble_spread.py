@@ -36,15 +36,15 @@ ENSEMBLE_MODELS = [
 
 # Test cities: mix of accurate and uncertain
 TEST_CITIES = [
-    {"name": "Denver",        "icao": "KDEN", "lat": 39.7392, "lon": -104.9903},
+    {"name": "Denver",        "icao": "KBKF", "lat": 39.7017, "lon": -104.7517},
     {"name": "Miami",         "icao": "KMIA", "lat": 25.7617, "lon": -80.1918},
     {"name": "Chicago",       "icao": "KORD", "lat": 41.8781, "lon": -87.6298},
     {"name": "Los Angeles",   "icao": "KLAX", "lat": 34.0522, "lon": -118.2437},
     {"name": "Seattle",       "icao": "KSEA", "lat": 47.6062, "lon": -122.3321},
-    {"name": "Dallas",        "icao": "KDFW", "lat": 32.7767, "lon": -96.7970},
+    {"name": "Dallas",        "icao": "KDAL", "lat": 32.8471, "lon": -96.8518},
     {"name": "San Francisco", "icao": "KSFO", "lat": 37.7749, "lon": -122.4194},
     {"name": "Atlanta",       "icao": "KATL", "lat": 33.7490, "lon": -84.3880},
-    {"name": "Houston",       "icao": "KIAH", "lat": 29.7604, "lon": -95.3698},
+    {"name": "Houston",       "icao": "KHOU", "lat": 29.6454, "lon": -95.2789},
 ]
 
 # Open-Meteo ensemble API supports ~3 months of past runs
