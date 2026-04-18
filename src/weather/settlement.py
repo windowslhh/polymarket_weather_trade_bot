@@ -173,3 +173,80 @@ def validate_station_config(
             ))
 
     return mismatches
+
+
+@dataclass
+class AlignmentIssue:
+    """A mismatch between the bot's configured ICAO and the live Gamma event.
+
+    kind:
+      - MISMATCH:   config says KXXX, Gamma event says KYYY → hard error
+      - UNRESOLVED: Gamma event has no machine-extractable K-code → warn only
+      - NO_EVENT:   no active weather event discovered for this city → warn only
+    """
+    city: str
+    config_icao: str
+    gamma_icao: str  # empty when UNRESOLVED / NO_EVENT
+    event_id: str
+    kind: str
+
+
+async def check_station_alignment(
+    cities: list,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[AlignmentIssue]:
+    """Fail-fast startup guard.
+
+    Pulls live Polymarket weather events and verifies each city's configured
+    ICAO matches the K-code extracted from the Gamma event's resolutionSource.
+    The bot used the wrong station for Houston/Dallas/Denver for ~2 years
+    before this was caught manually (2026-04-17).  This check exists so the
+    next such drift is caught on the next deploy.
+
+    Returns a list of AlignmentIssue; empty list means all-clear.  The caller
+    is responsible for the refuse-to-start policy (typically: any MISMATCH
+    aborts startup; UNRESOLVED / NO_EVENT only log WARN).
+    """
+    # Local import avoids a circular dependency (settlement → discovery → …).
+    from src.markets.discovery import discover_weather_markets
+
+    issues: list[AlignmentIssue] = []
+    try:
+        events = await discover_weather_markets(cities, client=client, min_volume=0)
+    except Exception:
+        logger.exception("check_station_alignment: failed to fetch Gamma events")
+        return issues
+
+    # Collapse to the first event per city — one is enough to verify the station.
+    by_city: dict[str, object] = {}
+    for ev in events:
+        by_city.setdefault(ev.city, ev)
+
+    for city_cfg in cities:
+        city_name = city_cfg.name if hasattr(city_cfg, "name") else city_cfg["name"]
+        config_icao = city_cfg.icao if hasattr(city_cfg, "icao") else city_cfg["icao"]
+
+        ev = by_city.get(city_name)
+        if ev is None:
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao="",
+                event_id="", kind="NO_EVENT",
+            ))
+            continue
+
+        gamma_icao = (getattr(ev, "extracted_icao", "") or "").upper()
+        if not gamma_icao:
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao="",
+                event_id=getattr(ev, "event_id", ""), kind="UNRESOLVED",
+            ))
+            continue
+
+        if gamma_icao != config_icao.upper():
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao=gamma_icao,
+                event_id=getattr(ev, "event_id", ""), kind="MISMATCH",
+            ))
+
+    return issues

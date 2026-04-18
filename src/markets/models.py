@@ -50,6 +50,11 @@ class WeatherMarketEvent:
     title: str = ""
     volume: float = 0.0  # market volume in USD
     resolution_source: str = ""  # e.g. "nws", "wunderground", "noaa"
+    # ICAO (K-code) parsed from Gamma `resolutionSource` / `description` / `rules`.
+    # Empty string when no K-code is recognizable — loader tolerates both for
+    # back-compat.  Checked at startup against SETTLEMENT_STATIONS to catch
+    # silent station drift (see src/weather/settlement.py:check_station_alignment).
+    extracted_icao: str = ""
 
 
 @dataclass

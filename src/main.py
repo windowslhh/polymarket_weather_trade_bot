@@ -17,7 +17,7 @@ from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
-from src.weather.settlement import validate_station_config
+from src.weather.settlement import check_station_alignment, validate_station_config
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -51,10 +51,51 @@ async def run(args: argparse.Namespace) -> None:
 
     logger.info("Loaded %d cities from config", len(config.cities))
 
-    # Validate settlement station configuration
+    # Validate settlement station configuration (static — config vs registry)
     mismatches = validate_station_config(config.cities)
     for m in mismatches:
-        logger.warning("STATION MISMATCH: %s — %s", m.city, m.issue)
+        logger.warning("STATION MISMATCH (static): %s — %s", m.city, m.issue)
+
+    # Live alignment check — pull Gamma events and compare the ICAO in each
+    # event's resolutionSource against our config.  If Polymarket silently
+    # switched settlement stations for any city, abort startup rather than
+    # trade against the wrong data.  Bypass with --skip-station-check only
+    # for emergency deploys; UNRESOLVED and NO_EVENT are always warn-only.
+    if not args.skip_station_check:
+        logger.info("Running live station alignment check...")
+        try:
+            alignment_issues = await check_station_alignment(config.cities)
+        except Exception:
+            logger.exception("Live station alignment check failed (skipping)")
+            alignment_issues = []
+        hard_fail = [i for i in alignment_issues if i.kind == "MISMATCH"]
+        soft = [i for i in alignment_issues if i.kind != "MISMATCH"]
+        for i in soft:
+            logger.warning(
+                "STATION %s: %s — config=%s, gamma=%s, event=%s",
+                i.kind, i.city, i.config_icao, i.gamma_icao or "<none>", i.event_id or "<none>",
+            )
+        if hard_fail:
+            for i in hard_fail:
+                logger.error(
+                    "STATION MISMATCH (live): %s — config=%s but Gamma event uses %s (event=%s)",
+                    i.city, i.config_icao, i.gamma_icao, i.event_id,
+                )
+            logger.error(
+                "Refusing to start: %d live ICAO mismatch(es). Fix config.yaml and "
+                "src/weather/settlement.py, or override with --skip-station-check.",
+                len(hard_fail),
+            )
+            sys.exit(2)
+        if alignment_issues:
+            logger.info(
+                "Live station alignment: %d soft issue(s) (no MISMATCHes — OK to proceed)",
+                len(alignment_issues),
+            )
+        else:
+            logger.info("Live station alignment: all clear")
+    else:
+        logger.warning("--skip-station-check set: live ICAO alignment not verified")
 
     # Initialize components
     store = Store(config.db_path)
@@ -148,6 +189,11 @@ def main() -> None:
         type=int,
         default=5001,
         help="Web dashboard port (default: 5001)",
+    )
+    parser.add_argument(
+        "--skip-station-check",
+        action="store_true",
+        help="Skip live Gamma ICAO alignment check on startup (emergency deploys only)",
     )
     args = parser.parse_args()
 

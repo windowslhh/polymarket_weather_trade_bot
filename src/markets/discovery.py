@@ -12,7 +12,7 @@ import httpx
 
 from src.config import CityConfig
 from src.markets.models import TempSlot, WeatherMarketEvent
-from src.markets.resolution import parse_resolution_from_event
+from src.markets.resolution import extract_settlement_icao, parse_resolution_from_event
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +314,10 @@ async def discover_weather_markets(
 
                 # Parse resolution source from event description
                 resolution = parse_resolution_from_event(event_data, city_cfg.name)
+                # Extract ICAO from resolutionSource/URL — used by the startup
+                # alignment check to catch silent station drift.  May be None
+                # when the event lacks a machine-extractable K-code.
+                extracted_icao = extract_settlement_icao(event_data) or ""
 
                 events.append(WeatherMarketEvent(
                     event_id=event_data.get("id", ""),
@@ -325,6 +329,7 @@ async def discover_weather_markets(
                     title=title,
                     volume=event_volume,
                     resolution_source=resolution,
+                    extracted_icao=extracted_icao,
                 ))
 
             if len(data) < limit:

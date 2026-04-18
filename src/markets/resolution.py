@@ -79,3 +79,65 @@ def parse_resolution_from_event(event_data: dict, city: str = "") -> str:
 def get_cached_sources() -> dict[str, str]:
     """Return all cached resolution sources for dashboard display."""
     return dict(_resolution_cache)
+
+
+# ICAO extraction --------------------------------------------------------------
+#
+# Polymarket weather events list their settlement station inside the event's
+# `resolutionSource` / `description` / `rules` — typically as:
+#   - a Wunderground URL segment: .../history/daily/us/ny/KLGA/...
+#   - a bare ICAO mention: "station KLGA", "Weather Underground station KLGA"
+#   - a human-readable airport name ("LaGuardia Airport")
+#
+# The first two forms are machine-extractable.  The airport-name form requires
+# a fuzzy lookup and is left to future work; for now we only return a value when
+# a confident K-code match exists.
+#
+# Runtime purpose: cross-check the extracted ICAO against SETTLEMENT_STATIONS at
+# startup (see src/weather/settlement.py:check_station_alignment).  If Polymarket
+# quietly switches the settlement station for a city (as we discovered for
+# Houston/Dallas/Denver in 2026-04), this check fails loudly instead of us
+# trading against a mismatched data source for weeks.
+
+# Match a K-code inside a Wunderground URL path or as a standalone token.
+# Anchored on word boundaries to avoid false positives in free text.
+_ICAO_IN_URL_RE = re.compile(r"/([A-Z]{4})(?:/|\b)")
+_ICAO_BARE_RE = re.compile(r"\b([KC][A-Z]{3})\b")
+
+
+def extract_settlement_icao(event_data: dict) -> str | None:
+    """Extract the ICAO airport code used for settlement, if discoverable.
+
+    Looks across `resolutionSource`, `resolutionUrl`, `description`, and `rules`
+    fields.  Preference order:
+      1. ICAO inside a Wunderground-style URL path (most reliable)
+      2. Bare K-code (e.g. "KLGA") mentioned in text
+
+    Returns None when no confident match is found.  Callers should treat None
+    as "unable to verify" (warn, not fail) — only non-None mismatches are
+    hard errors.
+    """
+    candidates: list[str] = []
+
+    for field_name in ("resolutionSource", "resolutionUrl", "description", "rules", "resolution"):
+        val = event_data.get(field_name, "")
+        if not val:
+            continue
+        text = str(val)
+
+        # URL-form first (higher confidence)
+        for match in _ICAO_IN_URL_RE.findall(text):
+            candidates.append(match)
+
+        # Bare K-code / C-code mentions
+        for match in _ICAO_BARE_RE.findall(text):
+            candidates.append(match)
+
+    if not candidates:
+        return None
+
+    # Majority vote across fields — protects against stray K-codes
+    # (e.g. someone cited two stations in prose).
+    from collections import Counter
+    winner, _count = Counter(candidates).most_common(1)[0]
+    return winner

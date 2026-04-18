@@ -1,7 +1,12 @@
 """Tests for resolution source parser."""
 from __future__ import annotations
 
-from src.markets.resolution import parse_resolution_source, parse_resolution_from_event, _resolution_cache
+from src.markets.resolution import (
+    _resolution_cache,
+    extract_settlement_icao,
+    parse_resolution_from_event,
+    parse_resolution_source,
+)
 
 import pytest
 
@@ -59,3 +64,39 @@ def test_parse_from_event_resolution_field():
         "resolutionSource": "NOAA official records",
     }
     assert parse_resolution_from_event(event) == "noaa"
+
+
+class TestExtractSettlementIcao:
+    def test_wunderground_url(self):
+        event = {
+            "description": "",
+            "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/KLGA/date/2026-4-17",
+        }
+        assert extract_settlement_icao(event) == "KLGA"
+
+    def test_bare_kcode(self):
+        event = {"description": "Resolves using Weather Underground station KDAL (Dallas Love Field)."}
+        assert extract_settlement_icao(event) == "KDAL"
+
+    def test_no_icao(self):
+        event = {"description": "Resolves using NOAA data for New York City."}
+        assert extract_settlement_icao(event) is None
+
+    def test_empty(self):
+        assert extract_settlement_icao({}) is None
+
+    def test_majority_vote(self):
+        # Two mentions of KBKF, one stray KDEN → KBKF wins
+        event = {
+            "description": "Settlement station: KBKF (Buckley).",
+            "resolutionSource": "https://www.wunderground.com/history/daily/us/co/KBKF/",
+            "rules": "Historical note: KDEN was used before the migration.",
+        }
+        assert extract_settlement_icao(event) == "KBKF"
+
+    def test_houston_hobby_vs_iah(self):
+        # The regression case from 2026-04-17: config had KIAH, Gamma actually KHOU.
+        event = {
+            "resolutionSource": "https://www.wunderground.com/history/daily/us/tx/KHOU/date/2026-4-17",
+        }
+        assert extract_settlement_icao(event) == "KHOU"
