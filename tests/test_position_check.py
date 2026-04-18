@@ -42,7 +42,7 @@ def _make_config(**overrides) -> AppConfig:
         scheduling=SchedulingConfig(),
         cities=[
             CityConfig("New York", "KLGA", 40.7128, -74.006, tz="America/New_York"),
-            CityConfig("Dallas", "KDFW", 32.7767, -96.797, tz="America/Chicago"),
+            CityConfig("Dallas", "KDAL", 32.8471, -96.8518, tz="America/Chicago"),
         ],
         dry_run=True,
         db_path=Path("/tmp/test_position_check.db"),
@@ -219,7 +219,7 @@ class TestPositionCheckBoundary:
             if city == "New York":
                 return MockSettlementObs("KLGA", 75.0)  # safe for [80,84]
             if city == "Dallas":
-                return MockSettlementObs("KDFW", 91.0)  # inside [90,94] → exit
+                return MockSettlementObs("KDAL", 91.0)  # inside [90,94] → exit
             return None
 
         with patch("src.strategy.rebalancer.fetch_settlement_temp", side_effect=mock_fetch):
@@ -438,7 +438,7 @@ class TestPositionCheckPerformance:
             if city == "New York":
                 return MockSettlementObs("KLGA", 75.0)
             if city == "Dallas":
-                return MockSettlementObs("KDFW", 85.0)
+                return MockSettlementObs("KDAL", 85.0)
             return None
 
         t0 = time.monotonic()

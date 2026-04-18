@@ -43,23 +43,30 @@ def _entry_fee_per_dollar(price: float) -> float:
 
 
 # When our win-probability estimate disagrees with market price by more than
-# this many points, the inputs (forecast, daily_max, station) are almost
-# certainly wrong — the market collectively sees something we don't.  Bail
-# out rather than building a position on bad data.  A shared constant so
-# every entry path (NO, locked-win, …) uses the same threshold; forgetting
-# to apply it in one path is what caused the Houston 2026-04-17 blow-up.
-_PRICE_DIVERGENCE_THRESHOLD: float = 0.50
+# config.price_divergence_threshold points, the inputs (forecast, daily_max,
+# station) are almost certainly wrong — the market collectively sees something
+# we don't.  Bail out rather than building a position on bad data.  A shared
+# helper so every entry path (NO, locked-win, …) uses the same threshold;
+# forgetting to apply it in one path caused the Houston 2026-04-17 blow-up.
+#
+# Backwards-compatible default for callers that pre-date
+# StrategyConfig.price_divergence_threshold (keeps pure-helper tests clean).
+_DEFAULT_PRICE_DIVERGENCE_THRESHOLD: float = 0.50
 
 
-def _price_divergence(win_prob: float, market_price_no: float) -> float | None:
-    """Return |win_prob - market_price| when it exceeds the threshold, else None.
+def _price_divergence(
+    win_prob: float,
+    market_price_no: float,
+    threshold: float = _DEFAULT_PRICE_DIVERGENCE_THRESHOLD,
+) -> float | None:
+    """Return |win_prob - market_price| when it exceeds *threshold*, else None.
 
     NO price is already the market's implied P(NO wins), so this compares on
     the same axis.  Callers should reject the entry when the return value is
     not None and log a PRICE_DIVERGENCE decision-log entry.
     """
     gap = abs(win_prob - market_price_no)
-    return gap if gap > _PRICE_DIVERGENCE_THRESHOLD else None
+    return gap if gap > threshold else None
 
 
 # Post-peak confidence intervals: how much the daily max can still
@@ -348,12 +355,16 @@ def evaluate_no_signals(
             continue
 
         # Price divergence guard — shared with evaluate_locked_win_signals,
-        # see _price_divergence() for rationale.
-        gap = _price_divergence(win_prob, slot.price_no)
+        # see _price_divergence() for rationale.  Threshold is tunable via
+        # StrategyConfig.price_divergence_threshold (default 0.50).
+        gap = _price_divergence(
+            win_prob, slot.price_no, config.price_divergence_threshold,
+        )
         if gap is not None:
             logger.warning(
-                "PRICE DIVERGENCE [NO]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f), skipping",
-                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100, gap,
+                "PRICE DIVERGENCE [NO]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
+                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
+                gap, config.price_divergence_threshold,
             )
             _reject(slot, "PRICE_DIVERGENCE",
                     win_prob=win_prob, market_implied=slot.price_no)
@@ -474,6 +485,14 @@ def evaluate_trim_signals(
             # Current slot.price_no is the live market NO price (set by the
             # caller from the latest Gamma refresh).  If it's <= threshold
             # the position has already lost ratio% of its notional value.
+            #
+            # NOTE: `slot.price_no > 0` intentionally filters out 0.0 prices.
+            # In paper mode Gamma sometimes returns 0 for illiquid slots;
+            # treating that as a real crash-to-zero would flood us with
+            # spurious TRIMs.  If the slot truly resolved to 0 (e.g. post-
+            # settlement ghost), the EXIT path handles it via hours_to_settlement.
+            # Ideally discovery.py would drop 0-priced slots before they reach
+            # the evaluator — tracked as a future data-layer cleanup.
             price_stop_triggered = slot.price_no > 0 and slot.price_no <= price_stop_threshold
 
         if absolute_triggered or relative_triggered or price_stop_triggered:
@@ -666,12 +685,16 @@ def evaluate_locked_win_signals(
         # either our daily_max input is wrong (stale/wrong-station) or the
         # market knows something we don't (e.g. pending resolution dispute).
         # Either way, do not size in on such a position.  The Houston KIAH
-        # vs KHOU fiasco (2026-04-17) would have been caught here.
-        gap = _price_divergence(win_prob, slot.price_no)
+        # vs KHOU fiasco (2026-04-17) would have been caught here.  Threshold
+        # is tunable via StrategyConfig.price_divergence_threshold (default 0.50).
+        gap = _price_divergence(
+            win_prob, slot.price_no, config.price_divergence_threshold,
+        )
         if gap is not None:
             logger.warning(
-                "PRICE DIVERGENCE [LOCKED]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f), skipping",
-                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100, gap,
+                "PRICE DIVERGENCE [LOCKED]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
+                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
+                gap, config.price_divergence_threshold,
             )
             continue
 

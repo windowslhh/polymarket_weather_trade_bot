@@ -285,3 +285,60 @@ class TestStationAlignmentLive:
         )
         assert len(issues) == 1
         assert issues[0].kind == "NO_EVENT"
+
+    @pytest.mark.asyncio
+    async def test_gamma_error_sentinel(self, monkeypatch):
+        """PR#5 review Q6: Gamma fetch failure surfaces as an explicit
+        GAMMA_ERROR issue instead of a silent 'all clear'.
+        """
+        from src.weather import settlement as settlement_mod
+
+        async def boom(cities, **kwargs):
+            raise RuntimeError("gamma down")
+
+        monkeypatch.setattr(
+            "src.markets.discovery.discover_weather_markets", boom,
+        )
+        issues = await settlement_mod.check_station_alignment(
+            [CityConfig("New York", "KLGA", 40.7, -74.0)],
+        )
+        assert len(issues) == 1
+        assert issues[0].kind == "GAMMA_ERROR"
+
+    @pytest.mark.asyncio
+    async def test_prefers_event_with_nonempty_icao(self, monkeypatch):
+        """PR#5 review Q5: when multiple events exist for a city, the one
+        with a non-empty extracted_icao must win so we don't silently mask
+        a real MISMATCH behind an UNRESOLVED event.
+        """
+        from datetime import date
+        from src.markets.models import WeatherMarketEvent
+        from src.weather import settlement as settlement_mod
+
+        async def fake_discover(cities, **kwargs):
+            return [
+                # First event: no extractable K-code → would have become UNRESOLVED
+                WeatherMarketEvent(
+                    event_id="e1", condition_id="c1", city="Houston",
+                    market_date=date.today(), slots=[],
+                    extracted_icao="",
+                ),
+                # Second event: clear K-code that disagrees with config
+                WeatherMarketEvent(
+                    event_id="e2", condition_id="c2", city="Houston",
+                    market_date=date.today(), slots=[],
+                    extracted_icao="KHOU",
+                ),
+            ]
+
+        monkeypatch.setattr(
+            "src.markets.discovery.discover_weather_markets", fake_discover,
+        )
+        issues = await settlement_mod.check_station_alignment(
+            [CityConfig("Houston", "KIAH", 29.98, -95.33)],
+        )
+        # Must surface the MISMATCH from e2, not UNRESOLVED from e1.
+        assert len(issues) == 1
+        assert issues[0].kind == "MISMATCH"
+        assert issues[0].gamma_icao == "KHOU"
+        assert issues[0].event_id == "e2"

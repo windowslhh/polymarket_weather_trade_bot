@@ -100,3 +100,31 @@ class TestExtractSettlementIcao:
             "resolutionSource": "https://www.wunderground.com/history/daily/us/tx/KHOU/date/2026-4-17",
         }
         assert extract_settlement_icao(event) == "KHOU"
+
+    def test_ignores_all_caps_english_words(self):
+        """PR#5 review Q3: CITY/CODE/CARE etc must not be mis-identified as ICAOs.
+
+        Previously _ICAO_BARE_RE matched `[KC][A-Z]{3}` and would return "CITY"
+        from a description like "CITY of Denver reports."  Now the bare form
+        is K-prefix only.
+        """
+        event = {"description": "CITY of Denver reports high temperature for April 17."}
+        assert extract_settlement_icao(event) is None
+
+        # Mixed: legitimate K-code wins over all-caps English words
+        event = {"description": "CITY of Denver — settlement via KBKF station."}
+        assert extract_settlement_icao(event) == "KBKF"
+
+    def test_url_takes_priority_over_bare(self):
+        """PR#5 review Q4: when URL form is present, bare matches must be ignored.
+
+        Historical-reference prose like 'formerly KDEN' must not outvote the
+        current-station URL.
+        """
+        event = {
+            "resolutionSource": "https://www.wunderground.com/history/daily/us/co/KBKF/date/2026-4-17",
+            "description": "Station formerly known as KDEN. Previously operated as KDEN for decades.",
+            "rules": "Historical reference: KDEN. KDEN. KDEN.",
+        }
+        # URL has 1 KBKF vote, bare has 4 KDEN votes — but URL wins unconditionally.
+        assert extract_settlement_icao(event) == "KBKF"

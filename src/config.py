@@ -48,6 +48,13 @@ class StrategyConfig:
     # fire.  Chicago 80-81 TRIMs at 95% loss on 2026-04-15 were this pattern.
     # Set to a value > 1.0 to disable.
     trim_price_stop_ratio: float = 0.25
+    # Bug #1 fix (2026-04-18): reject entries where the model's win_prob
+    # disagrees with the market-implied NO price by more than this many
+    # points.  Applies to both standard-NO and locked-win branches via
+    # evaluator._price_divergence().  Promoted from module constant to
+    # config field on the 2026-04-18 PR#5 review so future tuning doesn't
+    # need a code change + redeploy — analogous treatment as locked_win_max_price.
+    price_divergence_threshold: float = 0.50
     max_no_price: float = 0.85
     min_no_price: float = 0.20
     day_ahead_ev_discount: float = 0.7

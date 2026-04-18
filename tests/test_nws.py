@@ -11,7 +11,8 @@ from src.weather.nws import get_nws_forecast, _gridpoint_cache
 
 
 def _city():
-    return CityConfig(name="Dallas", icao="KDFW", lat=32.78, lon=-96.80)
+    # Dallas settles on KDAL (Love Field), not KDFW — see SETTLEMENT_STATIONS.
+    return CityConfig(name="Dallas", icao="KDAL", lat=32.85, lon=-96.85)
 
 
 def _make_points_response():
@@ -77,7 +78,7 @@ async def test_nws_returns_none_on_failure():
 @pytest.mark.asyncio
 async def test_nws_gridpoint_cached():
     """Second call should use cached gridpoint URL."""
-    _gridpoint_cache["32.7800,-96.8000"] = "https://api.weather.gov/gridpoints/FWD/84,108/forecast"
+    _gridpoint_cache["32.8500,-96.8500"] = "https://api.weather.gov/gridpoints/FWD/84,108/forecast"
 
     client = AsyncMock()
     resp = MagicMock()

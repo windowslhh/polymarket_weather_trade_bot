@@ -35,7 +35,7 @@ def _make_config(**overrides) -> AppConfig:
         scheduling=SchedulingConfig(),
         cities=[
             CityConfig("New York", "KLGA", 40.7128, -74.006),
-            CityConfig("Dallas", "KDFW", 32.7767, -96.797),
+            CityConfig("Dallas", "KDAL", 32.8471, -96.8518),
         ],
         dry_run=True,
         db_path=Path("/tmp/test_variants.db"),

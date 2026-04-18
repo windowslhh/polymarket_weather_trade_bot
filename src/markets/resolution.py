@@ -99,25 +99,36 @@ def get_cached_sources() -> dict[str, str]:
 # Houston/Dallas/Denver in 2026-04), this check fails loudly instead of us
 # trading against a mismatched data source for weeks.
 
-# Match a K-code inside a Wunderground URL path or as a standalone token.
-# Anchored on word boundaries to avoid false positives in free text.
+# URL form: accept any 4-letter uppercase segment inside a Wunderground-style
+# path ("/KLGA/" or "/KLGA?..."). URLs are a structured context so the
+# surrounding slashes give us high confidence this is a station code, not
+# an English word.
 _ICAO_IN_URL_RE = re.compile(r"/([A-Z]{4})(?:/|\b)")
-_ICAO_BARE_RE = re.compile(r"\b([KC][A-Z]{3})\b")
+# Bare form: K-prefix only (K-codes cover all 50 US states + territories,
+# which is every city Polymarket currently lists).  C-prefix was tempting
+# for Canadian coverage, but it collides with common all-caps English words
+# in free text (CITY, CODE, CARE, CELL, COOL, CORE, CAST…) — review feedback
+# on PR #5 flagged this could promote an UNRESOLVED event into a false
+# MISMATCH and hard-exit the bot.  If Polymarket ever ships Canadian weather
+# markets, revisit by routing C-codes through URL-only matching.
+_ICAO_BARE_RE = re.compile(r"\b(K[A-Z]{3})\b")
 
 
 def extract_settlement_icao(event_data: dict) -> str | None:
     """Extract the ICAO airport code used for settlement, if discoverable.
 
-    Looks across `resolutionSource`, `resolutionUrl`, `description`, and `rules`
-    fields.  Preference order:
+    Looks across `resolutionSource`, `resolutionUrl`, `description`, `rules`,
+    and `resolution` fields.  Preference order:
       1. ICAO inside a Wunderground-style URL path (most reliable)
-      2. Bare K-code (e.g. "KLGA") mentioned in text
+      2. Bare K-code (e.g. "KLGA") mentioned in text — K-prefix only to avoid
+         false matches on all-caps English words
 
     Returns None when no confident match is found.  Callers should treat None
     as "unable to verify" (warn, not fail) — only non-None mismatches are
     hard errors.
     """
-    candidates: list[str] = []
+    url_candidates: list[str] = []
+    bare_candidates: list[str] = []
 
     for field_name in ("resolutionSource", "resolutionUrl", "description", "rules", "resolution"):
         val = event_data.get(field_name, "")
@@ -125,19 +136,20 @@ def extract_settlement_icao(event_data: dict) -> str | None:
             continue
         text = str(val)
 
-        # URL-form first (higher confidence)
         for match in _ICAO_IN_URL_RE.findall(text):
-            candidates.append(match)
+            url_candidates.append(match)
 
-        # Bare K-code / C-code mentions
         for match in _ICAO_BARE_RE.findall(text):
-            candidates.append(match)
+            bare_candidates.append(match)
 
-    if not candidates:
-        return None
-
-    # Majority vote across fields — protects against stray K-codes
-    # (e.g. someone cited two stations in prose).
+    # URL form has higher confidence — if present, decide purely on URL votes
+    # and ignore bare matches (which may contradict historical references to
+    # older stations in prose, e.g. "formerly KDEN"). Review feedback PR#5 Q4.
     from collections import Counter
-    winner, _count = Counter(candidates).most_common(1)[0]
-    return winner
+    if url_candidates:
+        winner, _count = Counter(url_candidates).most_common(1)[0]
+        return winner
+    if bare_candidates:
+        winner, _count = Counter(bare_candidates).most_common(1)[0]
+        return winner
+    return None

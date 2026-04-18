@@ -68,8 +68,18 @@ async def run(args: argparse.Namespace) -> None:
         except Exception:
             logger.exception("Live station alignment check failed (skipping)")
             alignment_issues = []
+        # GAMMA_ERROR sentinel means the fetch itself failed — log loudly
+        # so operators don't mistake a silent skip for an all-clear.
+        gamma_errors = [i for i in alignment_issues if i.kind == "GAMMA_ERROR"]
+        if gamma_errors:
+            logger.warning(
+                "STATION ALIGNMENT SKIPPED: Gamma fetch failed; live ICAO check did "
+                "NOT run. Proceeding with config as-is — if persistent, investigate "
+                "Gamma connectivity before trusting startup.",
+            )
         hard_fail = [i for i in alignment_issues if i.kind == "MISMATCH"]
-        soft = [i for i in alignment_issues if i.kind != "MISMATCH"]
+        soft = [i for i in alignment_issues
+                if i.kind not in ("MISMATCH", "GAMMA_ERROR")]
         for i in soft:
             logger.warning(
                 "STATION %s: %s — config=%s, gamma=%s, event=%s",
@@ -87,13 +97,13 @@ async def run(args: argparse.Namespace) -> None:
                 len(hard_fail),
             )
             sys.exit(2)
-        if alignment_issues:
+        if not alignment_issues:
+            logger.info("Live station alignment: all clear")
+        elif not gamma_errors:
             logger.info(
                 "Live station alignment: %d soft issue(s) (no MISMATCHes — OK to proceed)",
                 len(alignment_issues),
             )
-        else:
-            logger.info("Live station alignment: all clear")
     else:
         logger.warning("--skip-station-check set: live ICAO alignment not verified")
 
