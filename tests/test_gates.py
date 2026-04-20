@@ -427,6 +427,17 @@ class TestPriceStopGate:
         result = PriceStopGate().check(ctx)
         assert result is not None and result.code == "price_stop"
 
+    def test_skip_when_live_price_zero(self):
+        """Defensive guard (M5): position-check path bypasses D1's discovery
+        filter, so a cold-start Gamma 0 price must not flip this gate into
+        a SELL-at-zero."""
+        cfg = StrategyConfig(trim_price_stop_ratio=0.25)
+        ctx = _ctx(
+            _slot(70, 74, price_no=0.0, token_no="tn"), config=cfg,
+            entry_prices={"tn": 0.40},
+        )
+        assert PriceStopGate().check(ctx) is None
+
     def test_disabled_when_ratio_out_of_range(self):
         cfg = StrategyConfig(trim_price_stop_ratio=1.5)
         ctx = _ctx(

@@ -367,11 +367,18 @@ def evaluate_exit_signals(
             continue
 
         # Layer 2: EV-based hold vs sell.
-        win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
+        wp_forecast = _estimate_no_win_prob(slot, forecast, error_dist)
         dist_to_max = _slot_distance(slot, daily_max_f)
         max_confidence = peak_conf if peak_conf is not None else forecast.confidence_interval_f
         wp_from_max = _estimate_no_win_probability_normal(dist_to_max, max_confidence)
-        win_prob = max(win_prob, wp_from_max) if peak_conf is not None else min(win_prob, wp_from_max)
+        win_prob = (max(wp_forecast, wp_from_max) if peak_conf is not None
+                    else min(wp_forecast, wp_from_max))
+        if peak_conf is not None:
+            logger.debug(
+                "EXIT post-peak (h=%s): %s slot %s — wp_forecast=%.3f, wp_observed=%.3f → %.3f",
+                local_hour, event.city, slot.outcome_label,
+                wp_forecast, wp_from_max, win_prob,
+            )
         ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
         if ev >= 0:

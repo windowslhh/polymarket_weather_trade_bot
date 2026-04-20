@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 
+from src.alerts import Alerter
 from src.config import load_config
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
@@ -90,20 +91,25 @@ async def run(args: argparse.Namespace) -> None:
                 "STATION %s: %s — config=%s, gamma=%s, event=%s",
                 i.kind, i.city, i.config_icao, i.gamma_icao or "<none>", i.event_id or "<none>",
             )
-        # O1: escalate to ERROR when UNRESOLVED covers most of the fleet
-        # — the fingerprint of a Polymarket resolutionSource regex break.
+        # O1: escalate to ERROR + webhook when UNRESOLVED covers most of the
+        # fleet — the fingerprint of a Polymarket resolutionSource regex
+        # break.  logger.error alone only reaches stdout/docker logs; route
+        # through Alerter so the operator's webhook (Telegram/Discord/Slack)
+        # actually pages them.  No sys.exit: transient Gamma weirdness
+        # shouldn't block a deploy, but the critical channel surface matters.
         bulk_unresolved, unresolved_count = is_bulk_unresolved(
             alignment_issues, len(config.cities),
         )
         if bulk_unresolved:
-            logger.error(
-                "CRITICAL ALIGNMENT ANOMALY: %d/%d cities have UNRESOLVED events "
-                "(>%.0f%%).  Polymarket's resolutionSource URL format may have "
-                "changed — investigate extract_settlement_icao before trusting "
-                "today's signals.",
-                unresolved_count, len(config.cities),
-                BULK_UNRESOLVED_THRESHOLD * 100,
+            msg = (
+                f"CRITICAL ALIGNMENT ANOMALY: {unresolved_count}/{len(config.cities)} "
+                f"cities have UNRESOLVED events (>{BULK_UNRESOLVED_THRESHOLD * 100:.0f}%). "
+                "Polymarket's resolutionSource URL format may have changed — "
+                "investigate extract_settlement_icao before trusting today's signals."
             )
+            logger.error(msg)
+            if config.alert_webhook_url:
+                await Alerter(config.alert_webhook_url).send("critical", msg)
         if hard_fail:
             for i in hard_fail:
                 logger.error(

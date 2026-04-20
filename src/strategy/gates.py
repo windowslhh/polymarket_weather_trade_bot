@@ -29,6 +29,7 @@ mind when editing ``GATE_MATRIX``.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -39,6 +40,8 @@ from src.strategy.temperature import wu_round
 from src.strategy.trend import TrendState
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.models import Forecast
+
+_gates_logger = logging.getLogger(__name__)
 
 
 class SignalKind(Enum):
@@ -294,6 +297,11 @@ class EvThresholdGate:
         if ctx.peak_conf is not None and ctx.daily_max_f is not None:
             obs_prob = _observed_no_win_prob(slot, ctx.daily_max_f, ctx.peak_conf)
             if obs_prob > win_prob:
+                _gates_logger.debug(
+                    "Post-peak boost %s slot %s: %.3f → %.3f (hour=%s, max=%.1f)",
+                    ctx.event.city, slot.outcome_label, win_prob, obs_prob,
+                    ctx.local_hour, ctx.daily_max_f,
+                )
                 win_prob = obs_prob
 
         # Trend-based boost for breakout direction
@@ -536,9 +544,16 @@ class PriceStopGate:
 
     Bug #3 (2026-04-18): catches the pathology where EV looks ~0 on
     stale inputs but the market is already rolling over — see
-    ``CLAUDE.md`` 'TRIM triple-gate' entry.  As of D1 (2026-04-20) the
-    0-price defensive check is gone: ``discovery.py`` now drops slots
-    with invalid NO prices before they reach the gate.
+    ``CLAUDE.md`` 'TRIM triple-gate' entry.
+
+    The ``live_price <= 0`` early return is a cheap defensive guard.
+    D1 (2026-04-20) made discovery drop zero-priced slots, but the
+    15-minute position-check path builds ``held_no_slots`` from
+    ``rebalancer._last_gamma_prices`` directly — it bypasses discovery.
+    If position-check ever starts calling ``evaluate_trim_signals``, a
+    cold-start Gamma price of 0 would otherwise flip this gate into
+    "give away the position at 0".  The cost of keeping the check is
+    one comparison per held slot.
     """
 
     def check(self, ctx: GateContext) -> GateResult | None:
@@ -547,6 +562,8 @@ class PriceStopGate:
         if entry_price is None or entry_price <= 0:
             return None
         if not (0 < ratio < 1.0):
+            return None
+        if ctx.slot.price_no <= 0:
             return None
         threshold = entry_price * (1.0 - ratio)
         if ctx.slot.price_no <= threshold:
@@ -611,9 +628,12 @@ GATE_MATRIX: dict[SignalKind, list[Gate]] = {
     ],
     SignalKind.TRIM: [
         TrimLockedWinGuardGate(),  # pre-filter (silent skip)
-        AbsoluteEvGate(),          # trigger
-        RelativeEvDecayGate(),     # trigger
-        PriceStopGate(),           # trigger
+        # Trigger order matches the pre-M2 priority price_stop > absolute >
+        # relative so the TRIM log label is stable under multi-trigger
+        # firings (e.g. rich entry with hard EV reversal AND price collapse).
+        PriceStopGate(),
+        AbsoluteEvGate(),
+        RelativeEvDecayGate(),
     ],
     SignalKind.EXIT_PREFILTER: [
         ExitLockedWinProtectionGate(),

@@ -219,7 +219,8 @@ class AlignmentIssue:
 # BULK_UNRESOLVED_THRESHOLD of configured cities are UNRESOLVED — that
 # is the fingerprint of Polymarket changing its resolutionSource URL
 # format and every city breaking at once.  Still non-fatal (transient
-# Gamma weirdness should not block deploys).
+# Gamma weirdness should not block deploys); ``src/main.py`` routes
+# triggered cases through Alerter so the webhook pages the operator.
 BULK_UNRESOLVED_THRESHOLD: float = 0.8
 
 
@@ -235,6 +236,13 @@ def is_bulk_unresolved(
     than *threshold* of all configured cities — i.e. the symptom of a
     system-wide ``extract_settlement_icao`` regex break rather than a
     single stale event.
+
+    ``NO_EVENT`` and ``GAMMA_ERROR`` are intentionally excluded:
+    ``GAMMA_ERROR`` has its own explicit branch in ``main.py``, and
+    ``NO_EVENT`` has zero trading blast radius (no events ⇒ no
+    positions opened on stale station data).  If Gamma starts
+    consistently returning empty event lists that's a separate
+    anomaly to surface elsewhere.
     """
     if total_cities <= 0:
         return False, 0
