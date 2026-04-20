@@ -6,157 +6,109 @@ falling back to normal distribution approximation otherwise.
 Post-peak optimization: after a city's peak temperature window (~17:00 local),
 daily_max is essentially final. The evaluator uses it as a near-certain reference
 with tight confidence, boosting NO probabilities for slots above the observed max.
+
+M2 refactor (2026-04-20): the per-gate logic moved into
+``src/strategy/gates.py``; this module is now a thin wrapper that walks
+``GATE_MATRIX[kind]`` for each slot.  That change exists specifically
+to prevent a repeat of Bug #1 (Houston 2026-04-17), where a new gate
+was added to the NO branch but forgotten on the locked-win branch.
+See ``docs/plans/m2-gate-matrix.md``.
 """
 from __future__ import annotations
 
 import logging
-import math
-from datetime import datetime, timezone
 
 from src.config import StrategyConfig
 from src.markets.models import Side, TempSlot, TokenType, TradeSignal, WeatherMarketEvent
-from src.weather.historical import ForecastErrorDistribution
-from src.strategy.temperature import is_daily_max_final, wu_round
+from src.strategy.gates import (
+    GATE_MATRIX,
+    GateContext,
+    GateResult,
+    SignalKind,
+    _estimate_no_win_prob as _estimate_no_win_prob_impl,
+    _estimate_no_win_probability_normal as _estimate_no_win_probability_normal_impl,
+    _PEAK_START_HOUR,
+    _PEAK_WINDOW_CONFIDENCE_F,
+    _POST_PEAK_CONFIDENCE_F,
+    _POST_PEAK_HOUR,
+    _slot_distance as _slot_distance_impl,
+    post_peak_confidence,
+)
 from src.strategy.trend import TrendState
+from src.weather.historical import ForecastErrorDistribution
 from src.weather.models import Forecast, Observation
 
 logger = logging.getLogger(__name__)
 
-# Polymarket taker fee for the Weather category (as of 2026).
-# Weather markets charge 1.25% base rate, probability-weighted so the fee is
-# highest at 50/50 and decreases toward 0 or 1.  Matches the backtest engine.
-# Formula: fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
-# (peaks at price=0.50: 0.625% per dollar; at price=0.70: 0.525% per dollar)
-# Makers pay 0%; we assume all our orders execute as taker (aggressive limits).
-TAKER_FEE_RATE: float = 0.0125  # 1.25%
+# Polymarket taker fee for the Weather category (as of 2026).  Formula:
+# fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
+TAKER_FEE_RATE: float = 0.0125
+
 
 def _entry_fee_per_dollar(price: float) -> float:
-    """Compute Polymarket taker fee per dollar invested at *price*.
-
-    Probability-weighted formula: fee is highest at 50/50 and falls toward
-    price extremes.  Only applied on entry — settlement is automatic (no exit
-    fee when the position resolves to $1).  For early exits (SELL orders) the
-    same formula applies but is not captured here since the exit decision is
-    whether to *hold* vs sell (hold EV does not incur an additional fee).
-    """
     return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
 
 
-# When our win-probability estimate disagrees with market price by more than
-# config.price_divergence_threshold points, the inputs (forecast, daily_max,
-# station) are almost certainly wrong — the market collectively sees something
-# we don't.  Bail out rather than building a position on bad data.  A shared
-# helper so every entry path (NO, locked-win, …) uses the same threshold;
-# forgetting to apply it in one path caused the Houston 2026-04-17 blow-up.
-#
-# Backwards-compatible default for callers that pre-date
-# StrategyConfig.price_divergence_threshold (keeps pure-helper tests clean).
-_DEFAULT_PRICE_DIVERGENCE_THRESHOLD: float = 0.50
+# Re-export distance / probability helpers so existing tests keep working.
+_slot_distance = _slot_distance_impl
+_estimate_no_win_probability_normal = _estimate_no_win_probability_normal_impl
+_estimate_no_win_prob = _estimate_no_win_prob_impl
+_post_peak_confidence = post_peak_confidence
 
 
-def _price_divergence(
-    win_prob: float,
-    market_price_no: float,
-    threshold: float = _DEFAULT_PRICE_DIVERGENCE_THRESHOLD,
-) -> float | None:
-    """Return |win_prob - market_price| when it exceeds *threshold*, else None.
-
-    NO price is already the market's implied P(NO wins), so this compares on
-    the same axis.  Callers should reject the entry when the return value is
-    not None and log a PRICE_DIVERGENCE decision-log entry.
-    """
-    gap = abs(win_prob - market_price_no)
-    return gap if gap > threshold else None
-
-
-# Post-peak confidence intervals: how much the daily max can still
-# rise after a given local hour.  After 17:00, ±1.5°F; during peak
-# (14-17), ±3°F.  Before 14:00, no adjustment (forecast only).
-_POST_PEAK_CONFIDENCE_F = 1.5
-_PEAK_WINDOW_CONFIDENCE_F = 3.0
-_PEAK_START_HOUR = 14
-_POST_PEAK_HOUR = 17
-
-
-def _estimate_no_win_probability_normal(
-    distance_f: float,
-    confidence_interval_f: float,
-) -> float:
-    """Fallback: estimate NO win probability using normal distribution.
-
-    Only used when no empirical distribution is available.
-    """
-    sigma = max(confidence_interval_f, 1.0)
-    z = distance_f / sigma
-    cdf = 0.5 * (1.0 + math.erf(z / math.sqrt(2)))
-    return min(cdf, 0.99)
-
-
-def _slot_distance(slot: TempSlot, forecast_high_f: float) -> float:
-    """Calculate the minimum distance from the slot to the forecast high.
-
-    For open-ended slots:
-    - "≥X°F" (upper=None): NO wins when actual < X. Distance = how far forecast
-      is below X. Returns 0 when forecast >= X (YES likely wins, no NO edge).
-    - "below X°F" (lower=None): NO wins when actual >= X. Distance = how far
-      forecast is above X. Returns 0 when forecast <= X (YES likely wins).
-    """
-    if slot.temp_lower_f is not None and slot.temp_upper_f is not None:
-        if slot.temp_lower_f <= forecast_high_f <= slot.temp_upper_f:
-            return 0.0
-        return min(abs(forecast_high_f - slot.temp_lower_f), abs(forecast_high_f - slot.temp_upper_f))
-    if slot.temp_upper_f is None and slot.temp_lower_f is not None:
-        # "≥X°F" slot: YES wins when actual >= X → NO wins when actual < X
-        if forecast_high_f >= slot.temp_lower_f:
-            return 0.0  # forecast at/above threshold → YES likely wins, no NO edge
-        return slot.temp_lower_f - forecast_high_f
-    if slot.temp_lower_f is None and slot.temp_upper_f is not None:
-        # "below X°F" slot: YES wins when actual < X → NO wins when actual >= X
-        if forecast_high_f <= slot.temp_upper_f:
-            return 0.0  # forecast at/below threshold → YES likely wins, no NO edge
-        return forecast_high_f - slot.temp_upper_f
-    mid = slot.temp_midpoint_f
-    return abs(mid - forecast_high_f)
-
-
-def _estimate_no_win_prob(
-    slot: TempSlot,
-    forecast: Forecast,
-    error_dist: ForecastErrorDistribution | None,
-) -> float:
-    """Estimate NO win probability using empirical distribution if available."""
-    if error_dist is not None and error_dist._count >= 30:
-        return error_dist.prob_no_wins(
-            slot.temp_lower_f, slot.temp_upper_f, forecast.predicted_high_f,
+def _log_entry_rejection(
+    kind: SignalKind,
+    reject: GateResult,
+    ctx: GateContext,
+) -> None:
+    """Per-branch logger for gate rejections that require more than a
+    decision_log entry (e.g. PRICE_DIVERGENCE needs a WARN; LOCKED_WIN
+    price-cap / ev-non-positive need DEBUG lines with slot context)."""
+    slot = ctx.slot
+    event = ctx.event
+    if reject.code == "PRICE_DIVERGENCE":
+        label = "LOCKED" if kind is SignalKind.LOCKED_WIN else "NO"
+        logger.warning(
+            "PRICE DIVERGENCE [%s]: %s slot %s — model=%.1f%% vs market=%.1f%% "
+            "(gap=%.2f > %.2f), skipping",
+            label, event.city, slot.outcome_label,
+            (ctx.win_prob or 0) * 100, slot.price_no * 100,
+            reject.extra.get("gap", 0.0), reject.extra.get("threshold", 0.0),
         )
-    # Fallback to normal approximation
-    distance = _slot_distance(slot, forecast.predicted_high_f)
-    return _estimate_no_win_probability_normal(distance, forecast.confidence_interval_f)
+    elif reject.code == "LOCKED_WIN_PRICE_CAP":
+        logger.debug(
+            "LOCKED WIN skip (price %.4f > locked_win_max_price %.2f): %s slot %s — "
+            "margin too thin for live execution",
+            slot.price_no, ctx.config.locked_win_max_price, event.city, slot.outcome_label,
+        )
+    elif reject.code == "LOCKED_WIN_EV_NONPOSITIVE":
+        logger.debug(
+            "LOCKED WIN skip (ev=%.5f, price=%.4f, win_prob=%.3f): %s slot %s — "
+            "fee/odds wipe out positive EV",
+            ctx.ev or 0.0, slot.price_no, ctx.win_prob or 0.0,
+            event.city, slot.outcome_label,
+        )
 
 
-def _post_peak_confidence(local_hour: int) -> float | None:
-    """Return the confidence interval to use for post-peak adjustment.
+def _append_reject(slot: TempSlot, reject: GateResult, sink: list[dict] | None) -> None:
+    if sink is None or reject.silent:
+        return
+    entry = {
+        "slot_label": slot.outcome_label,
+        "token_id_no": slot.token_id_no,
+        "price_no": slot.price_no,
+        "reason": reject.code,
+    }
+    entry.update(reject.extra)
+    sink.append(entry)
 
-    Returns None if before peak window (no adjustment needed).
-    """
-    if local_hour >= _POST_PEAK_HOUR:
-        return _POST_PEAK_CONFIDENCE_F
-    if local_hour >= _PEAK_START_HOUR:
-        return _PEAK_WINDOW_CONFIDENCE_F
+
+def _run_gate_chain(kind: SignalKind, ctx: GateContext) -> GateResult | None:
+    for gate in GATE_MATRIX[kind]:
+        result = gate.check(ctx)
+        if result is not None:
+            return result
     return None
-
-
-def _observed_no_win_prob(
-    slot: TempSlot,
-    daily_max_f: float,
-    confidence_f: float,
-) -> float:
-    """Estimate NO win probability using observed daily_max as reference.
-
-    Used post-peak when daily_max is essentially final.
-    """
-    distance = _slot_distance(slot, daily_max_f)
-    return _estimate_no_win_probability_normal(distance, confidence_f)
 
 
 def evaluate_no_signals(
@@ -172,221 +124,90 @@ def evaluate_no_signals(
     hours_to_settlement: float | None = None,
     rejects: list[dict] | None = None,
 ) -> list[TradeSignal]:
-    """Phase 4: Generate BUY NO signals for slots far from forecast.
+    """Thin wrapper over ``GATE_MATRIX[SignalKind.FORECAST_NO]``.
 
-    When an empirical error distribution is provided, uses it for accurate
-    probability estimation. Otherwise falls back to normal approximation.
-
-    Post-peak boost (local_hour >= 14, same-day only):
-    When daily_max is available and the peak temperature window has passed,
-    use observed daily_max as a near-final reference to boost NO probability
-    for slots above the observed max.
-
-    Trend state adjusts behavior:
-    - SETTLING: tighter EV threshold (only high-confidence trades)
-    - BREAKOUT_UP/DOWN: boost signals on the opposite side of the breakout
-
-    If ``rejects`` is provided, every slot that fails a filter gate appends
-    a dict describing the rejection reason (used by the rebalancer to
-    write sampled REJECT entries to decision_log for observability).  See
-    docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-3.
+    Pre-loop setup (EV threshold, post-peak confidence) is stashed on the
+    ``GateContext`` for gates to read; each gate caches derived values
+    (``distance``, ``win_prob``, ``ev``) so later gates reuse them.
     """
-    signals: list[TradeSignal] = []
-
-    def _reject(slot: TempSlot, reason: str, **extra) -> None:
-        if rejects is None:
-            return
-        entry = {
-            "slot_label": slot.outcome_label,
-            "token_id_no": slot.token_id_no,
-            "price_no": slot.price_no,
-            "reason": reason,
-        }
-        entry.update(extra)
-        rejects.append(entry)
-
-    # Block new entries when market is close to settlement
     if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
-        logger.debug(
-            "Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
-            event.city, hours_to_settlement, config.force_exit_hours,
-        )
-        return signals
+        logger.debug("Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
+                     event.city, hours_to_settlement, config.force_exit_hours)
+        return []
 
-    # Adjust EV threshold based on trend and days ahead
-    ev_threshold = config.min_no_ev
-    if trend == TrendState.SETTLING:
-        ev_threshold = config.min_no_ev * 1.5
-    # Require higher EV for future markets (forecast less reliable)
+    ev_threshold = config.min_no_ev * (1.5 if trend == TrendState.SETTLING else 1.0)
     if days_ahead > 0:
         ev_threshold /= (config.day_ahead_ev_discount ** days_ahead)
+    peak_conf = (post_peak_confidence(local_hour)
+                 if days_ahead == 0 and daily_max_f is not None and local_hour is not None
+                 else None)
 
-    # Post-peak: determine if we can use daily_max as near-final reference
-    peak_conf = None
-    if days_ahead == 0 and daily_max_f is not None and local_hour is not None:
-        peak_conf = _post_peak_confidence(local_hour)
-
+    signals: list[TradeSignal] = []
+    held = frozenset(held_token_ids or ())
     for slot in event.slots:
-        # Skip already-held slots (not a rejection — silent)
-        if held_token_ids and slot.token_id_no in held_token_ids:
-            continue
-
-        # For "≥X°F" slots (upper=None): when wu_round(daily_max) >= X, YES is a
-        # guaranteed winner → NO is a guaranteed loser. Block immediately.
-        # (evaluate_locked_win_signals already skips these; mirror the guard here.)
-        if (
-            days_ahead == 0
-            and daily_max_f is not None
-            and slot.temp_upper_f is None
-            and slot.temp_lower_f is not None
-            and wu_round(daily_max_f) >= int(slot.temp_lower_f)
-        ):
-            _reject(slot, "DAILY_MAX_ABOVE_LOWER", daily_max_f=daily_max_f)
-            continue
-
-        # For range slots [L, U]: when wu_round(daily_max) is inside the range,
-        # the actual high has entered the slot → YES is almost certainly winning
-        # → NO is almost certainly a loser. Block immediately.
-        if (
-            days_ahead == 0
-            and daily_max_f is not None
-            and slot.temp_lower_f is not None
-            and slot.temp_upper_f is not None
-            and int(slot.temp_lower_f) <= wu_round(daily_max_f) <= int(slot.temp_upper_f)
-        ):
-            _reject(slot, "DAILY_MAX_IN_SLOT", daily_max_f=daily_max_f)
-            continue
-
-        # For "below X°F" slots (lower=None, upper=X): post-peak, if
-        # wu_round(daily_max) < X then the daily max is still inside this
-        # slot's range (-∞, X) → YES is likely winning → NO is a loser.
-        # Only checked post-peak because earlier in the day the temperature
-        # may still rise above X, making NO viable.
-        if (
-            peak_conf is not None
-            and daily_max_f is not None
-            and slot.temp_lower_f is None
-            and slot.temp_upper_f is not None
-            and wu_round(daily_max_f) < int(slot.temp_upper_f)
-        ):
-            _reject(slot, "DAILY_MAX_BELOW_UPPER", daily_max_f=daily_max_f)
-            continue
-
-        # Bias-corrected reference temperature for the distance pre-filter.
-        # When the empirical distribution shows a systematic bias (e.g. forecasts
-        # run +2°F hot), the expected actual temperature is lower than the raw
-        # forecast.  Using the bias-corrected value prevents the distance filter
-        # from accepting lower slots that are actually close to the expected actual
-        # (false pass) and from rejecting upper slots that are actually far from
-        # the expected actual (false block).
-        #
-        # The probability calculation (_estimate_no_win_prob) is NOT adjusted
-        # here — it uses the full empirical error distribution via prob_no_wins(),
-        # which already implicitly captures the bias.
-        bias_corrected_f = forecast.predicted_high_f
-        if error_dist is not None and error_dist._count >= 30:
-            bias_corrected_f = forecast.predicted_high_f - error_dist.mean
-
-        distance = _slot_distance(slot, bias_corrected_f)
-
-        # Post-peak: also compute distance from observed daily_max and take the
-        # smaller value (conservative).  When forecast is stale/wrong but the
-        # actual temperature is near the slot, obs_distance catches it.
-        # Skip when daily_max already exceeds slot upper bound — NO is safe
-        # (temp can't fall back), so obs_distance would be misleadingly small.
-        if peak_conf is not None and daily_max_f is not None:
-            if slot.temp_upper_f is None or daily_max_f <= slot.temp_upper_f:
-                obs_distance = _slot_distance(slot, daily_max_f)
-                distance = min(distance, obs_distance)
-
-        if distance < config.no_distance_threshold_f:
-            _reject(slot, "DIST_TOO_CLOSE", distance_f=distance,
-                    threshold_f=config.no_distance_threshold_f)
-            continue
-
-        if slot.price_no <= 0 or slot.price_no >= 1:
-            _reject(slot, "PRICE_INVALID")
-            continue
-
-        # Skip extremely cheap NO — poor liquidity and inflated odds
-        if slot.price_no < config.min_no_price:
-            _reject(slot, "PRICE_TOO_LOW", min_no_price=config.min_no_price)
-            continue
-
-        # Skip overpriced NO — risk/reward too asymmetric at high prices
-        if slot.price_no > config.max_no_price:
-            _reject(slot, "PRICE_TOO_HIGH", max_no_price=config.max_no_price)
-            continue
-
-        win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
-
-        # Post-peak boost: use observed daily_max with tight confidence
-        # Take the more favorable probability (forecast vs observed)
-        if peak_conf is not None:
-            obs_prob = _observed_no_win_prob(slot, daily_max_f, peak_conf)
-            if obs_prob > win_prob:
-                logger.debug(
-                    "Post-peak boost %s slot %s: %.3f → %.3f (hour=%d, max=%.1f)",
-                    event.city, slot.outcome_label, win_prob, obs_prob,
-                    local_hour, daily_max_f,
-                )
-                win_prob = obs_prob
-
-        # Trend-based probability boost for breakout direction
-        if trend == TrendState.BREAKOUT_UP and slot.temp_lower_f is not None:
-            # Forecast rising → lower slots become safer NO bets
-            if slot.temp_upper_f is not None and slot.temp_upper_f < forecast.predicted_high_f:
-                win_prob = min(win_prob * 1.05, 0.99)
-        elif trend == TrendState.BREAKOUT_DOWN and slot.temp_upper_f is not None:
-            # Forecast falling → upper slots become safer NO bets
-            if slot.temp_lower_f is not None and slot.temp_lower_f > forecast.predicted_high_f:
-                win_prob = min(win_prob * 1.05, 0.99)
-
-        # EV = win_prob * profit_if_win - (1 - win_prob) * cost_if_lose - entry_fee
-        # Entry taker fee is probability-weighted; deducted only once at trade entry.
-        ev = (win_prob * (1.0 - slot.price_no)
-              - (1.0 - win_prob) * slot.price_no
-              - _entry_fee_per_dollar(slot.price_no))
-
-        if ev < ev_threshold:
-            _reject(slot, "EV_BELOW_GATE",
-                    expected_value=ev, win_prob=win_prob,
-                    ev_threshold=ev_threshold)
-            continue
-
-        # Price divergence guard — shared with evaluate_locked_win_signals,
-        # see _price_divergence() for rationale.  Threshold is tunable via
-        # StrategyConfig.price_divergence_threshold (default 0.50).
-        gap = _price_divergence(
-            win_prob, slot.price_no, config.price_divergence_threshold,
+        ctx = GateContext(
+            slot=slot, event=event, config=config, forecast=forecast, error_dist=error_dist,
+            daily_max_f=daily_max_f, local_hour=local_hour, hours_to_settlement=hours_to_settlement,
+            days_ahead=days_ahead, trend=trend, held_token_ids=held,
+            peak_conf=peak_conf, ev_threshold=ev_threshold,
         )
-        if gap is not None:
-            logger.warning(
-                "PRICE DIVERGENCE [NO]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
-                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
-                gap, config.price_divergence_threshold,
-            )
-            _reject(slot, "PRICE_DIVERGENCE",
-                    win_prob=win_prob, market_implied=slot.price_no)
+        reject = _run_gate_chain(SignalKind.FORECAST_NO, ctx)
+        if reject is not None:
+            _log_entry_rejection(SignalKind.FORECAST_NO, reject, ctx)
+            _append_reject(slot, reject, rejects)
             continue
-
         signals.append(TradeSignal(
-            token_type=TokenType.NO,
-            side=Side.BUY,
-            slot=slot,
-            event=event,
-            expected_value=ev,
-            estimated_win_prob=win_prob,
+            token_type=TokenType.NO, side=Side.BUY, slot=slot, event=event,
+            expected_value=ctx.ev, estimated_win_prob=ctx.win_prob,
         ))
 
+    _log_no_summary(event, signals, error_dist, trend, peak_conf, local_hour)
+    return signals
+
+
+def _log_no_summary(event, signals, error_dist, trend, peak_conf, local_hour):
     using = "empirical" if (error_dist and error_dist._count >= 30) else "normal"
     trend_label = trend.value if trend else "none"
     peak_label = f", post-peak(h={local_hour})" if peak_conf else ""
-    logger.debug(
-        "City %s date %s: %d NO signals from %d slots (prob: %s, trend: %s%s)",
-        event.city, event.market_date, len(signals), len(event.slots),
-        using, trend_label, peak_label,
-    )
+    logger.debug("City %s date %s: %d NO signals from %d slots (prob: %s, trend: %s%s)",
+                 event.city, event.market_date, len(signals), len(event.slots),
+                 using, trend_label, peak_label)
+
+
+def evaluate_locked_win_signals(
+    event: WeatherMarketEvent,
+    daily_max_f: float | None,
+    config: StrategyConfig,
+    held_token_ids: set[str] | None = None,
+    days_ahead: int = 0,
+    *,
+    daily_max_final: bool = False,
+) -> list[TradeSignal]:
+    """Thin wrapper over ``GATE_MATRIX[SignalKind.LOCKED_WIN]``.
+
+    ``LockedWinDetectionGate`` sets ``ctx.lock_reason`` / ``is_below_lock``
+    mid-chain so the wrapper can build the signal once all gates pass.
+    """
+    if daily_max_f is None or days_ahead > 0 or not config.enable_locked_wins:
+        return []
+
+    held = frozenset(held_token_ids or ())
+    signals: list[TradeSignal] = []
+    for slot in event.slots:
+        ctx = GateContext(
+            slot=slot, event=event, config=config, daily_max_f=daily_max_f,
+            daily_max_final=daily_max_final, days_ahead=days_ahead, held_token_ids=held,
+        )
+        reject = _run_gate_chain(SignalKind.LOCKED_WIN, ctx)
+        if reject is not None:
+            _log_entry_rejection(SignalKind.LOCKED_WIN, reject, ctx)
+            continue
+        signals.append(TradeSignal(
+            token_type=TokenType.NO, side=Side.BUY, slot=slot, event=event,
+            expected_value=ctx.ev, estimated_win_prob=ctx.win_prob,
+            is_locked_win=True, reason=ctx.lock_reason,
+        ))
+        logger.info("%s: %s slot %s, EV=%.4f", ctx.lock_reason, event.city, slot.outcome_label, ctx.ev)
     return signals
 
 
@@ -401,321 +222,91 @@ def evaluate_trim_signals(
     daily_max_f: float | None = None,
     entry_ev_map: dict[str, float] | None = None,
 ) -> list[TradeSignal]:
-    """Generate SELL signals for held NO positions whose EV has decayed.
+    """Thin wrapper over ``GATE_MATRIX[SignalKind.TRIM]``.
 
-    Unlike exit signals (which trigger on temperature proximity), trim signals
-    fire when the expected value drops due to forecast changes.  A slot is
-    trimmed when EITHER:
-      - Relative gate: current EV < entry_ev × (1 - trim_ev_decay_ratio), OR
-      - Absolute gate: current EV < -min_trim_ev_absolute
-
-    The relative gate protects high-EV entries from being trimmed on small
-    noise (e.g. entry_ev=+0.08 → only trim once EV drops below +0.02 at
-    ratio=0.75).  The absolute gate catches hard reversals regardless of
-    how rich the original entry was.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
-
-    NEVER trims locked-win positions — these are guaranteed winners where the
-    forecast-based EV is misleading (daily_max already exceeded slot upper).
+    The first gate (``TrimLockedWinGuardGate``) silently filters out
+    locked-win and locked-win-like slots; the remaining three gates
+    each represent one OR-branch of the trim rule — any firing
+    produces a SELL signal.
     """
     signals: list[TradeSignal] = []
-    locked_ids = locked_win_token_ids or set()
-    ep = entry_prices or {}
-    ev_map = entry_ev_map or {}
+    ep = dict(entry_prices or {})
+    ev_map = dict(entry_ev_map or {})
+    locked_ids = frozenset(locked_win_token_ids or ())
+
+    gates = GATE_MATRIX[SignalKind.TRIM]
+    prefilter = gates[0]
+    trigger_gates = gates[1:]
 
     for slot in held_no_slots:
-        # NEVER trim locked wins — daily_max already exceeded slot upper,
-        # NO is guaranteed to win.  Forecast-based EV is misleading here
-        # because it doesn't account for the observed daily maximum.
-        if slot.token_id_no in locked_ids:
-            logger.debug(
-                "TRIM skip (locked win): %s slot %s",
-                event.city, slot.outcome_label,
-            )
-            continue
+        ctx = GateContext(
+            slot=slot, event=event, config=config,
+            forecast=forecast, error_dist=error_dist, daily_max_f=daily_max_f,
+            locked_win_token_ids=locked_ids, entry_prices=ep, entry_ev_map=ev_map,
+        )
 
-        # Also protect slots where wu_round(daily_max) currently exceeds upper bound
-        # by at least locked_win_margin_f (locked-win condition is true NOW,
-        # even if not bought as locked win).  Must match the same margin
-        # threshold as locked_win_signals to avoid a dead zone where the
-        # position is neither locked-win-protected nor trimmable.
-        if daily_max_f is not None and slot.temp_upper_f is not None:
-            gap = wu_round(daily_max_f) - int(slot.temp_upper_f)
-            if gap >= config.locked_win_margin_f:
-                logger.debug(
-                    "TRIM skip (daily_max %.1f > upper %.1f + margin %d): %s slot %s",
-                    daily_max_f, slot.temp_upper_f, config.locked_win_margin_f,
-                    event.city, slot.outcome_label,
-                )
-                continue
+        prefilter_result = prefilter.check(ctx)
+        if prefilter_result is not None:
+            _log_trim_prefilter(prefilter_result, ctx)
+            continue
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
-
-        # Use ENTRY price for EV calculation, not current market price.
-        # When the market moves in our favor (NO price rises because market
-        # agrees NO will win), current-price EV goes negative even though
-        # holding to settlement is still highly profitable at our entry cost.
-        # Entry-price EV answers: "is this position still a good hold?"
         price_for_ev = ep.get(slot.token_id_no, slot.price_no)
         ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
+        ctx.win_prob = win_prob
+        ctx.ev = ev
 
-        # Trim when ANY gate fires (see fix 4 rationale in module docstring):
-        #   1. Relative EV: current EV < entry_ev × (1 - trim_ev_decay_ratio).
-        #      Only active when we have a positive entry_ev (legacy positions
-        #      recorded before the migration fall back to the absolute gate).
-        #   2. Absolute EV: current EV < -min_trim_ev_absolute (hard reversal).
-        #   3. Price stop (Bug #3, 2026-04-18): current NO price has dropped
-        #      by >= trim_price_stop_ratio relative to entry price.  Catches
-        #      the pathology where EV looks fine on stale inputs but the
-        #      market is telling us we're wrong in real-time.
-        entry_ev = ev_map.get(slot.token_id_no)
-        entry_price_no = ep.get(slot.token_id_no)
-        absolute_triggered = ev < -config.min_trim_ev_absolute
-        relative_triggered = False
-        relative_gate_ev: float | None = None
-        if entry_ev is not None and entry_ev > 0:
-            relative_gate_ev = entry_ev * (1.0 - config.trim_ev_decay_ratio)
-            relative_triggered = ev < relative_gate_ev
-
-        price_stop_triggered = False
-        price_stop_threshold: float | None = None
-        if (entry_price_no is not None
-                and entry_price_no > 0
-                and 0 < config.trim_price_stop_ratio < 1.0):
-            price_stop_threshold = entry_price_no * (1.0 - config.trim_price_stop_ratio)
-            # Current slot.price_no is the live market NO price (set by the
-            # caller from the latest Gamma refresh).  If it's <= threshold
-            # the position has already lost ratio% of its notional value.
-            #
-            # NOTE: `slot.price_no > 0` intentionally filters out 0.0 prices.
-            # In paper mode Gamma sometimes returns 0 for illiquid slots;
-            # treating that as a real crash-to-zero would flood us with
-            # spurious TRIMs.  If the slot truly resolved to 0 (e.g. post-
-            # settlement ghost), the EXIT path handles it via hours_to_settlement.
-            # Ideally discovery.py would drop 0-priced slots before they reach
-            # the evaluator — tracked as a future data-layer cleanup.
-            price_stop_triggered = slot.price_no > 0 and slot.price_no <= price_stop_threshold
-
-        if absolute_triggered or relative_triggered or price_stop_triggered:
-            signals.append(TradeSignal(
-                token_type=TokenType.NO,
-                side=Side.SELL,
-                slot=slot,
-                event=event,
-                expected_value=ev,
-                estimated_win_prob=win_prob,
-            ))
-            if price_stop_triggered:
-                trigger = "price_stop"
-            elif absolute_triggered:
-                trigger = "absolute"
-            else:
-                trigger = "relative"
-            logger.info(
-                "TRIM signal [%s]: %s slot %s EV=%.4f (entry_ev=%s, rel_gate=%s, abs_gate=%.4f, "
-                "entry_price=%s, price_stop=%s, live_price=%.3f, win_prob=%.2f)",
-                trigger, event.city, slot.outcome_label, ev,
-                f"{entry_ev:.4f}" if entry_ev is not None else "None",
-                f"{relative_gate_ev:.4f}" if relative_gate_ev is not None else "n/a",
-                -config.min_trim_ev_absolute,
-                f"{entry_price_no:.3f}" if entry_price_no is not None else "None",
-                f"{price_stop_threshold:.3f}" if price_stop_threshold is not None else "n/a",
-                slot.price_no, win_prob,
-            )
+        trigger: GateResult | None = None
+        for gate in trigger_gates:
+            trigger = gate.check(ctx)
+            if trigger is not None:
+                break
+        if trigger is None:
+            continue
+        signals.append(TradeSignal(
+            token_type=TokenType.NO, side=Side.SELL, slot=slot, event=event,
+            expected_value=ev, estimated_win_prob=win_prob,
+        ))
+        _log_trim_trigger(trigger, ctx)
 
     return signals
 
 
-def evaluate_locked_win_signals(
-    event: WeatherMarketEvent,
-    daily_max_f: float | None,
-    config: StrategyConfig,
-    held_token_ids: set[str] | None = None,
-    days_ahead: int = 0,
-    *,
-    daily_max_final: bool = False,
-) -> list[TradeSignal]:
-    """Generate BUY NO signals for slots where NO is guaranteed to win.
-
-    Two asymmetric conditions with different time requirements:
-
-    Condition A (below-slot): wu_round(daily_max) > slot.upper + margin
-        The actual high already exceeded this range → NO wins.
-        No time gate needed: daily_max is monotonically increasing by definition,
-        so once it exceeds the upper bound it can never fall back below it.
-
-    Condition B (above-slot): wu_round(daily_max) < slot.lower - margin
-        The daily max is finalized below this range → NO wins.
-        Requires daily_max_final=True: the afternoon peak (14:00–17:00) could
-        still push the observed max up into or above the slot's lower bound.
-
-    Rules:
-    - Only same-day markets (days_ahead == 0)
-    - daily_max_f must exist
-    - Condition A fires any time of day; Condition B requires daily_max_final=True
-    - "≥X°F" slot (upper=None): if daily_max >= X then YES wins → NO loses → SKIP
-    - Skip already-held tokens
-    - Skip if price_no <= 0 or >= 1
-    - Safety margin: wu_round(daily_max) must differ from slot boundary by
-      at least config.locked_win_margin_f degrees
-    """
-    if daily_max_f is None or days_ahead > 0:
-        return []
-
-    if not config.enable_locked_wins:
-        return []
-
-    rounded_max = wu_round(daily_max_f)
-    margin = config.locked_win_margin_f
-
-    signals: list[TradeSignal] = []
-    for slot in event.slots:
-        # Skip already held
-        if held_token_ids and slot.token_id_no in held_token_ids:
-            continue
-
-        if slot.price_no <= 0 or slot.price_no >= 1:
-            continue
-
-        if slot.price_no < config.min_no_price:
-            continue
-
-        is_locked = False
-        lock_reason = ""
-        # Below-slot locks (daily max already above upper) are bounded
-        # certainties — temperature cannot fall.  Above-slot locks rely
-        # on daily_max being final, which carries residual uncertainty
-        # (late-afternoon spike).  Track which kind we have so we can
-        # pick a tighter win_prob for below-slot locks.
-        is_below_lock = False
-
-        if slot.temp_upper_f is not None and slot.temp_lower_f is not None:
-            # Range slot [L, U]
-            upper_int = int(slot.temp_upper_f)
-            lower_int = int(slot.temp_lower_f)
-            # Condition A: daily max exceeded this range (below-slot lock) — no time gate
-            if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
-                is_locked = True
-                is_below_lock = True
-                lock_reason = (
-                    f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
-                    f"> upper {upper_int} + margin {margin}"
-                )
-            # Condition B: daily max finalized below this range (above-slot lock) — needs final
-            elif (daily_max_final
-                  and rounded_max < lower_int
-                  and (lower_int - rounded_max) >= margin):
-                is_locked = True
-                lock_reason = (
-                    f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
-                    f"< lower {lower_int} - margin {margin}"
-                )
-
-        elif slot.temp_lower_f is None and slot.temp_upper_f is not None:
-            # "Below X°F" slot (lower=None, upper=X)
-            upper_int = int(slot.temp_upper_f)
-            # Condition A: daily max exceeded this range — no time gate
-            if rounded_max > upper_int and (rounded_max - upper_int) >= margin:
-                is_locked = True
-                is_below_lock = True
-                lock_reason = (
-                    f"LOCKED WIN (below): wu_round({daily_max_f:.1f})={rounded_max} "
-                    f"> upper {upper_int} + margin {margin}"
-                )
-            # Condition B not applicable: "Below X" has no lower bound to be above
-
-        elif slot.temp_upper_f is None and slot.temp_lower_f is not None:
-            # "≥X°F" slot (lower=X, upper=None)
-            lower_int = int(slot.temp_lower_f)
-            # If daily_max >= X, YES wins → NO loses → skip entirely
-            if rounded_max >= lower_int:
-                continue
-            # Condition B: daily max finalized below this threshold — needs final
-            if daily_max_final and (lower_int - rounded_max) >= margin:
-                is_locked = True
-                lock_reason = (
-                    f"LOCKED WIN (above): wu_round({daily_max_f:.1f})={rounded_max} "
-                    f"< lower {lower_int} - margin {margin}"
-                )
-
-        if not is_locked:
-            continue
-
-        # Hard ceiling: reject locked-win entries above
-        # `config.locked_win_max_price` (default 0.95).  This is a *partial
-        # rollback* of Fix 2 — we keep Fix 2's below/above-lock win_prob
-        # split (0.999 vs 0.99) but reinstate the price cap because
-        # production data (2026-04-17) showed that without it, every
-        # locked-win fired at 0.997-0.9985 where the technical +EV
-        # (≈$0.0008/share) is smaller than paper→live slippage (≥1 tick).
-        # The `ev > 0` check below remains as a safety net — both gates
-        # must pass.  Promoted from module constant to config field on
-        # 2026-04-17 (review #3) so future tuning doesn't require redeploy.
-        # See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
-        if slot.price_no > config.locked_win_max_price:
-            logger.debug(
-                "LOCKED WIN skip (price %.4f > locked_win_max_price %.2f): "
-                "%s slot %s — margin too thin for live execution",
-                slot.price_no, config.locked_win_max_price,
-                event.city, slot.outcome_label,
-            )
-            continue
-
-        # Below-slot locks: temperature can only rise, so NO is a bounded
-        # certainty.  Historical wu_round error is ≤ 0.5°F and margin ≥ 2
-        # guarantees ≥ 1.5°F real cushion → loss probability < 0.1%.
-        # Above-slot locks use 0.99 because the afternoon peak could still
-        # surge up into the slot (daily_max_final is best-effort).
-        win_prob = 0.999 if is_below_lock else 0.99
-        ev = (win_prob * (1.0 - slot.price_no)
-              - (1.0 - win_prob) * slot.price_no
-              - _entry_fee_per_dollar(slot.price_no))
-
-        if ev <= 0:
-            logger.debug(
-                "LOCKED WIN skip (ev=%.5f, price=%.4f, win_prob=%.3f): "
-                "%s slot %s — fee/odds wipe out positive EV",
-                ev, slot.price_no, win_prob,
-                event.city, slot.outcome_label,
-            )
-            continue
-
-        # PRICE DIVERGENCE guard — previously missing on this branch (Bug #1).
-        # When our lock says "NO is 99.9% certain" but market prices NO at,
-        # say, 0.40, the disagreement is too large to attribute to spread:
-        # either our daily_max input is wrong (stale/wrong-station) or the
-        # market knows something we don't (e.g. pending resolution dispute).
-        # Either way, do not size in on such a position.  The Houston KIAH
-        # vs KHOU fiasco (2026-04-17) would have been caught here.  Threshold
-        # is tunable via StrategyConfig.price_divergence_threshold (default 0.50).
-        gap = _price_divergence(
-            win_prob, slot.price_no, config.price_divergence_threshold,
-        )
-        if gap is not None:
-            logger.warning(
-                "PRICE DIVERGENCE [LOCKED]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
-                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
-                gap, config.price_divergence_threshold,
-            )
-            continue
-
-        signal = TradeSignal(
-            token_type=TokenType.NO,
-            side=Side.BUY,
-            slot=slot,
-            event=event,
-            expected_value=ev,
-            estimated_win_prob=win_prob,
-            is_locked_win=True,
-            reason=lock_reason,
-        )
-        signals.append(signal)
-
-        logger.info(
-            "%s: %s slot %s, EV=%.4f",
-            lock_reason, event.city, slot.outcome_label, ev,
+def _log_trim_prefilter(result: GateResult, ctx: GateContext) -> None:
+    slot = ctx.slot
+    if result.code == "TRIM_SKIP_LOCKED":
+        logger.debug("TRIM skip (locked win): %s slot %s", ctx.event.city, slot.outcome_label)
+    elif result.code == "TRIM_SKIP_LOCKED_LIKE":
+        logger.debug(
+            "TRIM skip (daily_max %.1f > upper %.1f + margin %d): %s slot %s",
+            ctx.daily_max_f, slot.temp_upper_f, ctx.config.locked_win_margin_f,
+            ctx.event.city, slot.outcome_label,
         )
 
-    return signals
+
+def _log_trim_trigger(trigger: GateResult, ctx: GateContext) -> None:
+    slot = ctx.slot
+    cfg = ctx.config
+    entry_ev = ctx.entry_ev_map.get(slot.token_id_no)
+    entry_price_no = ctx.entry_prices.get(slot.token_id_no)
+    rel_gate_ev = (entry_ev * (1.0 - cfg.trim_ev_decay_ratio)
+                   if entry_ev is not None and entry_ev > 0 else None)
+    price_stop_threshold = (
+        entry_price_no * (1.0 - cfg.trim_price_stop_ratio)
+        if entry_price_no is not None and entry_price_no > 0
+        and 0 < cfg.trim_price_stop_ratio < 1.0 else None
+    )
+    logger.info(
+        "TRIM signal [%s]: %s slot %s EV=%.4f (entry_ev=%s, rel_gate=%s, abs_gate=%.4f, "
+        "entry_price=%s, price_stop=%s, live_price=%.3f, win_prob=%.2f)",
+        trigger.code, ctx.event.city, slot.outcome_label, ctx.ev,
+        f"{entry_ev:.4f}" if entry_ev is not None else "None",
+        f"{rel_gate_ev:.4f}" if rel_gate_ev is not None else "n/a",
+        -cfg.min_trim_ev_absolute,
+        f"{entry_price_no:.3f}" if entry_price_no is not None else "None",
+        f"{price_stop_threshold:.3f}" if price_stop_threshold is not None else "n/a",
+        slot.price_no, ctx.win_prob,
+    )
 
 
 def evaluate_exit_signals(
@@ -733,145 +324,77 @@ def evaluate_exit_signals(
 ) -> list[TradeSignal]:
     """Three-layer hybrid exit logic for held NO positions.
 
-    Layer 1 — Locked-win protection:
-        If daily_max > slot.upper_bound, NO is a guaranteed winner → never exit.
-
-    Layer 2 — EV-based exit:
-        When temperature approaches the slot (distance < exit_threshold),
-        re-compute current EV using the closer of daily_max and forecast.
-        If EV is still positive → HOLD; if negative → SELL.
-        Post-peak: use tighter confidence on daily_max, boosting hold probability.
-
-    Layer 3 — Pre-settlement force exit:
-        If within force_exit_hours of settlement AND distance < exit_threshold
-        → force SELL regardless of EV (avoid resolution risk).
-
-    Only applies to same-day markets (days_ahead == 0).
+    Only Layer-1 locked-win protection is delegated to the matrix
+    (``SignalKind.EXIT_PREFILTER``).  Layer 2 (EV-based hold vs sell)
+    and Layer 3 (pre-settlement force exit) stay inline because they
+    interleave — see ``CLAUDE.md`` 'Hybrid exit' entry.
     """
-    if observation is None or daily_max_f is None:
+    if observation is None or daily_max_f is None or days_ahead > 0:
         return []
 
-    if days_ahead > 0:
-        return []
-
-    # Compute exit distance threshold based on trend
-    # Use tighter multipliers to avoid premature exits on NO positions.
-    # NO wins when temp does NOT land in the slot, so even 3-4°F distance
-    # is still a safe position — only exit when truly threatened.
     exit_distance = config.no_distance_threshold_f * 0.25
     if trend == TrendState.STABLE:
         exit_distance = config.no_distance_threshold_f * 0.3
     elif trend in (TrendState.BREAKOUT_UP, TrendState.BREAKOUT_DOWN):
         exit_distance = config.no_distance_threshold_f * 0.2
 
-    # Post-peak: determine confidence for observed daily_max
-    peak_conf = None
-    if local_hour is not None:
-        peak_conf = _post_peak_confidence(local_hour)
+    peak_conf = post_peak_confidence(local_hour) if local_hour is not None else None
 
     signals: list[TradeSignal] = []
     for slot in held_no_slots:
-        # ── Layer 1: Locked-win protection ──
-        # If wu_round(daily_max) already exceeded the slot's upper bound
-        # by at least locked_win_margin_f, NO wins for certain. Never exit
-        # a guaranteed winner.  Without the margin check, positions in the
-        # dead zone (exceeded by <margin) would be protected from exit
-        # despite not qualifying as locked wins.
-        if slot.temp_upper_f is not None:
-            gap = wu_round(daily_max_f) - int(slot.temp_upper_f)
-            if gap >= config.locked_win_margin_f:
+        ctx = GateContext(
+            slot=slot, event=event, config=config, forecast=forecast, error_dist=error_dist,
+            daily_max_f=daily_max_f, local_hour=local_hour,
+            hours_to_settlement=hours_to_settlement, days_ahead=days_ahead,
+            trend=trend, peak_conf=peak_conf,
+        )
+        prefilter = _run_gate_chain(SignalKind.EXIT_PREFILTER, ctx)
+        if prefilter is not None:
+            if prefilter.code == "EXIT_SKIP_LOCKED":
                 logger.debug(
                     "EXIT skip (locked win): %s slot %s — daily max %.1f > upper %.1f + margin %d",
                     event.city, slot.outcome_label, daily_max_f, slot.temp_upper_f,
                     config.locked_win_margin_f,
                 )
-                continue
-
-        distance = _slot_distance(slot, daily_max_f)
-
-        if distance >= exit_distance:
-            continue  # still far enough, no exit needed
-
-        # Without a forecast we cannot compute EV, so we cannot tell whether
-        # the position is genuinely threatened or just near a slot boundary.
-        # Holding is safer than selling blind — skip until forecast is available.
-        if forecast is None:
-            logger.debug(
-                "EXIT skip (no forecast): %s slot %s — cannot evaluate EV, holding",
-                event.city, slot.outcome_label,
-            )
             continue
 
-        # ── Layer 2: EV-based exit ──
-        # Re-compute current EV using the more conservative reference
-        # (the closer of daily_max and forecast) for distance/probability.
-        win_prob = 0.0
-        ev = 0.0
-        if forecast is not None:
-            # Use daily_max as the reference since it represents the worst case
-            # (daily max can only go up, so it's the tighter bound)
-            win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
+        distance = _slot_distance(slot, daily_max_f)
+        if distance >= exit_distance:
+            continue
+        if forecast is None:
+            logger.debug("EXIT skip (no forecast): %s slot %s — cannot evaluate EV, holding",
+                         event.city, slot.outcome_label)
+            continue
 
-            # Also compute probability using daily_max as reference point
-            dist_to_max = _slot_distance(slot, daily_max_f)
-            # Post-peak: use tighter confidence (daily_max is near final)
-            max_confidence = (peak_conf if peak_conf is not None
-                              else forecast.confidence_interval_f)
-            wp_from_max = _estimate_no_win_probability_normal(
-                dist_to_max, max_confidence,
-            )
+        # Layer 2: EV-based hold vs sell.
+        win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
+        dist_to_max = _slot_distance(slot, daily_max_f)
+        max_confidence = peak_conf if peak_conf is not None else forecast.confidence_interval_f
+        wp_from_max = _estimate_no_win_probability_normal(dist_to_max, max_confidence)
+        win_prob = max(win_prob, wp_from_max) if peak_conf is not None else min(win_prob, wp_from_max)
+        ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
 
-            if peak_conf is not None:
-                # Post-peak: take the MORE favorable probability (daily_max is reliable)
-                win_prob = max(win_prob, wp_from_max)
-                logger.debug(
-                    "EXIT post-peak (h=%d): %s slot %s — wp_forecast=%.3f, wp_observed=%.3f → %.3f",
-                    local_hour, event.city, slot.outcome_label,
-                    _estimate_no_win_prob(slot, forecast, error_dist), wp_from_max, win_prob,
-                )
+        if ev >= 0:
+            # Layer 3: force exit window
+            if (hours_to_settlement is not None
+                    and 0 <= hours_to_settlement <= config.force_exit_hours
+                    and distance < exit_distance):
+                signals.append(TradeSignal(
+                    token_type=TokenType.NO, side=Side.SELL, slot=slot, event=event,
+                    expected_value=ev, estimated_win_prob=win_prob,
+                ))
+                logger.info("FORCE EXIT: %s slot %s — %.1fh to settlement, distance %.1f°F, EV=%.4f",
+                            event.city, slot.outcome_label, hours_to_settlement, distance, ev)
             else:
-                # Pre-peak: take the lower (more conservative) win probability
-                win_prob = min(win_prob, wp_from_max)
+                logger.debug("EXIT hold (positive EV): %s slot %s — distance %.1f, EV=%.4f",
+                             event.city, slot.outcome_label, distance, ev)
+            continue
 
-            ev = win_prob * (1.0 - slot.price_no) - (1.0 - win_prob) * slot.price_no
-
-            if ev >= 0:
-                # Positive EV → hold (unless Layer 3 overrides)
-                # ── Layer 3: Pre-settlement force exit ──
-                if (hours_to_settlement is not None
-                        and 0 <= hours_to_settlement <= config.force_exit_hours
-                        and distance < exit_distance):
-                    signals.append(TradeSignal(
-                        token_type=TokenType.NO,
-                        side=Side.SELL,
-                        slot=slot,
-                        event=event,
-                        expected_value=ev,
-                        estimated_win_prob=win_prob,
-                    ))
-                    logger.info(
-                        "FORCE EXIT: %s slot %s — %.1fh to settlement, distance %.1f°F, EV=%.4f",
-                        event.city, slot.outcome_label, hours_to_settlement, distance, ev,
-                    )
-                else:
-                    logger.debug(
-                        "EXIT hold (positive EV): %s slot %s — distance %.1f, EV=%.4f",
-                        event.city, slot.outcome_label, distance, ev,
-                    )
-                continue
-
-        # EV is negative (or no forecast available) → sell
         signals.append(TradeSignal(
-            token_type=TokenType.NO,
-            side=Side.SELL,
-            slot=slot,
-            event=event,
-            expected_value=ev,
-            estimated_win_prob=win_prob,
+            token_type=TokenType.NO, side=Side.SELL, slot=slot, event=event,
+            expected_value=ev, estimated_win_prob=win_prob,
         ))
-        logger.info(
-            "EXIT signal: %s slot %s — daily max %.1f°F, distance %.1f°F, EV=%.4f",
-            event.city, slot.outcome_label, daily_max_f, distance, ev,
-        )
+        logger.info("EXIT signal: %s slot %s — daily max %.1f°F, distance %.1f°F, EV=%.4f",
+                    event.city, slot.outcome_label, daily_max_f, distance, ev)
 
     return signals
