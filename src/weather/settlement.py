@@ -212,6 +212,36 @@ class AlignmentIssue:
     kind: str
 
 
+# O1 (2026-04-20): when most cities come back UNRESOLVED, a single-city
+# WARN per city is too quiet — we've had cases where >30 soft warnings
+# scrolled past and the operator skipped over them because individually
+# each line looks fine.  Escalate to a loud ERROR once more than
+# BULK_UNRESOLVED_THRESHOLD of configured cities are UNRESOLVED — that
+# is the fingerprint of Polymarket changing its resolutionSource URL
+# format and every city breaking at once.  Still non-fatal (transient
+# Gamma weirdness should not block deploys).
+BULK_UNRESOLVED_THRESHOLD: float = 0.8
+
+
+def is_bulk_unresolved(
+    issues: list[AlignmentIssue],
+    total_cities: int,
+    *,
+    threshold: float = BULK_UNRESOLVED_THRESHOLD,
+) -> tuple[bool, int]:
+    """Return ``(triggered, unresolved_count)``.
+
+    ``triggered`` is True when ``UNRESOLVED`` issues account for more
+    than *threshold* of all configured cities — i.e. the symptom of a
+    system-wide ``extract_settlement_icao`` regex break rather than a
+    single stale event.
+    """
+    if total_cities <= 0:
+        return False, 0
+    unresolved = sum(1 for i in issues if i.kind == "UNRESOLVED")
+    return (unresolved / total_cities) > threshold, unresolved
+
+
 async def check_station_alignment(
     cities: list,
     *,

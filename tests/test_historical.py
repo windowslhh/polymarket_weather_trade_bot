@@ -342,3 +342,81 @@ class TestStationAlignmentLive:
         assert issues[0].kind == "MISMATCH"
         assert issues[0].gamma_icao == "KHOU"
         assert issues[0].event_id == "e2"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# O1 (2026-04-20): bulk-UNRESOLVED escalation
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestBulkUnresolvedDetection:
+    """``is_bulk_unresolved``: >80% UNRESOLVED across the fleet is the
+    fingerprint of a Polymarket resolutionSource regex break."""
+
+    def _issues(self, unresolved: int, other_kinds: list[str] | None = None):
+        from src.weather.settlement import AlignmentIssue
+        out = [
+            AlignmentIssue(
+                city=f"c{i}", config_icao="KXXX", gamma_icao="",
+                event_id=f"e{i}", kind="UNRESOLVED",
+            )
+            for i in range(unresolved)
+        ]
+        for k in other_kinds or []:
+            out.append(AlignmentIssue(
+                city=f"c{k}", config_icao="KXXX", gamma_icao="KYYY",
+                event_id="ex", kind=k,
+            ))
+        return out
+
+    def test_fires_when_most_unresolved(self):
+        from src.weather.settlement import is_bulk_unresolved
+        # 9/10 cities UNRESOLVED → 90% > 80% → triggered
+        issues = self._issues(unresolved=9)
+        triggered, count = is_bulk_unresolved(issues, total_cities=10)
+        assert triggered is True
+        assert count == 9
+
+    def test_does_not_fire_at_threshold(self):
+        """Guard uses strict ``>``, so exactly 80% does NOT fire — prevents
+        tripping on routine fleet-wide intermittents."""
+        from src.weather.settlement import is_bulk_unresolved
+        # 8/10 = 80.0% — NOT > 80% → no trigger
+        issues = self._issues(unresolved=8)
+        triggered, count = is_bulk_unresolved(issues, total_cities=10)
+        assert triggered is False
+        assert count == 8
+
+    def test_does_not_fire_on_scattered_issues(self):
+        from src.weather.settlement import is_bulk_unresolved
+        # 3/10 = 30% — under threshold
+        issues = self._issues(unresolved=3)
+        triggered, _ = is_bulk_unresolved(issues, total_cities=10)
+        assert triggered is False
+
+    def test_ignores_non_unresolved_kinds(self):
+        """MISMATCH/NO_EVENT/GAMMA_ERROR don't count toward the ratio —
+        only UNRESOLVED is the symptom O1 escalates on."""
+        from src.weather.settlement import is_bulk_unresolved
+        # 5 UNRESOLVED + 5 MISMATCH in a 10-city fleet → UNRESOLVED ratio
+        # is 50%, not 100%, so no bulk alarm (MISMATCH is already fatal).
+        issues = self._issues(unresolved=5, other_kinds=["MISMATCH"] * 5)
+        triggered, count = is_bulk_unresolved(issues, total_cities=10)
+        assert triggered is False
+        assert count == 5
+
+    def test_empty_fleet_never_triggers(self):
+        from src.weather.settlement import is_bulk_unresolved
+        triggered, count = is_bulk_unresolved([], total_cities=0)
+        assert triggered is False
+        assert count == 0
+
+    def test_custom_threshold(self):
+        from src.weather.settlement import is_bulk_unresolved
+        issues = self._issues(unresolved=5)
+        # Default (0.8) would not fire on 50% — tighter 0.4 fires.
+        tight, _ = is_bulk_unresolved(issues, total_cities=10, threshold=0.4)
+        assert tight is True
+        # Loose 0.6 keeps 50% under the bar.
+        loose, _ = is_bulk_unresolved(issues, total_cities=10, threshold=0.6)
+        assert loose is False

@@ -17,7 +17,12 @@ from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
-from src.weather.settlement import check_station_alignment, validate_station_config
+from src.weather.settlement import (
+    BULK_UNRESOLVED_THRESHOLD,
+    check_station_alignment,
+    is_bulk_unresolved,
+    validate_station_config,
+)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -84,6 +89,20 @@ async def run(args: argparse.Namespace) -> None:
             logger.warning(
                 "STATION %s: %s — config=%s, gamma=%s, event=%s",
                 i.kind, i.city, i.config_icao, i.gamma_icao or "<none>", i.event_id or "<none>",
+            )
+        # O1: escalate to ERROR when UNRESOLVED covers most of the fleet
+        # — the fingerprint of a Polymarket resolutionSource regex break.
+        bulk_unresolved, unresolved_count = is_bulk_unresolved(
+            alignment_issues, len(config.cities),
+        )
+        if bulk_unresolved:
+            logger.error(
+                "CRITICAL ALIGNMENT ANOMALY: %d/%d cities have UNRESOLVED events "
+                "(>%.0f%%).  Polymarket's resolutionSource URL format may have "
+                "changed — investigate extract_settlement_icao before trusting "
+                "today's signals.",
+                unresolved_count, len(config.cities),
+                BULK_UNRESOLVED_THRESHOLD * 100,
             )
         if hard_fail:
             for i in hard_fail:
