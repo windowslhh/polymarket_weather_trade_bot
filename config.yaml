@@ -89,9 +89,9 @@ cities:
     tz: "America/Chicago"
 
   - name: "Houston"
-    icao: "KIAH"
-    lat: 29.7604
-    lon: -95.3698
+    icao: "KHOU"
+    lat: 29.6454
+    lon: -95.2789
     tz: "America/Chicago"
 
   - name: "Phoenix"
@@ -101,9 +101,9 @@ cities:
     tz: "America/Phoenix"
 
   - name: "Dallas"
-    icao: "KDFW"
-    lat: 32.7767
-    lon: -96.7970
+    icao: "KDAL"
+    lat: 32.8471
+    lon: -96.8518
     tz: "America/Chicago"
 
   - name: "San Francisco"
@@ -119,9 +119,9 @@ cities:
     tz: "America/Los_Angeles"
 
   - name: "Denver"
-    icao: "KDEN"
-    lat: 39.7392
-    lon: -104.9903
+    icao: "KBKF"
+    lat: 39.7017
+    lon: -104.7517
     tz: "America/Denver"
 
   - name: "Miami"

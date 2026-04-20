@@ -24,16 +24,32 @@ logger = logging.getLogger(__name__)
 # Polymarket uses Weather Underground, which reports from airport ASOS/AWOS stations.
 # These are the EXACT stations Polymarket resolves against.
 # Map: city_name -> (icao, wu_station_id, station_name)
+#
+# GROUND-TRUTH: each entry is verified by inspecting live Gamma event
+# resolutionSource URLs (https://www.wunderground.com/history/daily/us/<state>/<ICAO>).
+# `check_station_alignment()` re-verifies this map against live Gamma on every
+# startup so future drift is caught in seconds instead of months.  The entries
+# below are grouped by commonly-misconfigured cities (these caused the
+# 2026-04-17 Houston locked-win blow-up) and entries with multiple plausible
+# airports — if you touch one, also add a `# verified via event-id ...` note.
+#
+# Commonly misconfigured (double-check before editing):
+#   Houston:  KHOU (Hobby), NOT KIAH (Intercontinental)
+#   Dallas:   KDAL (Love Field), NOT KDFW (DFW)
+#   Denver:   KBKF (Buckley SFB), NOT KDEN (Denver Intl)
 SETTLEMENT_STATIONS: dict[str, tuple[str, str, str]] = {
     "New York": ("KLGA", "KLGA", "LaGuardia Airport"),
     "Los Angeles": ("KLAX", "KLAX", "Los Angeles International"),
     "Chicago": ("KORD", "KORD", "O'Hare International"),
-    "Houston": ("KIAH", "KIAH", "George Bush Intercontinental"),
+    # Houston: Hobby — verified from Gamma resolutionSource (.../us/tx/KHOU/...)
+    "Houston": ("KHOU", "KHOU", "William P. Hobby Airport"),
     "Phoenix": ("KPHX", "KPHX", "Phoenix Sky Harbor"),
-    "Dallas": ("KDFW", "KDFW", "Dallas/Fort Worth International"),
+    # Dallas: Love Field — verified from Gamma resolutionSource (.../us/tx/KDAL/...)
+    "Dallas": ("KDAL", "KDAL", "Dallas Love Field"),
     "San Francisco": ("KSFO", "KSFO", "San Francisco International"),
     "Seattle": ("KSEA", "KSEA", "Seattle-Tacoma International"),
-    "Denver": ("KDEN", "KDEN", "Denver International"),
+    # Denver: Buckley SFB — verified from Gamma resolutionSource (.../us/co/KBKF/...)
+    "Denver": ("KBKF", "KBKF", "Buckley Space Force Base"),
     "Miami": ("KMIA", "KMIA", "Miami International"),
     "Atlanta": ("KATL", "KATL", "Hartsfield-Jackson Atlanta"),
     "Boston": ("KBOS", "KBOS", "Logan International"),
@@ -173,3 +189,101 @@ def validate_station_config(
             ))
 
     return mismatches
+
+
+@dataclass
+class AlignmentIssue:
+    """A mismatch between the bot's configured ICAO and the live Gamma event.
+
+    kind:
+      - MISMATCH:    config says KXXX, Gamma event says KYYY → hard error
+      - UNRESOLVED:  Gamma event has no machine-extractable K-code → warn only
+      - NO_EVENT:    no active weather event discovered for this city → warn only
+      - GAMMA_ERROR: discover_weather_markets itself threw — alignment check
+                     was unable to run.  Surfaced as an explicit WARN in
+                     main.py so operators notice vs. a silent "all clear".
+                     Not a hard error (transient Gamma outages shouldn't
+                     block deploys).
+    """
+    city: str
+    config_icao: str
+    gamma_icao: str  # empty when UNRESOLVED / NO_EVENT / GAMMA_ERROR
+    event_id: str
+    kind: str
+
+
+async def check_station_alignment(
+    cities: list,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[AlignmentIssue]:
+    """Fail-fast startup guard.
+
+    Pulls live Polymarket weather events and verifies each city's configured
+    ICAO matches the K-code extracted from the Gamma event's resolutionSource.
+    The bot used the wrong station for Houston/Dallas/Denver for ~2 years
+    before this was caught manually (2026-04-17).  This check exists so the
+    next such drift is caught on the next deploy.
+
+    Returns a list of AlignmentIssue; empty list means all-clear.  The caller
+    is responsible for the refuse-to-start policy (typically: any MISMATCH
+    aborts startup; UNRESOLVED / NO_EVENT only log WARN).
+    """
+    # Local import avoids a circular dependency (settlement → discovery → …).
+    from src.markets.discovery import discover_weather_markets
+
+    issues: list[AlignmentIssue] = []
+    try:
+        events = await discover_weather_markets(cities, client=client, min_volume=0)
+    except Exception:
+        logger.exception(
+            "check_station_alignment: failed to fetch Gamma events — live alignment "
+            "check will be SKIPPED for this startup. Fix transient Gamma error and "
+            "restart, or investigate if persistent.",
+        )
+        # Surface the failure as a sentinel issue so main.py can WARN
+        # explicitly rather than treating an empty list as "all clear".
+        return [AlignmentIssue(
+            city="*", config_icao="", gamma_icao="",
+            event_id="", kind="GAMMA_ERROR",
+        )]
+
+    # Collapse to one event per city.  Prefer events with a non-empty
+    # extracted_icao — otherwise a Gamma listing where the first event lacks
+    # a machine-extractable K-code would silently mask a MISMATCH in a later
+    # event (review PR#5 Q5).
+    by_city: dict[str, object] = {}
+    for ev in events:
+        prev = by_city.get(ev.city)
+        ev_icao = (getattr(ev, "extracted_icao", "") or "")
+        prev_icao = (getattr(prev, "extracted_icao", "") or "") if prev is not None else ""
+        if prev is None or (not prev_icao and ev_icao):
+            by_city[ev.city] = ev
+
+    for city_cfg in cities:
+        city_name = city_cfg.name if hasattr(city_cfg, "name") else city_cfg["name"]
+        config_icao = city_cfg.icao if hasattr(city_cfg, "icao") else city_cfg["icao"]
+
+        ev = by_city.get(city_name)
+        if ev is None:
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao="",
+                event_id="", kind="NO_EVENT",
+            ))
+            continue
+
+        gamma_icao = (getattr(ev, "extracted_icao", "") or "").upper()
+        if not gamma_icao:
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao="",
+                event_id=getattr(ev, "event_id", ""), kind="UNRESOLVED",
+            ))
+            continue
+
+        if gamma_icao != config_icao.upper():
+            issues.append(AlignmentIssue(
+                city=city_name, config_icao=config_icao, gamma_icao=gamma_icao,
+                event_id=getattr(ev, "event_id", ""), kind="MISMATCH",
+            ))
+
+    return issues

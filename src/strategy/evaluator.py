@@ -42,6 +42,33 @@ def _entry_fee_per_dollar(price: float) -> float:
     return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
 
 
+# When our win-probability estimate disagrees with market price by more than
+# config.price_divergence_threshold points, the inputs (forecast, daily_max,
+# station) are almost certainly wrong — the market collectively sees something
+# we don't.  Bail out rather than building a position on bad data.  A shared
+# helper so every entry path (NO, locked-win, …) uses the same threshold;
+# forgetting to apply it in one path caused the Houston 2026-04-17 blow-up.
+#
+# Backwards-compatible default for callers that pre-date
+# StrategyConfig.price_divergence_threshold (keeps pure-helper tests clean).
+_DEFAULT_PRICE_DIVERGENCE_THRESHOLD: float = 0.50
+
+
+def _price_divergence(
+    win_prob: float,
+    market_price_no: float,
+    threshold: float = _DEFAULT_PRICE_DIVERGENCE_THRESHOLD,
+) -> float | None:
+    """Return |win_prob - market_price| when it exceeds *threshold*, else None.
+
+    NO price is already the market's implied P(NO wins), so this compares on
+    the same axis.  Callers should reject the entry when the return value is
+    not None and log a PRICE_DIVERGENCE decision-log entry.
+    """
+    gap = abs(win_prob - market_price_no)
+    return gap if gap > threshold else None
+
+
 # Post-peak confidence intervals: how much the daily max can still
 # rise after a given local hour.  After 17:00, ±1.5°F; during peak
 # (14-17), ±3°F.  Before 14:00, no adjustment (forecast only).
@@ -327,16 +354,20 @@ def evaluate_no_signals(
                     ev_threshold=ev_threshold)
             continue
 
-        # Price divergence guard: when model and market disagree by >50pp,
-        # the model input (forecast) is likely stale or wrong.
-        market_implied_no_win = slot.price_no
-        if abs(win_prob - market_implied_no_win) > 0.50:
+        # Price divergence guard — shared with evaluate_locked_win_signals,
+        # see _price_divergence() for rationale.  Threshold is tunable via
+        # StrategyConfig.price_divergence_threshold (default 0.50).
+        gap = _price_divergence(
+            win_prob, slot.price_no, config.price_divergence_threshold,
+        )
+        if gap is not None:
             logger.warning(
-                "PRICE DIVERGENCE: %s slot %s — model=%.1f%% vs market=%.1f%%, skipping",
-                event.city, slot.outcome_label, win_prob * 100, market_implied_no_win * 100,
+                "PRICE DIVERGENCE [NO]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
+                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
+                gap, config.price_divergence_threshold,
             )
             _reject(slot, "PRICE_DIVERGENCE",
-                    win_prob=win_prob, market_implied=market_implied_no_win)
+                    win_prob=win_prob, market_implied=slot.price_no)
             continue
 
         signals.append(TradeSignal(
@@ -427,12 +458,17 @@ def evaluate_trim_signals(
         price_for_ev = ep.get(slot.token_id_no, slot.price_no)
         ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
 
-        # Trim when either gate fires (see fix 4 rationale in module docstring):
-        #   1. Relative: current EV < entry_ev × (1 - trim_ev_decay_ratio).
+        # Trim when ANY gate fires (see fix 4 rationale in module docstring):
+        #   1. Relative EV: current EV < entry_ev × (1 - trim_ev_decay_ratio).
         #      Only active when we have a positive entry_ev (legacy positions
         #      recorded before the migration fall back to the absolute gate).
-        #   2. Absolute: current EV < -min_trim_ev_absolute (hard reversal).
+        #   2. Absolute EV: current EV < -min_trim_ev_absolute (hard reversal).
+        #   3. Price stop (Bug #3, 2026-04-18): current NO price has dropped
+        #      by >= trim_price_stop_ratio relative to entry price.  Catches
+        #      the pathology where EV looks fine on stale inputs but the
+        #      market is telling us we're wrong in real-time.
         entry_ev = ev_map.get(slot.token_id_no)
+        entry_price_no = ep.get(slot.token_id_no)
         absolute_triggered = ev < -config.min_trim_ev_absolute
         relative_triggered = False
         relative_gate_ev: float | None = None
@@ -440,7 +476,26 @@ def evaluate_trim_signals(
             relative_gate_ev = entry_ev * (1.0 - config.trim_ev_decay_ratio)
             relative_triggered = ev < relative_gate_ev
 
-        if absolute_triggered or relative_triggered:
+        price_stop_triggered = False
+        price_stop_threshold: float | None = None
+        if (entry_price_no is not None
+                and entry_price_no > 0
+                and 0 < config.trim_price_stop_ratio < 1.0):
+            price_stop_threshold = entry_price_no * (1.0 - config.trim_price_stop_ratio)
+            # Current slot.price_no is the live market NO price (set by the
+            # caller from the latest Gamma refresh).  If it's <= threshold
+            # the position has already lost ratio% of its notional value.
+            #
+            # NOTE: `slot.price_no > 0` intentionally filters out 0.0 prices.
+            # In paper mode Gamma sometimes returns 0 for illiquid slots;
+            # treating that as a real crash-to-zero would flood us with
+            # spurious TRIMs.  If the slot truly resolved to 0 (e.g. post-
+            # settlement ghost), the EXIT path handles it via hours_to_settlement.
+            # Ideally discovery.py would drop 0-priced slots before they reach
+            # the evaluator — tracked as a future data-layer cleanup.
+            price_stop_triggered = slot.price_no > 0 and slot.price_no <= price_stop_threshold
+
+        if absolute_triggered or relative_triggered or price_stop_triggered:
             signals.append(TradeSignal(
                 token_type=TokenType.NO,
                 side=Side.SELL,
@@ -449,14 +504,22 @@ def evaluate_trim_signals(
                 expected_value=ev,
                 estimated_win_prob=win_prob,
             ))
-            trigger = "absolute" if absolute_triggered else "relative"
+            if price_stop_triggered:
+                trigger = "price_stop"
+            elif absolute_triggered:
+                trigger = "absolute"
+            else:
+                trigger = "relative"
             logger.info(
                 "TRIM signal [%s]: %s slot %s EV=%.4f (entry_ev=%s, rel_gate=%s, abs_gate=%.4f, "
-                "win_prob=%.2f, entry_price=%.3f)",
+                "entry_price=%s, price_stop=%s, live_price=%.3f, win_prob=%.2f)",
                 trigger, event.city, slot.outcome_label, ev,
                 f"{entry_ev:.4f}" if entry_ev is not None else "None",
                 f"{relative_gate_ev:.4f}" if relative_gate_ev is not None else "n/a",
-                -config.min_trim_ev_absolute, win_prob, price_for_ev,
+                -config.min_trim_ev_absolute,
+                f"{entry_price_no:.3f}" if entry_price_no is not None else "None",
+                f"{price_stop_threshold:.3f}" if price_stop_threshold is not None else "n/a",
+                slot.price_no, win_prob,
             )
 
     return signals
@@ -613,6 +676,25 @@ def evaluate_locked_win_signals(
                 "%s slot %s — fee/odds wipe out positive EV",
                 ev, slot.price_no, win_prob,
                 event.city, slot.outcome_label,
+            )
+            continue
+
+        # PRICE DIVERGENCE guard — previously missing on this branch (Bug #1).
+        # When our lock says "NO is 99.9% certain" but market prices NO at,
+        # say, 0.40, the disagreement is too large to attribute to spread:
+        # either our daily_max input is wrong (stale/wrong-station) or the
+        # market knows something we don't (e.g. pending resolution dispute).
+        # Either way, do not size in on such a position.  The Houston KIAH
+        # vs KHOU fiasco (2026-04-17) would have been caught here.  Threshold
+        # is tunable via StrategyConfig.price_divergence_threshold (default 0.50).
+        gap = _price_divergence(
+            win_prob, slot.price_no, config.price_divergence_threshold,
+        )
+        if gap is not None:
+            logger.warning(
+                "PRICE DIVERGENCE [LOCKED]: %s slot %s — model=%.1f%% vs market=%.1f%% (gap=%.2f > %.2f), skipping",
+                event.city, slot.outcome_label, win_prob * 100, slot.price_no * 100,
+                gap, config.price_divergence_threshold,
             )
             continue
 

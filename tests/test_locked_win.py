@@ -369,9 +369,24 @@ class TestLockedWinBoundary:
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
-    def test_price_no_at_min_accepted(self):
-        """price_no=0.20 == min_no_price → accepted (not filtered)."""
+    def test_price_no_at_min_blocked_by_divergence(self):
+        """price_no=0.20 passes min_no_price but fails PRICE_DIVERGENCE.
+
+        After the Bug #1 fix (2026-04-18) the locked-win branch enforces the
+        same 50pp divergence cap as evaluate_no_signals.  For a below-slot
+        lock win_prob=0.999, so any price_no <= 0.499 trips divergence.  The
+        effective locked-win floor is therefore max(min_no_price, ~0.50).
+        """
         slot = _slot(70, 74, price_no=0.20)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 0
+
+    def test_price_no_above_divergence_floor_accepted(self):
+        """price_no just above the divergence floor → accepted."""
+        # win_prob=0.999, gap threshold 0.50 → accept when price_no > 0.499.
+        # 0.60 is safely above.
+        slot = _slot(70, 74, price_no=0.60)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1
@@ -659,6 +674,30 @@ class TestLockedWinConfig:
 # ──────────────────────────────────────────────────────────────────────
 # Regression: locked wins never produce YES signals
 # ──────────────────────────────────────────────────────────────────────
+
+class TestLockedWinDivergenceGuard:
+    """Bug #1 fix (2026-04-18): locked-win must also enforce the PRICE_DIVERGENCE
+    gate that evaluate_no_signals has — otherwise a stale/wrong-station daily_max
+    produces a "99.9% confident" lock that the market is actively pricing against.
+    The Houston KIAH vs KHOU fiasco (04-17) would have been caught here.
+    """
+
+    def test_blocks_when_market_strongly_disagrees(self):
+        # Daily max 85°F, slot [70, 74] → normally a below-slot lock (win_prob≈0.999).
+        # But market prices NO at 0.30 — implied P(NO) 30% vs model 99.9%.
+        # Gap = 0.699 > threshold (0.50) → must skip.
+        slot = _slot(70, 74, price_no=0.30)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 85.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 0
+
+    def test_allows_when_market_agrees(self):
+        # Same lock, but market NO at 0.92 → gap = 0.079, well within threshold.
+        slot = _slot(70, 74, price_no=0.92)
+        event = _event([slot])
+        sigs = evaluate_locked_win_signals(event, 85.0, _CFG, daily_max_final=True)
+        assert len(sigs) == 1
+
 
 class TestLockedWinRegression:
 

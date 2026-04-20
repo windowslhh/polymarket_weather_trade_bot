@@ -239,3 +239,82 @@ def test_trim_empty_entry_ev_map_falls_back_to_absolute_only():
     signals = evaluate_trim_signals(event, forecast, [slot], config)  # no entry_ev_map
     # ev≈-0.02 > -0.03 → absolute gate not tripped; relative inactive → no trim
     assert len(signals) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bug #3 (2026-04-18): price-based stop independent of EV.
+# ──────────────────────────────────────────────────────────────────────
+
+class TestTrimPriceStop:
+    """Price drops 25%+ from entry → trim regardless of EV sign."""
+
+    def test_price_stop_fires_on_large_drop(self):
+        # Entry at 0.40, current price 0.28 → drop of 30% > 25% threshold
+        # EV on its own is ~flat (forecast still favorable) → only price stop catches it.
+        event, slot = _make_event_with_slot(85.0, 90.0, price_no=0.28)
+        forecast = _make_forecast(75.0)  # forecast far below slot → NO win prob high
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,  # loose absolute gate
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=0.25,
+        )
+        entry_prices = {"tn": 0.40}
+        entry_ev_map = {"tn": 0.10}  # rich entry, relative gate wouldn't fire at small drop
+
+        signals = evaluate_trim_signals(
+            event, forecast, [slot], config,
+            entry_prices=entry_prices, entry_ev_map=entry_ev_map,
+        )
+        assert len(signals) == 1
+        assert signals[0].side == Side.SELL
+
+    def test_price_stop_does_not_fire_on_small_drop(self):
+        # Entry 0.40, current 0.35 → 12.5% drop, below 25% threshold
+        event, slot = _make_event_with_slot(85.0, 90.0, price_no=0.35)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=0.25,
+        )
+        entry_prices = {"tn": 0.40}
+        entry_ev_map = {"tn": 0.10}
+
+        signals = evaluate_trim_signals(
+            event, forecast, [slot], config,
+            entry_prices=entry_prices, entry_ev_map=entry_ev_map,
+        )
+        assert len(signals) == 0
+
+    def test_price_stop_disabled_when_ratio_out_of_range(self):
+        # Setting ratio >= 1.0 disables the check
+        event, slot = _make_event_with_slot(85.0, 90.0, price_no=0.05)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=1.5,  # disabled
+        )
+        entry_prices = {"tn": 0.40}
+        entry_ev_map = {"tn": 0.10}
+
+        signals = evaluate_trim_signals(
+            event, forecast, [slot], config,
+            entry_prices=entry_prices, entry_ev_map=entry_ev_map,
+        )
+        # Huge price drop but stop disabled; EV is strongly positive (forecast far from slot);
+        # absolute gate not tripped either → no trim
+        assert len(signals) == 0
+
+    def test_price_stop_needs_entry_price(self):
+        # Without entry_prices the stop can't compute threshold → must not fire
+        event, slot = _make_event_with_slot(85.0, 90.0, price_no=0.10)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=0.25,
+        )
+        # no entry_prices passed, no entry_ev_map
+        signals = evaluate_trim_signals(event, forecast, [slot], config)
+        assert len(signals) == 0
