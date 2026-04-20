@@ -262,13 +262,48 @@ def evaluate_trim_signals(
                 break
         if trigger is None:
             continue
-        signals.append(TradeSignal(
+        signal = TradeSignal(
             token_type=TokenType.NO, side=Side.SELL, slot=slot, event=event,
             expected_value=ev, estimated_win_prob=win_prob,
-        ))
+        )
+        # Embed the actual trigger in ``signal.reason`` so downstream
+        # consumers (decision_log, positions.exit_reason, dashboard)
+        # see which gate fired instead of a hard-coded "EV decayed"
+        # string.  Rebalancer only prefixes ``[{strategy}]``.
+        signal.reason = _format_trim_reason(trigger, ctx)
+        signals.append(signal)
         _log_trim_trigger(trigger, ctx)
 
     return signals
+
+
+def _format_trim_reason(trigger: GateResult, ctx: GateContext) -> str:
+    """Compact, grep-friendly TRIM reason for persistence.
+
+    Format: ``TRIM [<trigger>]: <key diagnostics>`` — e.g.
+      * ``TRIM [price_stop]: 0.710→0.474 (ratio=0.25)``
+      * ``TRIM [absolute]: ev=-0.150 < -0.030``
+      * ``TRIM [relative]: ev=0.010 < gate=0.020 (entry_ev=0.080)``
+    """
+    ev = ctx.ev or 0.0
+    cfg = ctx.config
+    if trigger.code == "price_stop":
+        return (
+            f"TRIM [price_stop]: "
+            f"{trigger.extra['entry_price']:.3f}→{trigger.extra['live_price']:.3f} "
+            f"(ratio={cfg.trim_price_stop_ratio})"
+        )
+    if trigger.code == "absolute":
+        return f"TRIM [absolute]: ev={ev:.3f} < {-cfg.min_trim_ev_absolute:.3f}"
+    if trigger.code == "relative":
+        entry_ev = trigger.extra.get("entry_ev")
+        gate_ev = trigger.extra.get("gate_ev")
+        return (
+            f"TRIM [relative]: ev={ev:.3f} < gate={gate_ev:.3f} "
+            f"(entry_ev={entry_ev:.3f})"
+        )
+    # Fallback for future trigger kinds.
+    return f"TRIM [{trigger.code}]: ev={ev:.3f}"
 
 
 def _log_trim_prefilter(result: GateResult, ctx: GateContext) -> None:

@@ -391,3 +391,66 @@ class TestTrimTriggerPriority:
         assert len(signals) == 1
         trim_logs = [r.getMessage() for r in caplog.records if "TRIM signal" in r.getMessage()]
         assert "[absolute]" in trim_logs[0]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TRIM reason format — the `signal.reason` string that lands in
+# ``positions.exit_reason`` / decision_log and drives the dashboard.
+# Before this fix the reason was hardcoded to "TRIM: EV decayed to X"
+# regardless of which gate fired; ``price_stop`` firings in particular
+# looked like EV decay in the logs even when EV was *higher* than entry.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTrimReasonLabel:
+
+    def test_price_stop_reason_mentions_price_transition(self):
+        event, slot = _make_event_with_slot(85.0, 90.0, price_no=0.28)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=0.25,
+        )
+        signals = evaluate_trim_signals(
+            event, forecast, [slot], config,
+            entry_prices={"tn": 0.40}, entry_ev_map={"tn": 0.10},
+        )
+        assert len(signals) == 1
+        assert signals[0].reason.startswith("TRIM [price_stop]: ")
+        assert "0.400→0.280" in signals[0].reason
+        assert "ratio=0.25" in signals[0].reason
+
+    def test_absolute_reason_mentions_ev_and_threshold(self):
+        event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.80)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=1.5,  # disable price stop
+        )
+        signals = evaluate_trim_signals(event, forecast, [slot], config)
+        assert len(signals) == 1
+        reason = signals[0].reason
+        assert reason.startswith("TRIM [absolute]: ")
+        assert "ev=" in reason
+        assert "-0.050" in reason  # threshold
+
+    def test_relative_reason_mentions_entry_and_gate_ev(self):
+        # Use the same scenario as test_trim_relative_gate_fires_on_large_decay.
+        event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.52)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.10,  # loose enough that absolute won't fire
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=1.5,  # disabled
+        )
+        signals = evaluate_trim_signals(
+            event, forecast, [slot], config,
+            entry_ev_map={"tn": 0.08},
+        )
+        assert len(signals) == 1
+        reason = signals[0].reason
+        assert reason.startswith("TRIM [relative]: ")
+        assert "entry_ev=0.080" in reason
+        assert "gate=0.020" in reason

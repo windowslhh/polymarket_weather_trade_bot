@@ -1088,15 +1088,21 @@ class Rebalancer:
                         # Mark as capped for decision log
                         signal._capped_by_event_limit = True  # type: ignore[attr-defined]
 
-                # Tag exit/trim signals and record exit times for cooldown
+                # Tag exit/trim signals and record exit times for cooldown.
+                # TRIM reasons are built by evaluate_trim_signals with the
+                # actual firing gate embedded (e.g. "TRIM [price_stop]: …");
+                # we only prefix the strategy tag here.  EXIT reasons stay
+                # inline because evaluate_exit_signals does not set them.
                 for signal in exit_signals + trim_signals:
                     signal.strategy = strat_name
                     self._recent_exits[signal.token_id] = now
-                    # Attach exit reason to signal for persistence
                     if signal in exit_signals:
-                        signal.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
+                        signal.reason = (
+                            f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot"
+                            if daily_max else f"[{strat_name}] EXIT: temp approaching"
+                        )
                     else:
-                        signal.reason = f"[{strat_name}] TRIM: EV decayed to {signal.expected_value:.3f}"
+                        signal.reason = f"[{strat_name}] {signal.reason or 'TRIM'}"
                 all_signals.extend(exit_signals)
                 all_signals.extend(trim_signals)
 
