@@ -100,3 +100,56 @@ async def test_spread_filter_passes_liquid_slots():
     assert len(events) == 1
     assert events[0].slots[0].spread is not None
     assert events[0].slots[0].spread <= 0.15
+
+
+# ──────────────────────────────────────────────────────────────────────
+# D1 (2026-04-20): drop slots with invalid NO prices (0.0 / 1.0) at
+# the discovery layer so downstream consumers can trust the range.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_zero_no_price_slot_filtered():
+    """NO price 0 (illiquid Gamma response) → slot dropped at discovery."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = [_make_gamma_response(yes_price=0.5, no_price=0.0), []]
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.get.return_value = resp
+
+    events = await discover_weather_markets([_make_city()], client)
+    # All slots filtered → event dropped (no slots left)
+    assert len(events) == 0
+
+
+@pytest.mark.asyncio
+async def test_one_no_price_slot_filtered():
+    """NO price 1 (already-resolved YES) → slot dropped at discovery."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = [_make_gamma_response(yes_price=0.0, no_price=1.0), []]
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.get.return_value = resp
+
+    events = await discover_weather_markets([_make_city()], client)
+    assert len(events) == 0
+
+
+@pytest.mark.asyncio
+async def test_valid_no_price_kept():
+    """A normal NO price in (0, 1) still reaches the event's slots list."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = [_make_gamma_response(yes_price=0.3, no_price=0.7), []]
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.get.return_value = resp
+
+    events = await discover_weather_markets([_make_city()], client)
+    assert len(events) == 1
+    assert events[0].slots[0].price_no == 0.7

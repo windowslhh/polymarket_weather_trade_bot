@@ -536,7 +536,9 @@ class PriceStopGate:
 
     Bug #3 (2026-04-18): catches the pathology where EV looks ~0 on
     stale inputs but the market is already rolling over — see
-    ``CLAUDE.md`` 'TRIM triple-gate' entry.
+    ``CLAUDE.md`` 'TRIM triple-gate' entry.  As of D1 (2026-04-20) the
+    0-price defensive check is gone: ``discovery.py`` now drops slots
+    with invalid NO prices before they reach the gate.
     """
 
     def check(self, ctx: GateContext) -> GateResult | None:
@@ -547,15 +549,12 @@ class PriceStopGate:
         if not (0 < ratio < 1.0):
             return None
         threshold = entry_price * (1.0 - ratio)
-        live_price = ctx.slot.price_no
-        if live_price <= 0:
-            return None
-        if live_price <= threshold:
+        if ctx.slot.price_no <= threshold:
             return GateResult(
                 code="price_stop",
                 extra={
                     "entry_price": entry_price,
-                    "live_price": live_price,
+                    "live_price": ctx.slot.price_no,
                     "threshold": threshold,
                 },
             )

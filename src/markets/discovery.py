@@ -272,6 +272,19 @@ async def discover_weather_markets(
 
                     price_yes = prices[0] if prices else 0.0
                     price_no = prices[1] if len(prices) > 1 else 0.0
+
+                    # D1 (2026-04-20): drop slots with an invalid NO price
+                    # at the source.  Gamma returns 0 / 1 for illiquid or
+                    # already-resolved slots, and letting them through
+                    # forced every downstream consumer (evaluator gates,
+                    # TRIM price-stop) to re-check `price > 0`.  Cleaning
+                    # up here means consumers can trust `0 < price < 1`.
+                    if price_no <= 0.0 or price_no >= 1.0:
+                        logger.debug(
+                            "Skipping slot %s with invalid NO price %.4f", label, price_no,
+                        )
+                        continue
+
                     slot_spread = abs(1.0 - price_yes - price_no) if price_yes > 0 and price_no > 0 else None
 
                     # Skip illiquid slots
