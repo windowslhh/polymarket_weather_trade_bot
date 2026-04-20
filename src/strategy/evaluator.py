@@ -304,6 +304,19 @@ def evaluate_no_signals(
                     threshold_f=config.no_distance_threshold_f)
             continue
 
+        # Same-day guard: if the observed daily_max has already reached or
+        # entered the slot's lower boundary, NO is almost certainly a loser.
+        # (Temperature in [lower, upper] → YES wins; temperature above upper
+        # is the locked-win case, handled by evaluate_locked_win_signals.)
+        # Guard applies to both range slots [L,U] and "≥X°F" open-upper slots.
+        if (
+            days_ahead == 0
+            and daily_max_f is not None
+            and slot.temp_lower_f is not None
+            and wu_round(daily_max_f) >= int(slot.temp_lower_f)
+        ):
+            continue
+
         if slot.price_no <= 0 or slot.price_no >= 1:
             _reject(slot, "PRICE_INVALID")
             continue

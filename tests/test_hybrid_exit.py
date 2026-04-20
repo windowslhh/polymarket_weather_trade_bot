@@ -545,3 +545,79 @@ class TestExitPerformance:
             )
         elapsed = time.monotonic() - t0
         assert elapsed < 2.0, f"100 × 50-slot exit took {elapsed:.3f}s"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bug 2: Layer 3 must NOT fire on negative hours_to_settlement
+# ──────────────────────────────────────────────────────────────────────
+
+class TestLayer3NegativeHours:
+    """Bug 2: hours_to_settlement < 0 (endDate passed, market not yet closed)
+    must NOT trigger a FORCE EXIT — Layer 3 condition is 0 <= h <= threshold."""
+
+    def test_negative_hours_no_force_exit(self):
+        """hours_to_settlement=-16.9 → market past its endDate but still open.
+        Layer 3 must NOT fire — the condition requires h >= 0."""
+        config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        # exit_distance=10*0.25=2.5, daily_max=84, distance=1 < 2.5 → Layer 2/3 territory
+        held = _slot(85, 89, price_no=0.50)
+        event = _event([held])
+        sigs = evaluate_exit_signals(
+            event, _obs(84.0), 84.0, [held], config,
+            forecast=_forecast(75.0),
+            hours_to_settlement=-16.9,
+        )
+        # Layer 2: EV positive (forecast far from slot) → hold
+        # Layer 3: -16.9 < 0 → guard rejects → no force exit
+        assert len(sigs) == 0, "Negative hours_to_settlement must not trigger Layer 3"
+
+    def test_negative_hours_large_magnitude_no_force_exit(self):
+        """hours_to_settlement=-100 → far past endDate, still not settled."""
+        config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        held = _slot(85, 89, price_no=0.50)
+        event = _event([held])
+        sigs = evaluate_exit_signals(
+            event, _obs(84.0), 84.0, [held], config,
+            forecast=_forecast(75.0),
+            hours_to_settlement=-100.0,
+        )
+        assert len(sigs) == 0
+
+    def test_zero_hours_fires_layer3(self):
+        """hours_to_settlement=0.0 is the boundary — Layer 3 should fire (0 >= 0)."""
+        config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        held = _slot(85, 89, price_no=0.50)
+        event = _event([held])
+        sigs = evaluate_exit_signals(
+            event, _obs(84.0), 84.0, [held], config,
+            forecast=_forecast(75.0),
+            hours_to_settlement=0.0,
+        )
+        assert len(sigs) == 1, "hours_to_settlement=0 → at settlement → Layer 3 fires"
+
+    def test_positive_hours_within_threshold_fires(self):
+        """Positive hours within threshold still fires (regression check)."""
+        config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        held = _slot(85, 89, price_no=0.50)
+        event = _event([held])
+        sigs = evaluate_exit_signals(
+            event, _obs(84.0), 84.0, [held], config,
+            forecast=_forecast(75.0),
+            hours_to_settlement=0.5,
+        )
+        assert len(sigs) == 1
+
+    def test_negative_hours_negative_ev_still_exits_layer2(self):
+        """Negative hours_to_settlement + negative EV → Layer 2 still exits.
+        Layer 3 guard only blocks the Layer-3 force-exit path, not Layer 2."""
+        config = StrategyConfig(no_distance_threshold_f=10, force_exit_hours=1.0)
+        # slot [74, 78], daily_max=75 (inside slot), forecast=76 → negative EV
+        held = _slot(74, 78, price_no=0.85)
+        event = _event([held])
+        sigs = evaluate_exit_signals(
+            event, _obs(75.0), 75.0, [held], config,
+            forecast=_forecast(76.0),
+            hours_to_settlement=-16.9,
+        )
+        # Layer 2 fires (negative EV) regardless of hours sign
+        assert len(sigs) == 1, "Layer 2 exit still works even when hours is negative"

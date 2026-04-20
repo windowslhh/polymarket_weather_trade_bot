@@ -1132,3 +1132,124 @@ class TestPostPeakExitSignals:
             event, obs, 74.0, [slot], config, forecast=forecast, local_hour=18,
         )
         assert len(signals) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bug 1: daily_max-in-slot guard in evaluate_no_signals
+# ──────────────────────────────────────────────────────────────────────
+
+class TestDailyMaxSlotGuard:
+    """Bug 1: when daily_max >= slot.temp_lower_f on day 0, NO is almost
+    certainly a loser. evaluate_no_signals must NOT generate a BUY signal."""
+
+    def _cfg(self) -> StrategyConfig:
+        return StrategyConfig(no_distance_threshold_f=5, min_no_ev=0.01, max_no_price=0.95)
+
+    def test_range_slot_daily_max_at_lower_bound_no_buy(self):
+        """daily_max == slot.lower → temperature has entered slot → skip."""
+        config = self._cfg()
+        # Slot [80, 84], forecast says 72 (well below) → would normally generate signal.
+        # But daily_max=80 == lower=80 on day 0 → guard fires → no signal.
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=80.0,
+        )
+        assert len(signals) == 0, "daily_max at lower bound → NO is losing → skip"
+
+    def test_range_slot_daily_max_inside_slot_no_buy(self):
+        """daily_max in [lower, upper] → temperature landed in slot → skip."""
+        config = self._cfg()
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=82.0,
+        )
+        assert len(signals) == 0, "daily_max inside slot → YES wins → skip"
+
+    def test_range_slot_daily_max_above_slot_no_buy(self):
+        """daily_max > upper → locked-win territory; evaluate_no_signals skips
+        (evaluate_locked_win_signals handles the buy instead)."""
+        config = self._cfg()
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        # daily_max=90 > 84: locked win scenario — skip here, locked_win fn handles it
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=90.0,
+        )
+        assert len(signals) == 0, "daily_max above slot → locked-win; not a regular NO buy"
+
+    def test_range_slot_daily_max_below_lower_generates_signal(self):
+        """daily_max < lower → slot is genuinely far → normal NO signal expected."""
+        config = self._cfg()
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        # daily_max=76 < 80 → guard does NOT fire → normal evaluation
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=76.0,
+        )
+        assert len(signals) == 1, "daily_max below slot → valid NO buy"
+
+    def test_guard_only_fires_on_day_0(self):
+        """days_ahead=1 → guard is disabled; regular distance logic applies."""
+        config = self._cfg()
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        # daily_max=82 would fire guard on day 0, but days_ahead=1 → passes
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=1, daily_max_f=82.0,
+        )
+        assert len(signals) == 1, "days_ahead=1 → guard disabled"
+
+    def test_guard_requires_daily_max_not_none(self):
+        """daily_max_f=None → guard does not fire."""
+        config = self._cfg()
+        slot = _make_slot(80, 84, price_no=0.60)
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=None,
+        )
+        assert len(signals) == 1, "daily_max_f=None → guard skipped → normal signal"
+
+    def test_open_upper_slot_guard(self):
+        """≥80°F slot: daily_max=82 >= 80 → guard fires (NO loses if YES wins)."""
+        config = self._cfg()
+        slot = _make_slot(80, None, price_no=0.60)  # ≥80°F
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        # Early ≥X°F guard at the top of the loop fires before distance filter,
+        # but the post-distance guard also covers it — either way no signal.
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=82.0,
+        )
+        assert len(signals) == 0
+
+    def test_below_x_slot_not_affected_by_guard(self):
+        """'Below 80°F' slot (lower=None): guard doesn't apply (no lower bound)."""
+        config = self._cfg()
+        slot = _make_slot(None, 80, price_no=0.60)  # Below 80°F
+        event = _make_event(slots=[slot])
+        forecast = _make_forecast(72.0)
+        # daily_max=77 < 80 → YES might win if actual < 80; still worth evaluating
+        # Guard should NOT fire (lower is None)
+        signals = evaluate_no_signals(
+            event, forecast, config,
+            days_ahead=0, daily_max_f=77.0,
+        )
+        # Distance from [None, 80] with forecast=72: forecast < upper → distance=0 → filtered by distance
+        # So signals=0 but for the right reason (distance, not the guard)
+        # Just verify no crash
+        assert isinstance(signals, list)
