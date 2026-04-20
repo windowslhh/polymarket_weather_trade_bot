@@ -19,12 +19,22 @@
 <div class="panel">
     <div class="panel-header">
         <h3>Complete Trade Record</h3>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;align-items:center;">
+            <button id="toggle-entries-btn" type="button"
+                    onclick="toggleClosedEntries()"
+                    style="font-size:11px;padding:4px 10px;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;border-radius:4px;">
+                Show closed-position BUY rows ({{ closed_entry_count }})
+            </button>
             <span class="tag tag-buy">BUY</span>
             <span class="tag tag-sell">SELL</span>
             <span class="tag tag-skip">SKIP</span>
         </div>
     </div>
+    <style>
+        /* Closed-position BUY rows hidden until toggled on */
+        tbody:not(.show-closed-entries) tr.closed-entry-row { display: none; }
+        tr.closed-entry-row { opacity: 0.7; background: rgba(80, 140, 255, 0.04); }
+    </style>
     <table>
         <thead>
             <tr>
@@ -43,9 +53,10 @@
                 <th>Status</th>
             </tr>
         </thead>
-        <tbody>
+        <tbody id="timeline-body">
         {% for t in timeline %}
-        <tr style="{% if t.type == 'settled' %}background:rgba(34,197,94,0.05);{% elif t.type == 'closed' %}background:rgba(100,100,100,0.03);{% elif t.type == 'decision' and t.action == 'SKIP' %}opacity:0.5;{% endif %}">
+        <tr class="{% if t.type == 'closed_entry' %}closed-entry-row{% endif %}"
+            style="{% if t.type == 'settled' %}background:rgba(34,197,94,0.05);{% elif t.type == 'closed' %}background:rgba(100,100,100,0.03);{% elif t.type == 'decision' and t.action == 'SKIP' %}opacity:0.5;{% endif %}">
             <td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">{{ t.time|beijing }}</td>
             <td style="font-weight:500;font-size:12px;">{{ t.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ t.slot }}</td>
@@ -79,4 +90,19 @@
         </tbody>
     </table>
 </div>
+<script>
+    // Toggle hidden BUY rows for closed positions.  The CSS rule
+    //   tbody:not(.show-closed-entries) tr.closed-entry-row { display: none; }
+    // hides them by default; adding .show-closed-entries reveals them.
+    function toggleClosedEntries() {
+        const tbody = document.getElementById('timeline-body');
+        const btn = document.getElementById('toggle-entries-btn');
+        if (!tbody || !btn) return;
+        const count = document.querySelectorAll('tr.closed-entry-row').length;
+        const shown = tbody.classList.toggle('show-closed-entries');
+        btn.textContent = shown
+            ? `Hide closed-position BUY rows (${count})`
+            : `Show closed-position BUY rows (${count})`;
+    }
+</script>
 {% endblock %}
