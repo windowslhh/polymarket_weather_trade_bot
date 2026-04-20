@@ -498,6 +498,30 @@ def create_app(store, rebalancer, config) -> Flask:
                 "type": "settled" if p.get("status") == "settled" else "closed",
                 "sort_key": p.get("closed_at") or p.get("created_at", ""),
             })
+            # 2b. Hidden-by-default BUY row for the same position so the
+            #     "Show entries" toggle reveals the full lifecycle.  The
+            #     row lands at ``created_at`` (open time) so it sorts
+            #     above the SELL row when both are visible.
+            buy_reason = p.get("buy_reason") or ""
+            if not buy_reason:
+                buy_reason_key = (p["city"], p.get("slot_label", ""), p.get("strategy", "B"))
+                buy_reason = buy_reasons.get(buy_reason_key, "")
+            timeline.append({
+                "time": p["created_at"][:16] if p.get("created_at") else "",
+                "city": p["city"],
+                "slot": slot_short,
+                "market_date": market_date,
+                "strategy": p.get("strategy", "B"),
+                "action": "BUY",
+                "size": f"${p['size_usd']:.1f}",
+                "entry": f"{p['entry_price']:.3f}",
+                "exit": "-",
+                "current": "-",
+                "pnl": "-",
+                "reason": buy_reason,
+                "type": "closed_entry",
+                "sort_key": p.get("created_at", ""),
+            })
 
         # 3. SKIP decisions
         for d in decisions:
@@ -546,11 +570,23 @@ def create_app(store, rebalancer, config) -> Flask:
             if p.get("realized_pnl") is not None:
                 strat_pnl[s] += p["realized_pnl"]
 
+        # Limit bumped from 80 → 120 because every closed position now
+        # emits an extra ``closed_entry`` row (hidden until toggled).
+        # After the limit, still-hidden rows count against visible ones,
+        # but the earliest few are what operators usually care about.
+        # Count closed_entry rows from the *full* timeline so the button
+        # label reflects the real total rather than only in-view rows
+        # (older BUY rows beyond the 120-row window would otherwise be
+        # invisible to the label).
+        closed_entry_count = sum(1 for t in timeline if t.get("type") == "closed_entry")
+        limited = timeline[:120]
+
         return render_template(
             "trades.html",
             active_page="trades",
             mode=_mode(),
-            timeline=timeline[:80],  # limit for performance
+            timeline=limited,
+            closed_entry_count=closed_entry_count,
             strat_pnl=strat_pnl,
             strat_exposure=strat_exposure,
             strat_counts=strat_counts,

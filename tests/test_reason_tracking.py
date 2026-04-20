@@ -418,11 +418,17 @@ class TestRebalancerReasonAttachment:
         assert "daily max" in reason
 
     def test_signal_reason_format_trim(self):
-        """TRIM reason includes strategy and EV."""
-        reason = "[C] TRIM: EV decayed to -0.050"
-        assert "[C]" in reason
-        assert "TRIM:" in reason
-        assert "EV decayed to" in reason
+        """TRIM reason names the firing gate + key diagnostics.
+
+        Post-PR #7 format: ``[<strat>] TRIM [<trigger>]: <diagnostics>``
+        where ``<trigger>`` is ``price_stop`` / ``absolute`` / ``relative``.
+        The old ``"TRIM: EV decayed to X"`` string lost the trigger
+        identity — see docs history / PR #7.
+        """
+        reason = "[C] TRIM [price_stop]: 0.710→0.474 (ratio=0.25)"
+        assert reason.startswith("[C] TRIM [")
+        assert "price_stop]" in reason
+        assert "0.710" in reason and "0.474" in reason
 
 
 # ──────────────────────────────────────────────────────────────────────
