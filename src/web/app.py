@@ -572,10 +572,14 @@ def create_app(store, rebalancer, config) -> Flask:
 
         # Limit bumped from 80 → 120 because every closed position now
         # emits an extra ``closed_entry`` row (hidden until toggled).
-        # After the limit, still hidden rows count against visible ones,
+        # After the limit, still-hidden rows count against visible ones,
         # but the earliest few are what operators usually care about.
+        # Count closed_entry rows from the *full* timeline so the button
+        # label reflects the real total rather than only in-view rows
+        # (older BUY rows beyond the 120-row window would otherwise be
+        # invisible to the label).
+        closed_entry_count = sum(1 for t in timeline if t.get("type") == "closed_entry")
         limited = timeline[:120]
-        closed_entry_count = sum(1 for t in limited if t.get("type") == "closed_entry")
 
         return render_template(
             "trades.html",

@@ -22,6 +22,8 @@
         <div style="display:flex;gap:8px;align-items:center;">
             <button id="toggle-entries-btn" type="button"
                     onclick="toggleClosedEntries()"
+                    aria-expanded="false"
+                    aria-controls="timeline-body"
                     style="font-size:11px;padding:4px 10px;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;border-radius:4px;">
                 Show closed-position BUY rows ({{ closed_entry_count }})
             </button>
@@ -103,6 +105,7 @@
         btn.textContent = shown
             ? `Hide closed-position BUY rows (${count})`
             : `Show closed-position BUY rows (${count})`;
+        btn.setAttribute('aria-expanded', shown ? 'true' : 'false');
     }
 </script>
 {% endblock %}
