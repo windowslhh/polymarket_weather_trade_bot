@@ -118,14 +118,22 @@ class Gate(Protocol):
 # Shared primitives — fee / win-prob helpers
 # ──────────────────────────────────────────────────────────────────────
 
-# Polymarket taker fee for the Weather category (as of 2026).  Matches
-# the module constant in evaluator.py; duplicated here so gates.py has
-# no circular import back to evaluator.py.
-_TAKER_FEE_RATE: float = 0.0125
+# Polymarket taker fee for the Weather category (as of 2026).  Weather
+# markets charge 1.25% base rate, probability-weighted so the fee is
+# highest at 50/50 and decreases toward 0 or 1.  Formula:
+#   fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
+# (peaks at price=0.50: 0.625% per dollar; at price=0.70: 0.525%/$).
+# Makers pay 0%; we assume all our orders execute as taker.
+#
+# Single canonical definition lives here because both this module and
+# evaluator.py reference it; evaluator re-exports the name so callers
+# that predate the M2 refactor keep working.
+TAKER_FEE_RATE: float = 0.0125
 
 
-def _entry_fee_per_dollar(price: float) -> float:
-    return _TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
+def entry_fee_per_dollar(price: float) -> float:
+    """Compute Polymarket taker fee per dollar invested at *price*."""
+    return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -323,7 +331,7 @@ class EvThresholdGate:
         ev = (
             win_prob * (1.0 - slot.price_no)
             - (1.0 - win_prob) * slot.price_no
-            - _entry_fee_per_dollar(slot.price_no)
+            - entry_fee_per_dollar(slot.price_no)
         )
         ctx.win_prob = win_prob
         ctx.ev = ev
@@ -467,7 +475,7 @@ class LockedWinEvPositiveGate:
         ev = (
             win_prob * (1.0 - slot.price_no)
             - (1.0 - win_prob) * slot.price_no
-            - _entry_fee_per_dollar(slot.price_no)
+            - entry_fee_per_dollar(slot.price_no)
         )
         ctx.win_prob = win_prob
         ctx.ev = ev

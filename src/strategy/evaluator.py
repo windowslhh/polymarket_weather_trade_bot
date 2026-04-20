@@ -25,6 +25,7 @@ from src.strategy.gates import (
     GateContext,
     GateResult,
     SignalKind,
+    TAKER_FEE_RATE,
     _estimate_no_win_prob as _estimate_no_win_prob_impl,
     _estimate_no_win_probability_normal as _estimate_no_win_probability_normal_impl,
     _PEAK_START_HOUR,
@@ -32,6 +33,7 @@ from src.strategy.gates import (
     _POST_PEAK_CONFIDENCE_F,
     _POST_PEAK_HOUR,
     _slot_distance as _slot_distance_impl,
+    entry_fee_per_dollar,
     post_peak_confidence,
 )
 from src.strategy.trend import TrendState
@@ -40,13 +42,10 @@ from src.weather.models import Forecast, Observation
 
 logger = logging.getLogger(__name__)
 
-# Polymarket taker fee for the Weather category (as of 2026).  Formula:
-# fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
-TAKER_FEE_RATE: float = 0.0125
-
-
-def _entry_fee_per_dollar(price: float) -> float:
-    return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
+# TAKER_FEE_RATE + entry_fee_per_dollar are now canonically defined in
+# src/strategy/gates.py and imported above.  Private aliases preserved
+# here for test modules that still import the pre-M2 underscored name.
+_entry_fee_per_dollar = entry_fee_per_dollar
 
 
 # Re-export distance / probability helpers so existing tests keep working.
