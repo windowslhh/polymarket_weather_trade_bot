@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 
+from src.alerts import Alerter
 from src.config import load_config
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
@@ -17,7 +18,12 @@ from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
-from src.weather.settlement import check_station_alignment, validate_station_config
+from src.weather.settlement import (
+    BULK_UNRESOLVED_THRESHOLD,
+    check_station_alignment,
+    is_bulk_unresolved,
+    validate_station_config,
+)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -50,6 +56,16 @@ async def run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     logger.info("Loaded %d cities from config", len(config.cities))
+
+    # Hoisted Alerter — lives for the duration of ``run()`` so any
+    # fire-and-forget webhook task kicked off during startup (e.g. the
+    # O1 bulk-UNRESOLVED alarm) keeps its strong reference through the
+    # Alerter instance's ``_pending_tasks`` set.  A throwaway
+    # ``Alerter(url).send(...)`` pattern would let the instance (and
+    # thus the task) get garbage-collected the instant the await
+    # returns, which CPython's refcount model will do deterministically
+    # — the webhook POST never completes.
+    alerter = Alerter(config.alert_webhook_url)
 
     # Validate settlement station configuration (static — config vs registry)
     mismatches = validate_station_config(config.cities)
@@ -85,6 +101,25 @@ async def run(args: argparse.Namespace) -> None:
                 "STATION %s: %s — config=%s, gamma=%s, event=%s",
                 i.kind, i.city, i.config_icao, i.gamma_icao or "<none>", i.event_id or "<none>",
             )
+        # O1: escalate to ERROR + webhook when UNRESOLVED covers most of the
+        # fleet — the fingerprint of a Polymarket resolutionSource regex
+        # break.  logger.error alone only reaches stdout/docker logs; route
+        # through Alerter so the operator's webhook (Telegram/Discord/Slack)
+        # actually pages them.  No sys.exit: transient Gamma weirdness
+        # shouldn't block a deploy, but the critical channel surface matters.
+        bulk_unresolved, unresolved_count = is_bulk_unresolved(
+            alignment_issues, len(config.cities),
+        )
+        if bulk_unresolved:
+            msg = (
+                f"CRITICAL ALIGNMENT ANOMALY: {unresolved_count}/{len(config.cities)} "
+                f"cities have UNRESOLVED events (>{BULK_UNRESOLVED_THRESHOLD * 100:.0f}%). "
+                "Polymarket's resolutionSource URL format may have changed — "
+                "investigate extract_settlement_icao before trusting today's signals."
+            )
+            logger.error(msg)
+            if config.alert_webhook_url:
+                await alerter.send("critical", msg)
         if hard_fail:
             for i in hard_fail:
                 logger.error(

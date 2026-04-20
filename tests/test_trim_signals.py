@@ -318,3 +318,76 @@ class TestTrimPriceStop:
         # no entry_prices passed, no entry_ev_map
         signals = evaluate_trim_signals(event, forecast, [slot], config)
         assert len(signals) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Multi-trigger priority regression (review M1, 2026-04-21)
+# Locks `price_stop > absolute > relative` when >1 gate fires at once.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTrimTriggerPriority:
+    """When more than one trim gate fires, the logged label must remain
+    ``price_stop > absolute > relative`` — the pre-M2 priority.  A future
+    matrix re-order that accidentally flips this shows up as a label
+    change in ``_log_trim_trigger``."""
+
+    def test_price_stop_wins_over_absolute_and_relative(self, caplog):
+        # slot forecast=75, slot=[73,77] (forecast IN slot) → win_prob ~0.5
+        # price_for_ev = entry 0.40 → ev ≈ 0.5*0.60 - 0.5*0.40 = +0.10
+        # Wait: we need ev < -0.05 (absolute) AND ev < 0.02 (relative gate from
+        # entry_ev=0.08) AND price dropped > 25% from entry.
+        #
+        # Use a slot with tight forecast in slot → low win_prob → ev is strongly
+        # negative when price_for_ev is kept high via entry price 0.80.
+        # ev = 0.35*(1-0.80) - 0.65*0.80 = 0.07 - 0.52 = -0.45 → absolute fires.
+        # Relative: entry_ev=0.08 → gate 0.02; -0.45 < 0.02 → fires.
+        # Price stop: entry 0.80, live 0.40 → 50% drop > 25% → fires.
+        event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.40)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=0.25,
+        )
+        entry_prices = {"tn": 0.80}
+        entry_ev_map = {"tn": 0.08}
+
+        import logging as _logging
+        with caplog.at_level(_logging.INFO, logger="src.strategy.evaluator"):
+            signals = evaluate_trim_signals(
+                event, forecast, [slot], config,
+                entry_prices=entry_prices, entry_ev_map=entry_ev_map,
+            )
+        assert len(signals) == 1
+        trim_logs = [r.getMessage() for r in caplog.records if "TRIM signal" in r.getMessage()]
+        assert len(trim_logs) == 1
+        assert "[price_stop]" in trim_logs[0], (
+            f"price_stop must win priority when multiple triggers fire; "
+            f"got log line: {trim_logs[0]!r}"
+        )
+
+    def test_absolute_wins_over_relative(self, caplog):
+        # Price stop disabled via ratio=1.5; only absolute + relative can fire.
+        # Forecast IN slot → win_prob ~0.5; entry=0.60 → ev = 0.5*0.40 - 0.5*0.60
+        # = -0.10 < -0.05 (absolute fires) AND < 0.02 (relative fires with
+        # entry_ev=0.08).  Both trigger; absolute must take priority.
+        event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.60)
+        forecast = _make_forecast(75.0)
+        config = StrategyConfig(
+            min_trim_ev_absolute=0.05,
+            trim_ev_decay_ratio=0.75,
+            trim_price_stop_ratio=1.5,  # disabled
+        )
+        entry_prices = {"tn": 0.60}
+        entry_ev_map = {"tn": 0.08}
+
+        import logging as _logging
+        with caplog.at_level(_logging.INFO, logger="src.strategy.evaluator"):
+            signals = evaluate_trim_signals(
+                event, forecast, [slot], config,
+                entry_prices=entry_prices, entry_ev_map=entry_ev_map,
+            )
+        assert len(signals) == 1
+        trim_logs = [r.getMessage() for r in caplog.records if "TRIM signal" in r.getMessage()]
+        assert "[absolute]" in trim_logs[0]
