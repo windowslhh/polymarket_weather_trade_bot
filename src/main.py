@@ -57,6 +57,16 @@ async def run(args: argparse.Namespace) -> None:
 
     logger.info("Loaded %d cities from config", len(config.cities))
 
+    # Hoisted Alerter — lives for the duration of ``run()`` so any
+    # fire-and-forget webhook task kicked off during startup (e.g. the
+    # O1 bulk-UNRESOLVED alarm) keeps its strong reference through the
+    # Alerter instance's ``_pending_tasks`` set.  A throwaway
+    # ``Alerter(url).send(...)`` pattern would let the instance (and
+    # thus the task) get garbage-collected the instant the await
+    # returns, which CPython's refcount model will do deterministically
+    # — the webhook POST never completes.
+    alerter = Alerter(config.alert_webhook_url)
+
     # Validate settlement station configuration (static — config vs registry)
     mismatches = validate_station_config(config.cities)
     for m in mismatches:
@@ -109,7 +119,7 @@ async def run(args: argparse.Namespace) -> None:
             )
             logger.error(msg)
             if config.alert_webhook_url:
-                await Alerter(config.alert_webhook_url).send("critical", msg)
+                await alerter.send("critical", msg)
         if hard_fail:
             for i in hard_fail:
                 logger.error(

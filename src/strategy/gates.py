@@ -41,7 +41,7 @@ from src.strategy.trend import TrendState
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.models import Forecast
 
-_gates_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class SignalKind(Enum):
@@ -265,8 +265,11 @@ class DistanceGate:
 
         # Post-peak observed-distance merge — skipped when daily_max has
         # already exceeded the slot upper bound (NO is safe, obs distance
-        # would be misleadingly small).
-        if ctx.peak_conf is not None and ctx.daily_max_f is not None:
+        # would be misleadingly small).  Wrapper invariant: a non-None
+        # ``peak_conf`` implies a non-None ``daily_max_f`` (see
+        # ``evaluate_no_signals`` pre-loop setup).
+        if ctx.peak_conf is not None:
+            assert ctx.daily_max_f is not None  # wrapper invariant
             if slot.temp_upper_f is None or ctx.daily_max_f <= slot.temp_upper_f:
                 obs_distance = _slot_distance(slot, ctx.daily_max_f)
                 distance = min(distance, obs_distance)
@@ -304,7 +307,7 @@ class EvThresholdGate:
             assert ctx.daily_max_f is not None  # wrapper invariant
             obs_prob = _observed_no_win_prob(slot, ctx.daily_max_f, ctx.peak_conf)
             if obs_prob > win_prob:
-                _gates_logger.debug(
+                logger.debug(
                     "Post-peak boost %s slot %s: %.3f → %.3f (hour=%s, max=%.1f)",
                     ctx.event.city, slot.outcome_label, win_prob, obs_prob,
                     ctx.local_hour, ctx.daily_max_f,

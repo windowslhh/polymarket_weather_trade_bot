@@ -34,6 +34,7 @@
 - **TradeSignal.is_locked_win**: Formal bool field — do NOT use private `_is_locked_win` attribute
 - **TradeSignal.reason**: Always set before execution — executor reads `signal.strategy` and `signal.reason` directly (no getattr)
 - **decision_log REJECT sampling** (fix 3): up to 3 rejections per (strategy, event) are persisted with reason code (DAILY_MAX_ABOVE_LOWER / DAILY_MAX_IN_SLOT / DAILY_MAX_BELOW_UPPER / DIST_TOO_CLOSE / PRICE_INVALID / PRICE_TOO_LOW / PRICE_TOO_HIGH / EV_BELOW_GATE / PRICE_DIVERGENCE) for post-hoc "why nothing traded?" debugging.
+- **Gate matrix (M2, 2026-04-20)**: Per-`SignalKind` gate ordering lives declaratively in `src/strategy/gates.py::GATE_MATRIX`. Each gate is a small class with a `check(ctx) -> GateResult | None` method; `evaluator.py` is a thin walker that iterates the matrix and short-circuits on first fire. To add a cross-cutting guard (new decision-log reason code, shared invariant), register one gate class and list it in the matrix entries that need it — both entry branches (FORECAST_NO + LOCKED_WIN) pick it up together, closing Bug #1's class of "added to one branch, forgotten on the other" regressions.
 
 ## Workflow
 - Always `git pull` and verify latest code before making changes
