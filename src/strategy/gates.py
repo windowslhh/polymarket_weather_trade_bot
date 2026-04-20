@@ -15,7 +15,7 @@ Design:
 * A ``GateContext`` bundles every input any gate might need.  Each gate
   reads only the fields it cares about and, where appropriate, caches
   its intermediate result on ``ctx`` so downstream gates in the same
-  pass can reuse it (``ctx.distance``, ``ctx.win_prob``, ``ctx.ev`` …).
+  pass can reuse it (``ctx.win_prob``, ``ctx.ev`` …).
 * ``GATE_MATRIX`` maps a ``SignalKind`` to the ordered list of gates for
   that branch.  Per-kind wrapper functions in ``evaluator.py`` walk the
   list; the wrapper interprets a ``GateResult`` as "reject" for entry
@@ -84,7 +84,6 @@ class GateContext:
     ev_threshold: float | None = None
 
     # Derived per-slot state (filled by gates; later gates read back).
-    distance: float | None = None
     win_prob: float | None = None
     ev: float | None = None
     # Locked-win intermediate state
@@ -250,8 +249,7 @@ class DistanceGate:
     distribution with ≥ 30 samples is available).  Post-peak, the
     minimum of (forecast distance, observed distance) is taken so stale
     forecasts cannot pass a slot the actual temperature is already
-    approaching.  Stores the final distance on ``ctx.distance`` for
-    downstream gates, though at present no NO gate reads it.
+    approaching.
     """
 
     def check(self, ctx: GateContext) -> GateResult | None:
@@ -272,8 +270,6 @@ class DistanceGate:
             if slot.temp_upper_f is None or ctx.daily_max_f <= slot.temp_upper_f:
                 obs_distance = _slot_distance(slot, ctx.daily_max_f)
                 distance = min(distance, obs_distance)
-
-        ctx.distance = distance
 
         if distance < ctx.config.no_distance_threshold_f:
             return GateResult(
@@ -301,8 +297,11 @@ class EvThresholdGate:
         slot = ctx.slot
         win_prob = _estimate_no_win_prob(slot, ctx.forecast, ctx.error_dist)
 
-        # Post-peak boost via observed daily_max
-        if ctx.peak_conf is not None and ctx.daily_max_f is not None:
+        # Post-peak boost via observed daily_max.  The evaluator wrapper
+        # only sets ``peak_conf`` when ``daily_max_f`` is present, so a
+        # non-None ``peak_conf`` implies a non-None ``daily_max_f``.
+        if ctx.peak_conf is not None:
+            assert ctx.daily_max_f is not None  # wrapper invariant
             obs_prob = _observed_no_win_prob(slot, ctx.daily_max_f, ctx.peak_conf)
             if obs_prob > win_prob:
                 _gates_logger.debug(

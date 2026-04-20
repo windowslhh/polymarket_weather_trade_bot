@@ -205,7 +205,6 @@ class TestDistanceGate:
         # forecast=75, slot [85,89] → distance = 10, passes.
         ctx = _ctx(_slot(85, 89), config=cfg, forecast=_forecast(75.0))
         assert DistanceGate().check(ctx) is None
-        assert ctx.distance == 10.0
 
     def test_fire_when_too_close(self):
         cfg = StrategyConfig(no_distance_threshold_f=8)

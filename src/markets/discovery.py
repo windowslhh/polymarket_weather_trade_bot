@@ -285,7 +285,9 @@ async def discover_weather_markets(
                         )
                         continue
 
-                    slot_spread = abs(1.0 - price_yes - price_no) if price_yes > 0 and price_no > 0 else None
+                    # price_no is guaranteed > 0 by the D1 filter above;
+                    # spread is defined only when both sides have prices.
+                    slot_spread = abs(1.0 - price_yes - price_no) if price_yes > 0 else None
 
                     # Skip illiquid slots
                     if slot_spread is not None and slot_spread > max_spread:
