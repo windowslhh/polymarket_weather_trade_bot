@@ -80,6 +80,12 @@ async def reconcile_pending_orders(
         substantive DB/CLOB disagreements.  Tests set False to assert
         the alert path without terminating the test process.
     """
+    # Review 🟡 #6: resolve the SELL hybrid-state window BEFORE touching
+    # pending BUYs.  A SELL order that finalized but crashed before
+    # close_positions_for_token leaves the position open; fix that first
+    # so subsequent size calculations reflect the truth.
+    await _reconcile_sell_hybrid_state(store, alerter)
+
     pending = await store.get_pending_orders()
     if not pending:
         logger.info("Reconciler: no pending orders to reconcile")
@@ -249,3 +255,41 @@ async def _force_fail_by_id(store: Store, row_id: int, reason: str) -> None:
         (reason[:500], row_id),
     )
     await store.db.commit()
+
+
+async def _reconcile_sell_hybrid_state(
+    store: Store, alerter: Alerter,
+) -> None:
+    """Close positions whose latest SELL order is filled but whose
+    position row is still open — the exact crash-between-commits window.
+
+    Heal by closing at the SELL price.  Realized P&L is computed as
+    (sell_price − entry_price) × shares, same as
+    close_positions_for_token does.
+    """
+    rows = await store.get_filled_sells_with_open_positions()
+    if not rows:
+        return
+    logger.warning(
+        "Reconciler: %d position(s) have a filled SELL but are still open — "
+        "closing now to heal SELL hybrid state",
+        len(rows),
+    )
+    for r in rows:
+        entry = float(r["entry_price"])
+        sell = float(r["price"])
+        shares = float(r["shares"])
+        realized = (sell - entry) * shares
+        await store.close_position(
+            position_id=r["position_id"],
+            exit_reason="reconciler: filled SELL orphan close",
+            exit_price=sell,
+            realized_pnl=realized,
+        )
+        await alerter.send(
+            "warning",
+            f"Reconciler: closed orphaned position id={r['position_id']} "
+            f"(event={r['event_id'][:10]}, token={r['token_id'][:10]}) "
+            f"at sell_price={sell:.4f}, realized_pnl=${realized:.2f}. "
+            f"This should be rare — crash after SELL fill, before close_position.",
+        )

@@ -224,6 +224,55 @@ async def test_probe_exception_leaves_pending_with_critical():
 
 
 @pytest.mark.asyncio
+async def test_sell_hybrid_state_closed_on_reconcile():
+    """Review 🟡 #6: a filled SELL paired with an open position row — the
+    crash window between finalize_sell_order and close_positions_for_token
+    — must be healed by the reconciler.
+    """
+    import tempfile
+    from pathlib import Path
+    tmp = Path(tempfile.mkdtemp()) / "bot.db"
+    store = Store(tmp)
+    await store.initialize()
+    alerter = _alerter()
+
+    # Seed a BUY position that should now be closed.
+    pos_id = await store.insert_position(
+        event_id="ev_x", token_id="tok_x", token_type="NO",
+        city="Chicago", slot_label="80-81°F", side="BUY",
+        entry_price=0.60, size_usd=6.0, shares=10.0,
+        strategy="B", buy_reason="test",
+    )
+    # Seed the orders side: a filled SELL for same (event, token).
+    await store.db.execute(
+        """INSERT INTO orders
+           (order_id, event_id, token_id, side, price, size_usd,
+            status, filled_at, idempotency_key)
+           VALUES ('clob_sell_1', 'ev_x', 'tok_x', 'SELL', 0.75, 7.5,
+                   'filled', datetime('now'), 'sell_key_1')""",
+    )
+    await store.db.commit()
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=None, is_paper=True,
+    )
+
+    async with store.db.execute(
+        "SELECT status, exit_price, realized_pnl FROM positions WHERE id=?",
+        (pos_id,),
+    ) as cur:
+        row = dict(await cur.fetchone())
+    assert row["status"] == "closed"
+    assert row["exit_price"] == 0.75
+    # Realized = (0.75 - 0.60) * 10 shares = 1.5
+    assert abs(row["realized_pnl"] - 1.5) < 1e-6
+    # Alerter receives one "warning" about the heal.
+    call_levels = [c.args[0] for c in alerter.send.call_args_list]
+    assert "warning" in call_levels
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_live_mode_without_probe_fails_and_criticals():
     store = await _mk_store_with_pending(key="keyNoprobe")
     alerter = _alerter()

@@ -420,6 +420,42 @@ class Store:
         )
         await self.db.commit()
 
+    async def get_filled_sells_with_open_positions(self) -> list[dict]:
+        """Review 🟡 #6: reconcile the SELL hybrid-state window.
+
+        The executor's SELL path runs finalize_sell_order and
+        close_positions_for_token as two separate commits.  If we crash
+        between them, we have an orders row with status='filled' (SELL)
+        and an open position for the same (event_id, token_id) that
+        should be closed.  This query finds exactly that pairing so
+        the startup reconciler can heal it.
+        """
+        async with self.db.execute(
+            """SELECT o.idempotency_key, o.order_id, o.price, o.event_id,
+                      o.token_id, p.id AS position_id, p.entry_price,
+                      p.shares, p.strategy
+               FROM orders o
+               JOIN positions p
+                 ON p.event_id = o.event_id
+                AND p.token_id = o.token_id
+                AND p.status = 'open'
+               WHERE o.side = 'SELL'
+                 AND o.status = 'filled'
+                 -- Same (event, token) may have multiple SELL rows over
+                 -- time (e.g. historical TRIM then later EXIT); we only
+                 -- care about the latest by filled_at.  A subquery picks
+                 -- the latest filled SELL per (event_id, token_id).
+                 AND o.filled_at = (
+                     SELECT MAX(filled_at) FROM orders o2
+                     WHERE o2.event_id = o.event_id
+                       AND o2.token_id = o.token_id
+                       AND o2.side = 'SELL'
+                       AND o2.status = 'filled'
+                 )"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
     async def mark_order_filled_orphan(
         self, idempotency_key: str, order_id: str,
     ) -> None:
