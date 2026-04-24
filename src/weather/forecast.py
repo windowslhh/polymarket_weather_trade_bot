@@ -29,8 +29,32 @@ ENSEMBLE_MODELS = [
 
 DEFAULT_CONFIDENCE_F = 4.0
 
-# Last successful forecast cache (fallback on API failure)
-_last_forecast_cache: dict[str, Forecast] = {}
+# FIX-12: fallback cache now carries a timestamp so stale-on-failure reuse is
+# bounded.  Before, an API outage lasting longer than a day would keep the bot
+# trading on yesterday's forecast.  The 3-hour TTL is generous enough to ride
+# out transient Open-Meteo hiccups without freezing decisions on a dead cache.
+FORECAST_CACHE_TTL_HOURS = 3.0
+_last_forecast_cache: dict[str, tuple[datetime, Forecast]] = {}
+
+
+def _cache_forecast(city_name: str, forecast: Forecast) -> None:
+    """Store a successful forecast with its wall-clock timestamp."""
+    from datetime import datetime, timezone as _tz
+    _last_forecast_cache[city_name] = (datetime.now(_tz.utc), forecast)
+
+
+def _get_cached_forecast(city_name: str) -> Forecast | None:
+    """Return the cached forecast only if it's inside the TTL window."""
+    from datetime import datetime, timedelta, timezone as _tz
+    entry = _last_forecast_cache.get(city_name)
+    if entry is None:
+        return None
+    ts, forecast = entry
+    if datetime.now(_tz.utc) - ts > timedelta(hours=FORECAST_CACHE_TTL_HOURS):
+        # Evict to prevent unbounded staleness reuse.
+        _last_forecast_cache.pop(city_name, None)
+        return None
+    return forecast
 
 
 async def get_ensemble_forecast(
@@ -217,16 +241,21 @@ async def get_forecast(
                 forecast = single
                 logger.warning("Forecast %s: Single model fallback %.1f°F", city.name, single.predicted_high_f)
             else:
-                # Last resort: cached forecast
-                cached = _last_forecast_cache.get(city.name)
+                # Last resort: cached forecast — FIX-12 enforces a TTL so
+                # we don't reuse a multi-day-old forecast when every live
+                # source stays broken.
+                cached = _get_cached_forecast(city.name)
                 if cached:
-                    logger.warning("Forecast %s: Using cached forecast (all APIs failed)", city.name)
+                    logger.warning(
+                        "Forecast %s: Using cached forecast (all APIs failed, "
+                        "within %.1fh TTL)", city.name, FORECAST_CACHE_TTL_HOURS,
+                    )
                     forecast = cached
                 else:
                     raise RuntimeError(f"All forecast sources failed for {city.name}")
 
-        # Update cache
-        _last_forecast_cache[city.name] = forecast
+        # Update cache with fresh timestamp
+        _cache_forecast(city.name, forecast)
         return forecast
 
     finally:
