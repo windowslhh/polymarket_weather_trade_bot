@@ -47,7 +47,11 @@ class StrategyConfig:
     # letting the position bleed to near-zero before the EV gates finally
     # fire.  Chicago 80-81 TRIMs at 95% loss on 2026-04-15 were this pattern.
     # Set to a value > 1.0 to disable.
-    trim_price_stop_ratio: float = 0.25
+    # FIX-02 (2026-04-24): tightened from 0.25 → 0.20 now that TRIM runs
+    # every 15 min (not just 60).  Entry=0.645→exit=0.180 (Chicago 04-15,
+    # 72% loss) could have been caught an hour earlier with 0.20 at a
+    # 15-min cadence; keeping 0.25 wastes the latency gain.
+    trim_price_stop_ratio: float = 0.20
     # Bug #1 fix (2026-04-18): reject entries where the model's win_prob
     # disagrees with the market-implied NO price by more than this many
     # points.  Applies to both standard-NO and locked-win branches via

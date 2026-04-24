@@ -641,6 +641,36 @@ class Rebalancer:
                         local_hour=local_hour,
                     )
 
+                    # FIX-02: run TRIM evaluation at 15-min cadence so price-stop
+                    # and EV-decay exits fire at finer granularity than the
+                    # 60-min full cycle.  Chicago 80-81 (2026-04-15) bled
+                    # 72% because TRIM was 60-min-only; a 15-min check would
+                    # have caught the price collapse roughly 45 min sooner.
+                    # Requires forecast (skipped when absent, e.g. D+1 events
+                    # with no tomorrow forecast cached).
+                    trim_signals: list[TradeSignal] = []
+                    if forecast is not None:
+                        entry_prices: dict[str, float] = {}
+                        entry_ev_map: dict[str, float] = {}
+                        locked_win_token_ids: set[str] = set()
+                        for pos in positions:
+                            tid = pos.get("token_id")
+                            if not tid:
+                                continue
+                            if "LOCKED WIN" in (pos.get("buy_reason") or ""):
+                                locked_win_token_ids.add(tid)
+                            if pos.get("entry_price"):
+                                entry_prices[tid] = pos["entry_price"]
+                            if pos.get("entry_ev") is not None:
+                                entry_ev_map[tid] = pos["entry_ev"]
+                        trim_signals = evaluate_trim_signals(
+                            event_obj, forecast, held_no_slots, strat_cfg, error_dist,
+                            entry_prices=entry_prices,
+                            locked_win_token_ids=locked_win_token_ids,
+                            daily_max_f=daily_max,
+                            entry_ev_map=entry_ev_map,
+                        )
+
                     # P0-3 FIX: Query exposure once before loop, accumulate in-memory
                     strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
                     strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
@@ -666,6 +696,15 @@ class Rebalancer:
                         self._recent_exits[sig.token_id] = now
                         signals.append(sig)
 
+                    # Tag TRIM signals — reason was already built by the
+                    # evaluator (e.g. "TRIM [price_stop]: 0.645→0.180");
+                    # we only prefix the strategy tag.
+                    for sig in trim_signals:
+                        sig.strategy = strat_name
+                        sig.reason = f"[{strat_name}] {sig.reason or 'TRIM'}"
+                        self._recent_exits[sig.token_id] = now
+                        signals.append(sig)
+
                 if skipped_no_obs:
                     logger.warning(
                         "Position check: skipped %d event(s) due to missing METAR observations or daily_max — "
@@ -675,10 +714,15 @@ class Rebalancer:
 
                 # Execute any urgent trades
                 if signals:
-                    logger.info("Position check: %d urgent signals (locked=%d, exit=%d)",
-                               len(signals),
-                               sum(1 for s in signals if s.side.value == "BUY"),
-                               sum(1 for s in signals if s.side.value == "SELL"))
+                    # FIX-02: SELL signals now include both EXIT and TRIM since
+                    # TRIM runs in position_check; break them out in the log.
+                    n_buy = sum(1 for s in signals if s.side.value == "BUY")
+                    n_sell = sum(1 for s in signals if s.side.value == "SELL")
+                    n_trim = sum(1 for s in signals if "TRIM" in (s.reason or ""))
+                    logger.info(
+                        "Position check: %d urgent signals (locked=%d, exit=%d, trim=%d)",
+                        len(signals), n_buy, n_sell - n_trim, n_trim,
+                    )
                     await self._executor.execute_signals(signals)
                 else:
                     logger.debug("Position check: no urgent signals")
