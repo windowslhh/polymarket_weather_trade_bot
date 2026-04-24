@@ -19,6 +19,16 @@ ORDER_MAX_ATTEMPTS = 3
 # cap to keep the bot responsive rather than stalling for minutes.
 RATE_LIMIT_CAP_S = 30.0
 
+# Review Blocker #1 (2026-04-24): timeouts must NOT retry in-cycle.
+# `asyncio.timeout(N)` cancels the awaiting task but cannot cancel the
+# underlying synchronous HTTP POST running in the asyncio.to_thread worker.
+# If we retry, the CLOB may end up creating TWO orders — our
+# idempotency_key is a client-side breadcrumb only, py-clob-client does
+# NOT forward it to Polymarket.  We short-circuit to success=False instead
+# and let the startup reconciler (FIX-05) reconcile against CLOB on the
+# next bot start.
+TIMEOUT_RETRIES = False
+
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
     """Best-effort heuristic: py-clob-client wraps requests, so 429s arrive as
@@ -163,10 +173,21 @@ class ClobClient:
                 return OrderResult(order_id=order_id, success=True)
             except TimeoutError as e:
                 last_exc = e
-                logger.warning(
-                    "place_limit_order timed out after %.0fs (attempt=%d/%d)",
+                logger.error(
+                    "place_limit_order TIMED OUT after %.0fs (attempt=%d/%d) — "
+                    "NOT retrying.  The underlying HTTP POST may have reached CLOB "
+                    "and created an order despite the Python-side timeout.  "
+                    "Startup reconciler will resolve on next restart.",
                     ORDER_TIMEOUT_S, attempt + 1, ORDER_MAX_ATTEMPTS,
                 )
+                if not TIMEOUT_RETRIES:
+                    return OrderResult(
+                        order_id="", success=False,
+                        message=(
+                            "timeout after %.0fs — NOT retried to avoid double-order "
+                            "(CLOB may still have accepted); reconciler will resolve"
+                        ) % ORDER_TIMEOUT_S,
+                    )
             except Exception as e:
                 last_exc = e
                 if _is_rate_limit_error(e):

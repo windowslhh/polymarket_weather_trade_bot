@@ -123,8 +123,17 @@ async def test_rate_limit_triggers_longer_backoff(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_timeout_retries_then_fails(monkeypatch):
-    """A hanging create_and_post_order must time out rather than freeze."""
+async def test_timeout_does_not_retry(monkeypatch):
+    """Review Blocker #1: TimeoutError must NOT trigger a retry.
+
+    `asyncio.timeout` cancels the awaiter but cannot cancel the underlying
+    synchronous HTTP POST running in the to_thread worker.  A naive retry
+    can create a second order on CLOB — py-clob-client does not surface
+    the client-side idempotency_key to Polymarket, so there is no
+    server-side dedup we can lean on.
+
+    Expected behaviour: first timeout → immediate failure, one attempt.
+    """
     client = _make_client()
 
     def hang(*_):
@@ -136,7 +145,7 @@ async def test_timeout_retries_then_fails(monkeypatch):
 
     # Shrink the timeout so the test is quick.
     monkeypatch.setattr(clob_mod, "ORDER_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(clob_mod, "ORDER_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(clob_mod, "ORDER_MAX_ATTEMPTS", 3)
 
     async def _noop(*_):
         return None
@@ -147,6 +156,10 @@ async def test_timeout_retries_then_fails(monkeypatch):
         token_id="tok", side="BUY", price=0.5, size=10,
     )
     assert not result.success
+    assert "timeout" in result.message.lower()
+    assert client._client.create_and_post_order.call_count == 1, (
+        "Timeout must not trigger a retry — would risk double-order."
+    )
 
 
 @pytest.mark.asyncio
