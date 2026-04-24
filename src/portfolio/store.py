@@ -420,6 +420,40 @@ class Store:
         )
         await self.db.commit()
 
+    async def mark_order_filled_orphan(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Reconciler-only: mark an orders row 'filled' without inserting a
+        position.  Used when CLOB confirms a fill for a pending BUY but we
+        lack the signal metadata (strategy/reason/slot) needed to create a
+        proper position row — the operator completes that by hand.
+
+        Semantically distinct from `finalize_sell_order` (which assumes the
+        position existed and the orders-row update is one side of a close)
+        even though the SQL body is similar; keeping them separate so future
+        audit queries can tell ops-created orphans from real SELL fills.
+        """
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now'), "
+            "failure_reason = 'orphan_reconciled_by_operator' "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
+    async def mark_order_open(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Reconciler: CLOB says the order is still resting unfilled in its
+        order book.  Promote our DB row to 'open' so it can be cleanly
+        re-reconciled later (either by a fill or by an operator cancel).
+        """
+        await self.db.execute(
+            "UPDATE orders SET status = 'open', order_id = ? WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
     async def mark_order_failed(
         self, idempotency_key: str, reason: str,
     ) -> None:

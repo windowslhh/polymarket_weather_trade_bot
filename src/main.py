@@ -147,17 +147,50 @@ async def run(args: argparse.Namespace) -> None:
     store = Store(config.db_path)
     await store.initialize()
 
-    # FIX-05: resolve orphaned pending orders from previous runs BEFORE
-    # generating any new signals.  Without this, the operator cannot
-    # tell a fresh pending order (legitimate, in-flight) from an old
-    # orphan (crashed mid-fill), so they can't trust /api/status or
-    # the positions table.  In paper/dry_run mode this just marks old
-    # pending rows failed; in live mode it probes CLOB (today: no
-    # probe configured → all pending fail with a critical alert).
+    # FIX-05 + Review Blocker #2: resolve orphaned pending orders before
+    # generating any new signals.  In live mode we probe the CLOB via
+    # get_trades / get_orders (matched on token_id / side / price /
+    # size_shares since py-clob-client doesn't echo our idempotency_key
+    # back to Polymarket — see clob_client.probe_order_status).  Paper
+    # and dry-run mark all pending rows failed (no live CLOB to probe).
+    live_clob_for_probe = ClobClient(config)
+
+    async def _probe(row: dict):
+        """Adapter: reconciler hands us the orders row; we unpack into the
+        CLOB probe's parameters."""
+        from datetime import datetime, timezone
+        created_at_epoch = None
+        created_at = row.get("created_at")
+        if created_at:
+            try:
+                # SQLite stores ISO8601 naive UTC; pad to UTC and convert.
+                dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                # Widen the window by 5 minutes to accommodate clock skew.
+                created_at_epoch = int(dt.timestamp()) - 300
+            except ValueError:
+                pass
+        price_usd = float(row.get("price", 0))
+        size_usd = float(row.get("size_usd", 0))
+        size_shares = size_usd / price_usd if price_usd > 0 else 0.0
+        probe = await live_clob_for_probe.probe_order_status(
+            token_id=row["token_id"], side=row["side"],
+            price=price_usd, size_shares=size_shares,
+            created_at_epoch=created_at_epoch,
+        )
+        # Bridge ProbeResult (clob_client) → ClobOrderStatus (reconciler).
+        from src.recovery.reconciler import ClobOrderStatus
+        return ClobOrderStatus(
+            state=probe.state, order_id=probe.order_id,
+            price=probe.price, size=probe.size, message=probe.message,
+        )
+
+    is_paper = config.paper or config.dry_run
     await reconcile_pending_orders(
         store=store, alerter=alerter,
-        query_clob_order=None,  # TODO: wire up a py-clob-client probe
-        is_paper=(config.paper or config.dry_run),
+        query_clob_order=None if is_paper else _probe,
+        is_paper=is_paper,
     )
 
     # Build empirical forecast error distributions (cached, ~7 day refresh)

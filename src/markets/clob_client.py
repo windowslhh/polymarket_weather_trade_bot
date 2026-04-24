@@ -263,3 +263,144 @@ class ClobClient:
         # Positions are typically tracked locally via our portfolio module.
         # This is a placeholder for any future API integration.
         return []
+
+    async def probe_order_status(
+        self,
+        *,
+        token_id: str,
+        side: str,
+        price: float,
+        size_shares: float,
+        created_at_epoch: int | None = None,
+    ) -> "ProbeResult":
+        """Review Blocker #2: look up CLOB for an order matching our intent.
+
+        Used by the startup reconciler to resolve a pending orders row
+        when we crashed between `create_and_post_order` and the local
+        position insert.  py-clob-client does NOT expose our client-side
+        idempotency_key to Polymarket, so we match by the observable
+        quadruple (token_id, side, price, size_shares).  This is the
+        best we can do without a server-side dedup key.
+
+        Returns ProbeResult(state='filled'|'open'|'unknown'|'unreachable', ...).
+
+        Strategy:
+        1. Call get_trades(asset_id=token_id, after=created_at_epoch-300)
+           and scan for a matching trade.  If found → 'filled'.
+        2. Else call get_orders(asset_id=token_id) and scan for a matching
+           open order.  If found → 'open' (resting limit on CLOB).
+        3. Else → 'unknown' (safe to mark failed; a subsequent manual
+           review of CLOB trade history confirms).
+
+        Paper/dry-run: returns 'unreachable' immediately (there is no
+        real CLOB state to probe).
+        """
+        if self._config.dry_run or self._config.paper:
+            return ProbeResult(
+                state="unreachable",
+                message="paper/dry-run: no live CLOB to probe",
+            )
+
+        try:
+            from py_clob_client.clob_types import OpenOrderParams, TradeParams
+        except ImportError:
+            return ProbeResult(
+                state="unreachable", message="py-clob-client not installed",
+            )
+
+        client = self._get_client()
+        tolerance_price = 0.005
+        tolerance_size = 0.5
+
+        def _match_trade(trade: dict) -> bool:
+            try:
+                tside = str(trade.get("side", "")).upper()
+                tprice = float(trade.get("price", 0))
+                tsize = float(trade.get("size", 0))
+            except (TypeError, ValueError):
+                return False
+            if tside != side.upper():
+                return False
+            if abs(tprice - price) > tolerance_price:
+                return False
+            if abs(tsize - size_shares) > tolerance_size:
+                return False
+            return True
+
+        def _match_order(order: dict) -> bool:
+            try:
+                oside = str(order.get("side", "")).upper()
+                oprice = float(order.get("price", 0))
+                # 'original_size' | 'size_matched' etc — open orders generally
+                # expose 'original_size' + 'size_matched'; use the remaining
+                # size if available, otherwise original.
+                osize = float(order.get("original_size", order.get("size", 0)))
+            except (TypeError, ValueError):
+                return False
+            if oside != side.upper():
+                return False
+            if abs(oprice - price) > tolerance_price:
+                return False
+            if abs(osize - size_shares) > tolerance_size:
+                return False
+            return True
+
+        try:
+            # Probe trades (confirmed fills) first.
+            trade_params = TradeParams(
+                asset_id=token_id, after=created_at_epoch,
+            )
+            trades_resp = await asyncio.to_thread(client.get_trades, trade_params)
+            trades_list = _extract_list(trades_resp)
+            for t in trades_list:
+                if _match_trade(t):
+                    return ProbeResult(
+                        state="filled",
+                        order_id=str(t.get("id") or t.get("order_id") or ""),
+                        price=float(t.get("price", 0)),
+                        size=float(t.get("size", 0)),
+                        message="matched via get_trades",
+                    )
+
+            # Probe open orders (still resting).
+            oparams = OpenOrderParams(asset_id=token_id)
+            orders_resp = await asyncio.to_thread(client.get_orders, oparams)
+            orders_list = _extract_list(orders_resp)
+            for o in orders_list:
+                if _match_order(o):
+                    return ProbeResult(
+                        state="open",
+                        order_id=str(o.get("id") or o.get("order_id") or ""),
+                        price=float(o.get("price", 0)),
+                        size=float(o.get("original_size", o.get("size", 0))),
+                        message="matched via get_orders",
+                    )
+        except Exception as exc:
+            logger.exception("probe_order_status raised")
+            return ProbeResult(state="unreachable", message=str(exc))
+
+        return ProbeResult(
+            state="unknown",
+            message="no matching trade or open order on CLOB (safe to mark failed)",
+        )
+
+
+@dataclass
+class ProbeResult:
+    """Reconciler-facing view of CLOB state for one pending intent."""
+    state: str  # 'filled' | 'open' | 'unknown' | 'unreachable'
+    order_id: str = ""
+    price: float | None = None
+    size: float | None = None
+    message: str = ""
+
+
+def _extract_list(resp) -> list[dict]:
+    """py-clob-client sometimes returns {'data': [...], 'next_cursor': '...'}
+    and sometimes a bare list; normalise both."""
+    if isinstance(resp, dict) and "data" in resp:
+        v = resp["data"]
+        return v if isinstance(v, list) else []
+    if isinstance(resp, list):
+        return resp
+    return []

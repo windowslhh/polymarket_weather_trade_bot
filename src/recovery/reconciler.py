@@ -37,17 +37,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ClobOrderStatus:
-    """Outcome of asking CLOB about a single idempotency_key."""
-    state: str  # one of 'filled', 'cancelled', 'unknown', 'unreachable'
+    """Outcome of asking CLOB about a single pending order row."""
+    state: str  # one of 'filled', 'open', 'cancelled', 'unknown', 'unreachable'
     order_id: str = ""
     price: float | None = None
     size: float | None = None
     message: str = ""
 
 
-# Signature for the CLOB probe that reconciler expects callers to provide.
-# Kept abstract so we don't couple the recovery layer to py-clob-client.
-QueryFn = Callable[[str], Awaitable[ClobOrderStatus]]
+# Signature for the CLOB probe.  Takes the full orders row (dict) so the
+# probe can match on token/side/price/size — py-clob-client doesn't know
+# about our idempotency_key, so we need the whole intent to find the
+# corresponding CLOB record.
+QueryFn = Callable[[dict], Awaitable[ClobOrderStatus]]
 
 
 async def reconcile_pending_orders(
@@ -123,7 +125,7 @@ async def reconcile_pending_orders(
             continue
 
         try:
-            status = await query_clob_order(key)
+            status = await query_clob_order(row)
         except Exception as exc:
             logger.exception("CLOB probe raised for key=%s", key)
             await alerter.send(
@@ -166,17 +168,32 @@ async def _apply_status(
             if exit_on_mismatch:
                 sys.exit(3)
             return
-        await store.finalize_sell_order(key, status.order_id)
         # Promote-only at the orders level; we do NOT insert the position
         # here because (a) we don't have full signal metadata (strategy,
         # reason, slot_label) in the orders row, and (b) the CLOB fill
         # pre-dates our visibility.  The operator manually creates the
-        # position from the CLOB fill record if needed.
+        # position from the CLOB fill record if needed.  Use the dedicated
+        # orphan helper so audit queries can tell this apart from a normal
+        # SELL-side finalization.
+        await store.mark_order_filled_orphan(key, status.order_id)
         await alerter.send(
             "warning",
             f"Reconciler: CLOB-filled orphan key={key[:8]} promoted to 'filled' "
             "in DB; position NOT auto-created — operator must reconcile "
             "positions table manually from CLOB fill history.",
+        )
+        return
+
+    if status.state == "open":
+        # CLOB still has it as a resting limit order.  Promote to 'open' so
+        # the bot doesn't treat this as a pending placement that needs
+        # re-attempting, but also so the next reconciler pass can match it
+        # when it eventually fills (or an operator cancels it).
+        await store.mark_order_open(key, status.order_id)
+        await alerter.send(
+            "info",
+            f"Reconciler: orphan key={key[:8]} is open on CLOB (order_id={status.order_id[:10]}); "
+            "left as 'open' in DB for later fill-reconciliation.",
         )
         return
 

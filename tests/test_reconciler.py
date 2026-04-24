@@ -78,8 +78,8 @@ async def test_clob_filled_promotes_order_to_filled():
     store = await _mk_store_with_pending(key="keyFILL")
     alerter = _alerter()
 
-    async def probe(key: str) -> ClobOrderStatus:
-        assert key == "keyFILL"
+    async def probe(row: dict) -> ClobOrderStatus:
+        assert row["idempotency_key"] == "keyFILL"
         return ClobOrderStatus(
             state="filled", order_id="clob_ord_X",
             price=0.45, size=10.0 / 0.45,  # matches intended size
@@ -103,11 +103,42 @@ async def test_clob_filled_promotes_order_to_filled():
 
 
 @pytest.mark.asyncio
+async def test_clob_open_promotes_to_open():
+    """Review Blocker #2: CLOB reports the order is still resting unfilled.
+
+    We promote the DB row to 'open' (not 'failed') so it can be
+    re-reconciled when it eventually fills or is cancelled.
+    """
+    store = await _mk_store_with_pending(key="keyOPEN")
+    alerter = _alerter()
+
+    async def probe(row: dict) -> ClobOrderStatus:
+        return ClobOrderStatus(
+            state="open", order_id="clob_live_99",
+            price=0.45, size=10.0 / 0.45,
+        )
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+    )
+
+    async with store.db.execute(
+        "SELECT status, order_id FROM orders"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "open"
+    assert rows[0]["order_id"] == "clob_live_99"
+    alerter.send.assert_called_once()
+    assert alerter.send.call_args[0][0] == "info"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_clob_cancelled_marks_failed():
     store = await _mk_store_with_pending(key="keyCAN")
     alerter = _alerter()
 
-    async def probe(key: str) -> ClobOrderStatus:
+    async def probe(row: dict) -> ClobOrderStatus:
         return ClobOrderStatus(state="cancelled", message="user cancel")
 
     await reconcile_pending_orders(
@@ -128,7 +159,7 @@ async def test_clob_unreachable_leaves_pending():
     store = await _mk_store_with_pending(key="keyHUH")
     alerter = _alerter()
 
-    async def probe(key: str) -> ClobOrderStatus:
+    async def probe(row: dict) -> ClobOrderStatus:
         return ClobOrderStatus(state="unreachable", message="timeout")
 
     await reconcile_pending_orders(
@@ -150,7 +181,7 @@ async def test_clob_price_mismatch_triggers_exit():
     store = await _mk_store_with_pending(key="keyBAD")
     alerter = _alerter()
 
-    async def probe(key: str) -> ClobOrderStatus:
+    async def probe(row: dict) -> ClobOrderStatus:
         # Wildly different price — we do NOT want to auto-reconcile this.
         return ClobOrderStatus(
             state="filled", order_id="X", price=0.90, size=11.1,
@@ -177,7 +208,7 @@ async def test_probe_exception_leaves_pending_with_critical():
     store = await _mk_store_with_pending(key="keyERR")
     alerter = _alerter()
 
-    async def probe(key: str) -> ClobOrderStatus:
+    async def probe(row: dict) -> ClobOrderStatus:
         raise RuntimeError("network blew up")
 
     await reconcile_pending_orders(
