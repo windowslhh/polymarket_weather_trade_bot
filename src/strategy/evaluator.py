@@ -277,7 +277,18 @@ def evaluate_trim_signals(
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
         price_for_ev = ep.get(slot.token_id_no, slot.price_no)
-        ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
+        # FIX-14: the entry-side gates bake in the taker fee (see
+        # gates.py::entry_fee_per_dollar); TRIM's own EV calculation did
+        # not, so a held position would look slightly more attractive
+        # post-entry than it did at entry — enough to keep a bleeding
+        # position alive past the relative-decay gate.  Subtract the same
+        # per-dollar fee so TRIM's EV is comparable to the entry_ev we
+        # stored on the position row.
+        ev = (
+            win_prob * (1.0 - price_for_ev)
+            - (1.0 - win_prob) * price_for_ev
+            - entry_fee_per_dollar(price_for_ev)
+        )
         ctx.win_prob = win_prob
         ctx.ev = ev
 
