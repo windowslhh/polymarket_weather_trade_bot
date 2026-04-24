@@ -401,9 +401,41 @@ class TestRelativeEvDecayGate:
         cfg = StrategyConfig(trim_ev_decay_ratio=0.75)
         ctx = _ctx(
             _slot(70, 74, token_no="tn"), config=cfg,
-            entry_ev_map={"tn": 0.08},
+            # FIX-P2-9: gate now requires a floating loss, so supply an
+            # entry_price > current price_no (slot default 0.80).
+            entry_ev_map={"tn": 0.08}, entry_prices={"tn": 0.90},
         )
         ctx.ev = -0.01  # gate = 0.08*0.25 = 0.02; -0.01 < 0.02 → fires
+        result = RelativeEvDecayGate().check(ctx)
+        assert result is not None and result.code == "relative"
+
+    def test_p2_9_skips_when_position_still_in_profit(self):
+        """FIX-P2-9: relative gate only fires on floating loss.
+
+        Same decayed EV signal as test_fire_when_ev_decayed_past_gate,
+        but entry_price < current price_no — we're in the green.  Trim
+        is premature; let the position ride rather than locking in a
+        smaller win.
+        """
+        cfg = StrategyConfig(trim_ev_decay_ratio=0.75)
+        ctx = _ctx(
+            _slot(70, 74, price_no=0.85, token_no="tn"), config=cfg,
+            entry_ev_map={"tn": 0.08},
+            entry_prices={"tn": 0.80},  # current 0.85 > entry → profit
+        )
+        ctx.ev = -0.01
+        assert RelativeEvDecayGate().check(ctx) is None
+
+    def test_p2_9_fires_with_legacy_position_no_entry_price(self):
+        """Legacy positions (no entry_price stored) fall through the
+        floating-loss guard so the absolute gate still protects them."""
+        cfg = StrategyConfig(trim_ev_decay_ratio=0.75)
+        ctx = _ctx(
+            _slot(70, 74, price_no=0.85, token_no="tn"), config=cfg,
+            entry_ev_map={"tn": 0.08},
+            entry_prices={},  # no entry_price recorded
+        )
+        ctx.ev = -0.01
         result = RelativeEvDecayGate().check(ctx)
         assert result is not None and result.code == "relative"
 
