@@ -4,9 +4,13 @@
 
 set -e
 
-BOT_DIR="/opt/weather-bot"
+# FIX-07: see full_reset_and_deploy.sh for rationale — must match the active
+# deploy dir, overridable for dev, and guarded against wrong-dir runs.
+BOT_DIR="${BOT_DIR:-/opt/weather-bot-new}"
 DB_PATH="$BOT_DIR/data/bot.db"
 BACKUP_DIR="$BOT_DIR/data/backups"
+
+[ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
 
 # 1. Stop the bot
 echo "Stopping bot..."

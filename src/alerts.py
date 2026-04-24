@@ -45,7 +45,17 @@ class Alerter:
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.post(self._webhook_url, json=payload)
         except Exception:
-            logger.debug("Webhook alert failed (non-critical)")
+            # FIX-M3: previously debug-level, which meant a silently broken
+            # webhook (wrong URL, dead server, firewall) left operators in the
+            # dark while `critical` events stopped reaching them.  Promote the
+            # self-failure to error so ops sees it in stdout/docker logs even
+            # without the downstream webhook.  The *original* alert is still
+            # written to logs by Alerter.send(), so the critical event isn't
+            # lost — we just surface the delivery failure too.
+            logger.error(
+                "Webhook delivery failed for level=%s (alert still in logs)", level,
+                exc_info=True,
+            )
 
     async def trade_executed(self, side: str, token_type: str, slot: str, city: str, size: float, ev: float) -> None:
         """Alert on trade execution."""

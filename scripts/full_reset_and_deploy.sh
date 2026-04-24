@@ -9,9 +9,14 @@
 
 set -e
 
-BOT_DIR="/opt/weather-bot"
+# FIX-07: default to the active deploy path but allow override. The old
+# /opt/weather-bot dir still exists on the VPS as a staging area — accidentally
+# blasting it would be catastrophic, so require the compose file to be present.
+BOT_DIR="${BOT_DIR:-/opt/weather-bot-new}"
 DB_PATH="$BOT_DIR/data/bot.db"
 BACKUP_DIR="$BOT_DIR/data/backups"
+
+[ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
 
 cd "$BOT_DIR"
 

@@ -166,8 +166,8 @@ async def run(args: argparse.Namespace) -> None:
     logger.info("Backfilling today's METAR observations...")
     await rebalancer.backfill_today_observations()
 
-    # Setup scheduler
-    scheduler = setup_scheduler(config, rebalancer)
+    # Setup scheduler — alerter wired in so FIX-06's job_error listener can page.
+    scheduler = setup_scheduler(config, rebalancer, alerter=alerter)
 
     # Handle graceful shutdown
     loop = asyncio.get_event_loop()
