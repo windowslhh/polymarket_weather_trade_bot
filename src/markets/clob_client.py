@@ -3,11 +3,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 
 from src.config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+# FIX-04: network resilience knobs. Kept module-level so tests can monkeypatch
+# them without touching the client.
+ORDER_TIMEOUT_S = 30.0
+ORDER_MAX_ATTEMPTS = 3
+# 429 rate-limit: sleep min(2**n + jitter, cap). Polymarket doesn't publish a
+# Retry-After contract on the CLOB, so we rely on exponential-with-jitter and
+# cap to keep the bot responsive rather than stalling for minutes.
+RATE_LIMIT_CAP_S = 30.0
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Best-effort heuristic: py-clob-client wraps requests, so 429s arrive as
+    generic exceptions whose stringified form contains '429' or 'rate limit'.
+    """
+    msg = str(exc).lower()
+    return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many" in msg
 
 
 @dataclass
@@ -108,36 +126,72 @@ class ClobClient:
             return OrderResult(order_id=f"paper_{suffix}", success=True, message="paper trade")
 
         client = self._get_client()
-        try:
-            from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client.order_builder.constants import BUY, SELL
 
-            order_side = BUY if side.upper() == "BUY" else SELL
-            order = await asyncio.to_thread(
-                client.create_and_post_order,
-                {
-                    "tokenID": token_id,
-                    "price": price,
-                    "side": order_side,
-                    "size": size,
-                },
-            )
-            order_id = order.get("orderID", "") if isinstance(order, dict) else str(order)
-            logger.info(
-                "Order placed: %s %s @ %.4f x %.2f -> %s%s",
-                side, token_id, price, size, order_id, key_suffix,
-            )
-            # FIX-M4: empty order_id from CLOB means the API accepted the call
-            # but returned no handle — treat as failure so the executor does
-            # not record a fill without a traceable source_order_id.
-            if not order_id:
-                return OrderResult(
-                    order_id="", success=False,
-                    message="CLOB returned empty order_id",
+        order_side = BUY if side.upper() == "BUY" else SELL
+        order_payload = {
+            "tokenID": token_id,
+            "price": price,
+            "side": order_side,
+            "size": size,
+        }
+
+        # FIX-04: bounded timeout, retry with exponential backoff on transient
+        # failures, distinct longer backoff on 429.  Without the timeout, a hung
+        # call to create_and_post_order freezes the asyncio.to_thread executor
+        # indefinitely — in prod we've seen 60+ minute hangs.
+        last_exc: Exception | None = None
+        for attempt in range(ORDER_MAX_ATTEMPTS):
+            try:
+                async with asyncio.timeout(ORDER_TIMEOUT_S):
+                    order = await asyncio.to_thread(
+                        client.create_and_post_order, order_payload,
+                    )
+                order_id = (
+                    order.get("orderID", "") if isinstance(order, dict) else str(order)
                 )
-            return OrderResult(order_id=order_id, success=True)
-        except Exception as e:
-            logger.exception("Failed to place order")
-            return OrderResult(order_id="", success=False, message=str(e))
+                logger.info(
+                    "Order placed: %s %s @ %.4f x %.2f -> %s%s (attempt=%d)",
+                    side, token_id, price, size, order_id, key_suffix, attempt + 1,
+                )
+                # FIX-M4: empty order_id is treated as failure (see above).
+                if not order_id:
+                    return OrderResult(
+                        order_id="", success=False,
+                        message="CLOB returned empty order_id",
+                    )
+                return OrderResult(order_id=order_id, success=True)
+            except TimeoutError as e:
+                last_exc = e
+                logger.warning(
+                    "place_limit_order timed out after %.0fs (attempt=%d/%d)",
+                    ORDER_TIMEOUT_S, attempt + 1, ORDER_MAX_ATTEMPTS,
+                )
+            except Exception as e:
+                last_exc = e
+                if _is_rate_limit_error(e):
+                    sleep_s = min(2 ** attempt + random.random(), RATE_LIMIT_CAP_S)
+                    logger.warning(
+                        "CLOB 429 on place_limit_order (attempt=%d/%d), "
+                        "backing off %.2fs",
+                        attempt + 1, ORDER_MAX_ATTEMPTS, sleep_s,
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+                logger.warning(
+                    "place_limit_order failed (attempt=%d/%d): %s",
+                    attempt + 1, ORDER_MAX_ATTEMPTS, e,
+                )
+            # Non-rate-limit retriable path: short exponential backoff between
+            # retries so we don't hammer the CLOB. Skip the sleep on the final
+            # attempt since we're about to return anyway.
+            if attempt < ORDER_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(0.5 * (2 ** attempt) + random.random() * 0.25)
+
+        logger.exception("Order placement exhausted retries", exc_info=last_exc)
+        return OrderResult(
+            order_id="", success=False, message=str(last_exc) if last_exc else "retries exhausted",
+        )
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order."""
