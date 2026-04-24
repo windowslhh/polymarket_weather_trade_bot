@@ -14,6 +14,7 @@ from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
+from src.recovery.reconciler import reconcile_pending_orders
 from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
@@ -145,6 +146,19 @@ async def run(args: argparse.Namespace) -> None:
     # Initialize components
     store = Store(config.db_path)
     await store.initialize()
+
+    # FIX-05: resolve orphaned pending orders from previous runs BEFORE
+    # generating any new signals.  Without this, the operator cannot
+    # tell a fresh pending order (legitimate, in-flight) from an old
+    # orphan (crashed mid-fill), so they can't trust /api/status or
+    # the positions table.  In paper/dry_run mode this just marks old
+    # pending rows failed; in live mode it probes CLOB (today: no
+    # probe configured → all pending fail with a critical alert).
+    await reconcile_pending_orders(
+        store=store, alerter=alerter,
+        query_clob_order=None,  # TODO: wire up a py-clob-client probe
+        is_paper=(config.paper or config.dry_run),
+    )
 
     # Build empirical forecast error distributions (cached, ~7 day refresh)
     logger.info("Loading forecast error distributions...")

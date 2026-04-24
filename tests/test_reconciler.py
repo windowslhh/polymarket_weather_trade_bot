@@ -1,0 +1,209 @@
+"""FIX-05: startup reconciler for orphaned pending orders.
+
+Each test sets up a pending order row (the output of the FIX-03 flow
+crashing between CLOB call and the atomic fill) and asserts the
+reconciler takes the documented action.
+"""
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from src.alerts import Alerter
+from src.portfolio.store import Store
+from src.recovery.reconciler import (
+    ClobOrderStatus,
+    reconcile_pending_orders,
+)
+
+
+async def _mk_store_with_pending(key: str = "key123", order_id: str = "") -> Store:
+    tmp = Path(tempfile.mkdtemp()) / "bot.db"
+    store = Store(tmp)
+    await store.initialize()
+    await store.insert_pending_order(
+        idempotency_key=key,
+        event_id="ev_1", token_id="tok_1",
+        side="BUY", price=0.45, size_usd=10.0,
+    )
+    return store
+
+
+def _alerter() -> Alerter:
+    a = Alerter(webhook_url="")
+    a.send = AsyncMock()  # type: ignore[method-assign]
+    return a
+
+
+@pytest.mark.asyncio
+async def test_no_pending_orders_is_a_noop():
+    tmp = Path(tempfile.mkdtemp()) / "bot.db"
+    store = Store(tmp)
+    await store.initialize()
+    alerter = _alerter()
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=None, is_paper=True,
+    )
+
+    alerter.send.assert_not_called()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_marks_all_pending_as_failed():
+    store = await _mk_store_with_pending()
+    alerter = _alerter()
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=None, is_paper=True,
+    )
+
+    async with store.db.execute(
+        "SELECT status, failure_reason FROM orders"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert "paper_mode_orphan" in rows[0]["failure_reason"]
+    alerter.send.assert_called_once()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_clob_filled_promotes_order_to_filled():
+    store = await _mk_store_with_pending(key="keyFILL")
+    alerter = _alerter()
+
+    async def probe(key: str) -> ClobOrderStatus:
+        assert key == "keyFILL"
+        return ClobOrderStatus(
+            state="filled", order_id="clob_ord_X",
+            price=0.45, size=10.0 / 0.45,  # matches intended size
+        )
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+    )
+
+    async with store.db.execute(
+        "SELECT status, order_id FROM orders"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "filled"
+    assert rows[0]["order_id"] == "clob_ord_X"
+    alerter.send.assert_called_once()
+    args, _ = alerter.send.call_args
+    assert args[0] == "warning"
+    assert "promoted to 'filled'" in args[1]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_clob_cancelled_marks_failed():
+    store = await _mk_store_with_pending(key="keyCAN")
+    alerter = _alerter()
+
+    async def probe(key: str) -> ClobOrderStatus:
+        return ClobOrderStatus(state="cancelled", message="user cancel")
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+    )
+
+    async with store.db.execute(
+        "SELECT status, failure_reason FROM orders"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "failed"
+    assert "cancelled" in rows[0]["failure_reason"]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_clob_unreachable_leaves_pending():
+    store = await _mk_store_with_pending(key="keyHUH")
+    alerter = _alerter()
+
+    async def probe(key: str) -> ClobOrderStatus:
+        return ClobOrderStatus(state="unreachable", message="timeout")
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+    )
+
+    async with store.db.execute("SELECT status FROM orders") as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "pending", (
+        "Unreachable CLOB must not mutate state — retry on next startup"
+    )
+    alerter.send.assert_called_once()
+    assert alerter.send.call_args[0][0] == "critical"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_clob_price_mismatch_triggers_exit():
+    store = await _mk_store_with_pending(key="keyBAD")
+    alerter = _alerter()
+
+    async def probe(key: str) -> ClobOrderStatus:
+        # Wildly different price — we do NOT want to auto-reconcile this.
+        return ClobOrderStatus(
+            state="filled", order_id="X", price=0.90, size=11.1,
+        )
+
+    # exit_on_mismatch=False so the test process survives; assert alert.
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+        exit_on_mismatch=False,
+    )
+
+    async with store.db.execute("SELECT status FROM orders") as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    # Mismatch path: we do NOT promote to filled.  Row is still pending.
+    assert rows[0]["status"] == "pending"
+    alerter.send.assert_called_once()
+    assert alerter.send.call_args[0][0] == "critical"
+    assert "MISMATCH" in alerter.send.call_args[0][1]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_probe_exception_leaves_pending_with_critical():
+    store = await _mk_store_with_pending(key="keyERR")
+    alerter = _alerter()
+
+    async def probe(key: str) -> ClobOrderStatus:
+        raise RuntimeError("network blew up")
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=probe, is_paper=False,
+    )
+
+    async with store.db.execute("SELECT status FROM orders") as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "pending"  # leave for next startup
+    alerter.send.assert_called_once()
+    assert alerter.send.call_args[0][0] == "critical"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_mode_without_probe_fails_and_criticals():
+    store = await _mk_store_with_pending(key="keyNoprobe")
+    alerter = _alerter()
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=None, is_paper=False,
+    )
+
+    async with store.db.execute("SELECT status FROM orders") as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "failed"
+    alerter.send.assert_called_once()
+    assert alerter.send.call_args[0][0] == "critical"
+    await store.close()
