@@ -26,7 +26,10 @@ class StrategyConfig:
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
     max_total_exposure_usd: float = 1000.0
-    daily_loss_limit_usd: float = 50.0
+    # FIX-17: loss limit bumped 50→75 to account for B + D running together
+    # with the new stricter variants; the 50 ceiling was calibrated for
+    # A+B+C+D and would halt trading prematurely with fewer variants.
+    daily_loss_limit_usd: float = 75.0
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
@@ -82,7 +85,10 @@ class StrategyConfig:
     # Default 0.95 chosen empirically (production data 2026-04-17 — see
     # docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md).  Tuneable via
     # config without redeploy if future market microstructure shifts.
-    locked_win_max_price: float = 0.95
+    # FIX-17 (2026-04-24): dropped 0.95 → 0.90.  Post-rollback production
+    # data still showed EV ≈ 0 at 0.93+; the 0.90 cap gives ~3¢ of slippage
+    # slack before a 1-tick adverse fill turns the entry negative.
+    locked_win_max_price: float = 0.90
     # Hour (local) after which peak temperature window is considered over
     post_peak_hour: int = 17
     # Minutes without a new high (after post_peak_hour) to confirm daily max is final
@@ -102,10 +108,15 @@ class StrategyConfig:
         "Miami", "San Francisco", "Tampa", "Orlando",
     }))
     thin_liquidity_exposure_ratio: float = 0.5
+    # FIX-17 (2026-04-24): per-variant city filter.  Empty = all cities
+    # allowed (default for B/C).  D' uses this to restrict its narrow
+    # high-EV profile to cities whose historical forecast error is small
+    # enough for the 0.08 EV threshold to actually fire.
+    city_whitelist: frozenset[str] = field(default_factory=frozenset)
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Four strategy variants testing different dimensions.
+    """Three strategy variants after the FIX-17 overhaul (2026-04-24).
 
     All strategies share:
     - Auto-calibrated distance threshold (per-city)
@@ -114,61 +125,53 @@ def get_strategy_variants() -> dict[str, dict]:
     - Exit cooldown to prevent BUY→EXIT→BUY churn
     - NO-only signals (no YES, no LADDER)
 
-    A = Conservative Far:  only distant NO, strict price cap, half Kelly
-    B = Locked Aggressor:  same entry as A, but full Kelly on locked wins
-    C = Close Range:       tighter distance (75% confidence), higher EV bar
-    D = Quick Exit:        aggressive risk management, earlier force exit
+    B  = Locked Aggressor: half-Kelly forecast entries, full-Kelly on locked
+         wins.  Tightened exposure cap from 30 → 20 to stay under the new
+         total-exposure ceiling with D' running alongside.
+    C  = Close Range: tighter distance (0.75 max price), higher EV bar
+         (0.06).  calibration_confidence field removed — it was display-only
+         in config.html and never plumbed into the calibrator.
+    D' = Quick Exit, whitelisted: aggressive risk management with a
+         narrowed footprint.  Raised EV gate (0.05 → 0.08) and dropped
+         city exposure cap (25 → 10) so D' only fires in cities whose
+         forecast error is small enough that a 0.08 EV threshold isn't
+         noise; the city_whitelist makes that explicit.
+
+    FIX-17 (2026-04-24): A dropped — redundant with B once B's
+    kelly_fraction and city cap were tuned down.
     """
     return {
-        "A": {
-            # Conservative far-distance: fewest trades, highest safety margin
-            # Uses half-Kelly even on locked wins (vs B's full Kelly)
-            "max_no_price": 0.70,
-            "kelly_fraction": 0.5,
-            "locked_win_kelly_fraction": 0.5,
-            "max_locked_win_per_slot_usd": 5.0,
-            "max_positions_per_event": 3,
-            "calibration_confidence": 0.90,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
-        },
         "B": {
-            # Locked aggressor: same entry slots as A (same max_no_price / min_no_ev),
-            # but 20% larger forecast-based sizing (kelly 0.6 vs A's 0.5) AND
-            # full-Kelly on locked wins.  This ensures B ≠ A even when zero
-            # locked-win signals fire in a window.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-1.
+            # Locked aggressor: full-Kelly on locked wins, tight exposure cap.
             "max_no_price": 0.70,
-            "kelly_fraction": 0.6,
+            "kelly_fraction": 0.5,              # FIX-17: was 0.6
             "max_positions_per_event": 6,
-            "calibration_confidence": 0.90,
             "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
+            "max_exposure_per_city_usd": 20.0,  # FIX-17: was 30.0
             "locked_win_kelly_fraction": 1.0,
             "max_locked_win_per_slot_usd": 10.0,
         },
         "C": {
-            # Close range: enters closer slots (75% confidence), demands higher EV
+            # Close range: enters closer slots, demands higher EV.
             "max_no_price": 0.75,
             "kelly_fraction": 0.3,
             "max_positions_per_event": 4,
-            "calibration_confidence": 0.75,
             "min_no_ev": 0.06,
             "max_position_per_slot_usd": 3.0,
             "max_exposure_per_city_usd": 25.0,
         },
         "D": {
-            # Quick exit: most aggressive risk management
+            # FIX-17: D' — whitelisted, narrower, higher EV gate.
             "max_no_price": 0.65,
             "kelly_fraction": 0.5,
             "max_positions_per_event": 4,
-            "calibration_confidence": 0.90,
-            "min_no_ev": 0.05,
+            "min_no_ev": 0.08,                  # FIX-17: was 0.05
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
+            "max_exposure_per_city_usd": 10.0,  # FIX-17: was 25.0 (and previously 30)
             "force_exit_hours": 2.0,
             "exit_cooldown_hours": 2.0,
+            "city_whitelist": frozenset({"Los Angeles", "Seattle", "Denver"}),
         },
     }
 

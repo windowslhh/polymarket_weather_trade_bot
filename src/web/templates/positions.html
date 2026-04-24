@@ -34,7 +34,8 @@
 </div>
 
 <!-- Positions by Strategy -->
-{% set strat_labels = {'A':'Conservative Far', 'B':'Locked Aggressor', 'C':'Close Range', 'D':'Quick Exit'} %}
+{# FIX-17: A kept as legacy label for historical positions; D relabeled D'. #}
+{% set strat_labels = {'A':'Conservative Far (legacy)', 'B':'Locked Aggressor', 'C':'Close Range', 'D':"Quick Exit D' (whitelisted)"} %}
 {% for strat_name in strategies.keys()|sort %}
 {% set strat_label = strat_labels.get(strat_name, strat_name) %}
 {% set strat_positions = strategies[strat_name] %}

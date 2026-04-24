@@ -4,7 +4,8 @@
 <div class="page-title">Trade Timeline</div>
 
 <!-- Strategy P&L Summary -->
-{% set strat_meta = {'A': 'Conservative Far', 'B': 'Locked Aggressor', 'C': 'Close Range', 'D': 'Quick Exit'} %}
+{# FIX-17: A kept as legacy label for historical positions; D relabeled D'. #}
+{% set strat_meta = {'A': 'Conservative Far (legacy)', 'B': 'Locked Aggressor', 'C': 'Close Range', 'D': "Quick Exit D' (whitelisted)"} %}
 <div class="metrics">
     {% for sk in ['A', 'B', 'C', 'D'] %}
     <div class="metric-card">

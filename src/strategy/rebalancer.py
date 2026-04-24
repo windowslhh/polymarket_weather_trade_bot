@@ -579,6 +579,13 @@ class Rebalancer:
                     overrides = variants.get(strat_name, {})
                     strat_cfg = replace(self._config.strategy, **overrides)
 
+                    # FIX-17: respect city_whitelist in position_check too,
+                    # so a held position from an earlier, broader variant
+                    # doesn't keep generating TRIM/EXIT for a variant that
+                    # shouldn't be touching that city anymore.
+                    if strat_cfg.city_whitelist and city not in strat_cfg.city_whitelist:
+                        continue
+
                     # Auto-calibrate distance if enabled (k×std dynamic formula)
                     if strat_cfg.auto_calibrate_distance and error_dist is not None:
                         _fc = self._cached_forecasts.get(city)
@@ -1035,6 +1042,13 @@ class Rebalancer:
             for strat_name, overrides in variants.items():
                 # Build strategy config for this variant
                 strat_cfg = replace(self._config.strategy, **overrides)
+
+                # FIX-17: city_whitelist lets a variant opt into a narrow
+                # geography (D' targets LA/Seattle/Denver where historical
+                # forecast error is small enough for the 0.08 EV bar to
+                # fire without noise).  Empty = all cities allowed.
+                if strat_cfg.city_whitelist and event.city not in strat_cfg.city_whitelist:
+                    continue
 
                 # Auto-calibrate distance threshold from historical error data (k×std formula)
                 if strat_cfg.auto_calibrate_distance and error_dist is not None:

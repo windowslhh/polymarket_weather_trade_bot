@@ -55,7 +55,7 @@
             {% for s in strategy_summary %}
             <tr>
                 <td><span class="tag {% if s.strategy == 'A' %}tag-settling{% elif s.strategy == 'B' %}tag-stable{% elif s.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ s.strategy }}</span></td>
-                <td style="font-size:11px;color:var(--text-muted);">{% if s.strategy == 'A' %}Conservative Far{% elif s.strategy == 'B' %}Locked Aggressor{% elif s.strategy == 'C' %}Close Range{% elif s.strategy == 'D' %}Quick Exit{% else %}{{ s.strategy }}{% endif %}</td>
+                <td style="font-size:11px;color:var(--text-muted);">{% if s.strategy == 'A' %}Conservative Far (legacy){% elif s.strategy == 'B' %}Locked Aggressor{% elif s.strategy == 'C' %}Close Range{% elif s.strategy == 'D' %}Quick Exit D' (whitelisted){% else %}{{ s.strategy }}{% endif %}</td>
                 <td class="td-mono">{{ s.open_positions }}</td>
                 <td class="td-mono">{{ s.settled_positions }}</td>
                 <td class="td-mono">${{ "%.1f"|format(s.exposure) }}</td>

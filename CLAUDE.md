@@ -19,10 +19,13 @@
 - Position sizing: track city exposure cumulatively across all events in a rebalance cycle
 - Skip already-held token IDs to prevent duplicate positions
 
-## Strategy Design (as of 2026-04-16)
+## Strategy Design (as of 2026-04-24, FIX-17 retune)
 - **Pure NO trading**: Only BUY NO signals — no YES, no LADDER
-- **4 strategy variants** (A-D) testing different dimensions:
-  - A = Conservative far-distance (kelly=0.5, locked-kelly=0.5), B = Locked-win aggressor (kelly=0.6, locked-kelly=1.0 — larger forecast-entry size than A too so B ≠ A even without locked-win fires), C = Close-range with high EV gate, D = Quick exit
+- **3 strategy variants** (B / C / D') after FIX-17 dropped A:
+  - B = Locked-win aggressor (kelly=0.5, locked-kelly=1.0, `max_exposure_per_city_usd=20`)
+  - C = Close-range with high EV gate (`max_no_price=0.75`, `min_no_ev=0.06`, `max_exposure_per_city_usd=25`)
+  - D' = Quick-exit whitelisted (`min_no_ev=0.08`, `max_exposure_per_city_usd=10`, `city_whitelist={Los Angeles, Seattle, Denver}`)
+- **Global defaults changed by FIX-17**: `daily_loss_limit_usd=75` (was 50), `locked_win_max_price=0.90` (was 0.95)
 - **Signal types**: NO (forecast-based entry), LOCKED (daily_max > slot upper → guaranteed win), EXIT (3-layer hybrid), TRIM (EV decay)
 - **Auto-calibrated distance**: Per-city threshold from historical forecast error distribution (calibrator.py)
 - **Locked-win signals**: When observed daily max exceeds slot upper bound by ≥ `locked_win_margin_f`, NO is guaranteed → full Kelly sizing. **Three gates apply**: (1) hard price cap `StrategyConfig.locked_win_max_price` (default 0.95, tuneable via `config.yaml` without redeploy) blocks fee-dominated entries outright; (2) `ev > 0` safety net using win_prob 0.999 for below-slot locks / 0.99 for above-slot locks (Fix 2 split); (3) **PRICE_DIVERGENCE gate** (Bug #1 fix, 2026-04-18): reject when `|win_prob - market_price_no| > StrategyConfig.price_divergence_threshold` (default 0.50). Gate 3 means the **effective lower bound** on `price_no` for locked-win entries is `max(min_no_price, win_prob - threshold)` — with defaults that's ~0.499 for below-slot locks and ~0.489 for above-slot locks, *not* `min_no_price=0.20`. This is intentional: a "locked" signal with market price 0.30 means one of our inputs is wrong, and the divergence gate is the only defense against trading on stale/wrong-station daily_max. Do NOT try to "fix" the raised floor by relaxing the gate — that's what produced the Houston 04-17 blow-up. The 0.95 cap was removed in Fix 2 (035d353) then **reinstated 2026-04-17** after production showed 17/17 entries clustered at 0.997-0.9985 with EV ≈ $0.0008/share — paper→live slippage (≥1 tick = 0.001) was eating the entire margin. See `docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md`.
