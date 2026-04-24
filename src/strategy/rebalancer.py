@@ -348,6 +348,29 @@ class Rebalancer:
             forecasts = await get_forecasts_batch(city_configs)
             if forecasts:
                 self._cached_forecasts.update(forecasts)
+                # Review 🟡 #2: keep the by-date cache fresh so the 15-min
+                # TRIM in run_position_check reads same-day forecasts up to
+                # 15 min old (not up to 60 min from the last full cycle).
+                # Also refresh D+1/D+2 so held D+1 positions get fresh exit
+                # inputs when TRIM fires for them.
+                today = datetime.now(timezone.utc).date()
+                try:
+                    fc_d1, fc_d2 = await asyncio.gather(
+                        get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                        get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                    )
+                except Exception as exc:
+                    logger.debug("Forecast refresh: D+1/D+2 skipped (%s)", exc)
+                    fc_d1, fc_d2 = {}, {}
+                # Replace today's entry outright (fresher is strictly
+                # better); merge-update D+1/D+2 so a transient fetch
+                # failure doesn't blow away still-valid cached data.
+                self._cached_forecasts_by_date[today] = dict(forecasts)
+                for delta, fc in ((1, fc_d1), (2, fc_d2)):
+                    if fc:
+                        self._cached_forecasts_by_date.setdefault(
+                            today + timedelta(days=delta), {},
+                        ).update(fc)
                 logger.info(
                     "Forecast refresh: %d cities updated (%s)",
                     len(forecasts),
@@ -586,9 +609,14 @@ class Rebalancer:
                     if strat_cfg.city_whitelist and city not in strat_cfg.city_whitelist:
                         continue
 
-                    # Auto-calibrate distance if enabled (k×std dynamic formula)
+                    # Auto-calibrate distance if enabled (k×std dynamic formula).
+                    # Review 🟡 #3: pull the forecast matching this event's
+                    # market_date so D+1/D+2 positions use the correct-day
+                    # ensemble spread rather than today's.
                     if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                        _fc = self._cached_forecasts.get(city)
+                        _fc = self._cached_forecasts_by_date.get(
+                            market_date, {},
+                        ).get(city) or self._cached_forecasts.get(city)
                         cal_dist = calibrate_distance_dynamic(
                             error_dist,
                             ensemble_spread_f=_fc.ensemble_spread_f if _fc else None,
