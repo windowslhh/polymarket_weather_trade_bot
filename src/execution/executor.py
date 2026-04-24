@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from src.markets.clob_client import ClobClient
 from src.markets.models import Side, TradeSignal
@@ -68,41 +69,69 @@ class Executor:
             signal.event.city,
         )
 
-        result = await self._clob.place_limit_order(
+        # FIX-03: persist a pending order before hitting CLOB so a crash between
+        # the CLOB fill and the position insert leaves a discoverable breadcrumb.
+        idempotency_key = uuid.uuid4().hex
+        store = self._portfolio.store
+        await store.insert_pending_order(
+            idempotency_key=idempotency_key,
+            event_id=signal.event.event_id,
             token_id=signal.token_id,
             side=signal.side.value,
             price=price,
-            size=shares,
+            size_usd=size_usd,
         )
 
-        if result.success:
-            if signal.side == Side.BUY:
-                await self._portfolio.record_fill(
-                    event_id=signal.event.event_id,
-                    token_id=signal.token_id,
-                    token_type=signal.token_type,
-                    city=signal.event.city,
-                    slot_label=signal.slot.outcome_label,
-                    side=signal.side.value,
-                    price=price,
-                    size_usd=size_usd,
-                    strategy=signal.strategy,
-                    buy_reason=signal.reason,
-                    # Fix 4: persist entry EV so the TRIM rule can use a relative
-                    # decay threshold (EV decayed > X% of entry) in addition to
-                    # the absolute floor. See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4.
-                    entry_ev=signal.expected_value,
-                    entry_win_prob=signal.estimated_win_prob,
-                )
-            elif signal.side == Side.SELL:
-                closed = await self._portfolio.close_positions_for_token(
-                    event_id=signal.event.event_id,
-                    token_id=signal.token_id,
-                    strategy=signal.strategy,
-                    exit_reason=signal.reason,
-                    exit_price=price,
-                )
-                logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
-            logger.info("Order executed successfully: %s", result.order_id)
-        else:
+        try:
+            result = await self._clob.place_limit_order(
+                token_id=signal.token_id,
+                side=signal.side.value,
+                price=price,
+                size=shares,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:
+            # Mark as failed with the exception message so the reconciler knows
+            # this one was never confirmed by CLOB — it will probe CLOB status
+            # on next startup before deciding.
+            await store.mark_order_failed(idempotency_key, str(exc))
+            raise
+
+        if not result.success:
+            await store.mark_order_failed(
+                idempotency_key, result.message or "unknown CLOB failure"
+            )
             logger.error("Order failed: %s", result.message)
+            return
+
+        if signal.side == Side.BUY:
+            await self._portfolio.record_fill_atomic(
+                idempotency_key=idempotency_key,
+                order_id=result.order_id,
+                event_id=signal.event.event_id,
+                token_id=signal.token_id,
+                token_type=signal.token_type,
+                city=signal.event.city,
+                slot_label=signal.slot.outcome_label,
+                side=signal.side.value,
+                price=price,
+                size_usd=size_usd,
+                strategy=signal.strategy,
+                buy_reason=signal.reason,
+                # Fix 4: persist entry EV so the TRIM rule can use a relative
+                # decay threshold (EV decayed > X% of entry) in addition to
+                # the absolute floor.
+                entry_ev=signal.expected_value,
+                entry_win_prob=signal.estimated_win_prob,
+            )
+        else:  # Side.SELL
+            await store.finalize_sell_order(idempotency_key, result.order_id)
+            closed = await self._portfolio.close_positions_for_token(
+                event_id=signal.event.event_id,
+                token_id=signal.token_id,
+                strategy=signal.strategy,
+                exit_reason=signal.reason,
+                exit_price=price,
+            )
+            logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
+        logger.info("Order executed successfully: %s", result.order_id)

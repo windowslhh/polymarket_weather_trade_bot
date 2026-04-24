@@ -28,13 +28,15 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT NOT NULL,
+    order_id TEXT NOT NULL DEFAULT '',
     event_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
     side TEXT NOT NULL,
     price REAL NOT NULL,
     size_usd REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'filled', 'cancelled', 'failed'
+    idempotency_key TEXT,
+    failure_reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     filled_at TEXT
 );
@@ -80,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_city ON positions(city);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS edge_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -144,6 +147,14 @@ class Store:
             # Fix 4: relative EV-decay TRIM — see docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4
             ("positions", "entry_ev", "ALTER TABLE positions ADD COLUMN entry_ev REAL"),
             ("positions", "entry_win_prob", "ALTER TABLE positions ADD COLUMN entry_win_prob REAL"),
+            # FIX-03: orders↔positions linkage. idempotency_key uniquely names the
+            # pending order across crashes so the reconciler can match it back to
+            # a CLOB fill. source_order_id on positions points to the concrete CLOB
+            # order_id that opened the row — existing rows are tagged 'legacy' so
+            # the invariant "every position has a source" holds without backfill.
+            ("orders", "idempotency_key", "ALTER TABLE orders ADD COLUMN idempotency_key TEXT"),
+            ("orders", "failure_reason", "ALTER TABLE orders ADD COLUMN failure_reason TEXT"),
+            ("positions", "source_order_id", "ALTER TABLE positions ADD COLUMN source_order_id TEXT DEFAULT 'legacy'"),
         ]
         for table, column, sql in migrations:
             try:
@@ -169,6 +180,12 @@ class Store:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_no_dup "
                 "ON positions(event_id, token_id, strategy) WHERE status = 'open'",
                 "deduplication index on open positions(event_id, token_id, strategy)",
+            ),
+            (
+                "idx_orders_idempotency_key",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key "
+                "ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL",
+                "unique idempotency_key on orders — reconciler keys off this",
             ),
         ]
         async with self.db.execute(
@@ -310,6 +327,110 @@ class Store:
             (status, order_id),
         )
         await self.db.commit()
+
+    # ── FIX-03: pending-order lifecycle ────────────────────────────────
+    # The executor flow is: persist pending row → hit CLOB → on success atomically
+    # promote row to 'filled' + INSERT position. If the executor crashes between
+    # steps, the 'pending' row survives and the reconciler (FIX-05) matches it
+    # against CLOB state via idempotency_key.
+
+    async def insert_pending_order(
+        self,
+        idempotency_key: str,
+        event_id: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size_usd: float,
+    ) -> int:
+        cursor = await self.db.execute(
+            """INSERT INTO orders (order_id, event_id, token_id, side, price, size_usd,
+                                   status, idempotency_key)
+               VALUES ('', ?, ?, ?, ?, ?, 'pending', ?)""",
+            (event_id, token_id, side, price, size_usd, idempotency_key),
+        )
+        await self.db.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    async def finalize_buy_order(
+        self,
+        idempotency_key: str,
+        order_id: str,
+        event_id: str,
+        token_id: str,
+        token_type: str,
+        city: str,
+        slot_label: str,
+        side: str,
+        entry_price: float,
+        size_usd: float,
+        shares: float,
+        strategy: str = "B",
+        buy_reason: str = "",
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
+    ) -> int:
+        """Promote a pending BUY order to filled AND insert the position row atomically.
+
+        Returns the new position id.  Raises if idempotency_key has no pending row.
+        """
+        # aiosqlite commits on close of execute_script or explicit commit;
+        # we wrap the two writes in a single commit so a crash between them
+        # is impossible — either both land or neither does.
+        async with self.db.execute(
+            "SELECT id FROM orders WHERE idempotency_key = ? AND status = 'pending'",
+            (idempotency_key,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"finalize_buy_order: no pending order for key={idempotency_key}"
+            )
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now') "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        pos_cursor = await self.db.execute(
+            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
+                                       entry_price, size_usd, shares, strategy, buy_reason,
+                                       entry_ev, entry_win_prob, source_order_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, token_id, token_type, city, slot_label, side,
+             entry_price, size_usd, shares, strategy, buy_reason,
+             entry_ev, entry_win_prob, order_id),
+        )
+        await self.db.commit()
+        return pos_cursor.lastrowid  # type: ignore[return-value]
+
+    async def finalize_sell_order(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Promote a pending SELL order to filled. Position closure is done separately."""
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now') "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
+    async def mark_order_failed(
+        self, idempotency_key: str, reason: str,
+    ) -> None:
+        await self.db.execute(
+            "UPDATE orders SET status = 'failed', failure_reason = ? "
+            "WHERE idempotency_key = ?",
+            (reason[:500], idempotency_key),
+        )
+        await self.db.commit()
+
+    async def get_pending_orders(self) -> list[dict]:
+        """Fetch all orders stuck in 'pending' — used by FIX-05 reconciler on startup."""
+        async with self.db.execute(
+            "SELECT * FROM orders WHERE status = 'pending' ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def get_daily_pnl(self, date_str: str) -> float | None:
         async with self.db.execute(

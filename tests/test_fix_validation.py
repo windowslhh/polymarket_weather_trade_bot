@@ -323,6 +323,12 @@ class TestSellFlowPnl:
         # Executor now looks up actual held shares for SELL orders (EX-01 fix).
         # 5.0 USD / 0.90 price ≈ 5.56 shares
         mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=5.56)
+        # FIX-03: executor persists a pending order before calling CLOB and
+        # promotes it to 'filled' after; mock the store APIs the executor pokes.
+        mock_portfolio.store = MagicMock()
+        mock_portfolio.store.insert_pending_order = AsyncMock(return_value=1)
+        mock_portfolio.store.finalize_sell_order = AsyncMock()
+        mock_portfolio.store.mark_order_failed = AsyncMock()
 
         executor = Executor(mock_clob, mock_portfolio)
         signal = TradeSignal(

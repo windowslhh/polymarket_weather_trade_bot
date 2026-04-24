@@ -79,21 +79,33 @@ class ClobClient:
         side: str,
         price: float,
         size: float,
+        idempotency_key: str | None = None,
     ) -> OrderResult:
-        """Place a limit order."""
+        """Place a limit order.
+
+        `idempotency_key` is not accepted by py-clob-client itself but is threaded
+        through so logs/paper-returns carry the breadcrumb the reconciler (FIX-05)
+        keys off of.
+        """
+        key_suffix = f" key={idempotency_key[:8]}" if idempotency_key else ""
         if self._config.dry_run:
             logger.info(
-                "[DRY RUN] Would place %s order: token=%s price=%.4f size=%.2f",
-                side, token_id, price, size,
+                "[DRY RUN] Would place %s order: token=%s price=%.4f size=%.2f%s",
+                side, token_id, price, size, key_suffix,
             )
             return OrderResult(order_id="dry_run", success=False, message="dry run — no positions recorded")
 
         if self._config.paper:
             logger.info(
-                "[PAPER] Simulated %s fill: token=%s price=%.4f size=%.2f",
-                side, token_id, price, size,
+                "[PAPER] Simulated %s fill: token=%s price=%.4f size=%.2f%s",
+                side, token_id, price, size, key_suffix,
             )
-            return OrderResult(order_id=f"paper_{token_id[:8]}", success=True, message="paper trade")
+            # Paper order_ids must be unique per order so the orders-table UNIQUE
+            # index (and the reconciler) can tell them apart.  Using the
+            # idempotency key (first 12 hex chars) gives a stable, collision-free
+            # handle without leaking the full uuid into logs.
+            suffix = idempotency_key[:12] if idempotency_key else token_id[:8]
+            return OrderResult(order_id=f"paper_{suffix}", success=True, message="paper trade")
 
         client = self._get_client()
         try:
@@ -110,7 +122,18 @@ class ClobClient:
                 },
             )
             order_id = order.get("orderID", "") if isinstance(order, dict) else str(order)
-            logger.info("Order placed: %s %s @ %.4f x %.2f -> %s", side, token_id, price, size, order_id)
+            logger.info(
+                "Order placed: %s %s @ %.4f x %.2f -> %s%s",
+                side, token_id, price, size, order_id, key_suffix,
+            )
+            # FIX-M4: empty order_id from CLOB means the API accepted the call
+            # but returned no handle — treat as failure so the executor does
+            # not record a fill without a traceable source_order_id.
+            if not order_id:
+                return OrderResult(
+                    order_id="", success=False,
+                    message="CLOB returned empty order_id",
+                )
             return OrderResult(order_id=order_id, success=True)
         except Exception as e:
             logger.exception("Failed to place order")
