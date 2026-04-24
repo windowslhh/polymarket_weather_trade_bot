@@ -464,6 +464,28 @@ class Rebalancer:
         logger.info("--- Position check start ---")
         signals: list[TradeSignal] = []
 
+        # FIX-10: once the daily loss limit has fired, the full rebalance
+        # stops generating BUYs — but the 15-min position_check used to
+        # keep issuing locked-win BUYs because it never consulted daily_pnl.
+        # That could deepen a bad day's loss by 15 min at a time.  Now we
+        # check the limit up front and flip a flag; TRIM / EXIT / settlement
+        # still run, because closing out is ALWAYS allowed.
+        _cb_block_buys = False
+        try:
+            _daily_pnl = await self._portfolio.get_daily_pnl(date.today())
+            if (
+                _daily_pnl is not None
+                and _daily_pnl < -self._config.strategy.daily_loss_limit_usd
+            ):
+                _cb_block_buys = True
+                logger.warning(
+                    "Position check circuit breaker: daily P&L = $%.2f — blocking new BUYs "
+                    "(TRIM/EXIT/settlement continue)",
+                    _daily_pnl,
+                )
+        except Exception:
+            logger.exception("Position check: circuit-breaker check failed; continuing")
+
         async with self._cycle_lock:
             try:
                 # Get all open positions grouped by event
@@ -753,16 +775,20 @@ class Rebalancer:
                     # Fix 5: reduce per-city cap for thin-liquidity cities
                     effective_cfg = _effective_city_config(strat_cfg, city)
 
-                    # Size and tag locked-win signals
-                    for sig in locked_signals:
-                        size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
-                        if size > 0:
-                            sig.suggested_size_usd = size
-                            sig.strategy = strat_name
-                            sig.reason = f"[{strat_name}] {sig.reason}, EV={sig.expected_value:.3f}"
-                            signals.append(sig)
-                            strat_city_exp += size
-                            strat_total_exp += size
+                    # Size and tag locked-win signals.  FIX-10: once the
+                    # daily loss limit has fired, skip new BUYs here but
+                    # keep processing EXIT/TRIM below — closing is safe,
+                    # only opening is blocked.
+                    if not _cb_block_buys:
+                        for sig in locked_signals:
+                            size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
+                            if size > 0:
+                                sig.suggested_size_usd = size
+                                sig.strategy = strat_name
+                                sig.reason = f"[{strat_name}] {sig.reason}, EV={sig.expected_value:.3f}"
+                                signals.append(sig)
+                                strat_city_exp += size
+                                strat_total_exp += size
 
                     # Tag exit signals
                     for sig in exit_signals:
