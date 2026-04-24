@@ -131,6 +131,8 @@ class Executor:
 
         # FIX-03: persist a pending order before hitting CLOB so a crash between
         # the CLOB fill and the position insert leaves a discoverable breadcrumb.
+        # H-1: include signal.strategy so the reconciler can match SELL orders
+        # to the right variant's position when two variants hold the same token.
         idempotency_key = uuid.uuid4().hex
         await store.insert_pending_order(
             idempotency_key=idempotency_key,
@@ -139,6 +141,7 @@ class Executor:
             side=signal.side.value,
             price=price,
             size_usd=size_usd,
+            strategy=signal.strategy,
         )
 
         try:

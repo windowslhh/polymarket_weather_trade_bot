@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'filled', 'cancelled', 'failed'
     idempotency_key TEXT,
     failure_reason TEXT,
+    -- Review H-1 (2026-04-24): strategy tag so the reconciler can match
+    -- a SELL order to the right variant's position row.  Two variants
+    -- (e.g. B and D' for LA) can hold the same (event_id, token_id) slot;
+    -- without this column, the hybrid-state SQL could close B's SELL
+    -- against D's still-open position and double-count P&L at settlement.
+    strategy TEXT NOT NULL DEFAULT 'B',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     filled_at TEXT
 );
@@ -182,6 +188,8 @@ class Store:
             ("orders", "idempotency_key", "ALTER TABLE orders ADD COLUMN idempotency_key TEXT"),
             ("orders", "failure_reason", "ALTER TABLE orders ADD COLUMN failure_reason TEXT"),
             ("positions", "source_order_id", "ALTER TABLE positions ADD COLUMN source_order_id TEXT DEFAULT 'legacy'"),
+            # Review H-1: see schema header for rationale.
+            ("orders", "strategy", "ALTER TABLE orders ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             # FIX-01: forecast_date column for audit.
             ("edge_history", "forecast_date", "ALTER TABLE edge_history ADD COLUMN forecast_date TEXT"),
         ]
@@ -371,12 +379,13 @@ class Store:
         side: str,
         price: float,
         size_usd: float,
+        strategy: str = "B",
     ) -> int:
         cursor = await self.db.execute(
             """INSERT INTO orders (order_id, event_id, token_id, side, price, size_usd,
-                                   status, idempotency_key)
-               VALUES ('', ?, ?, ?, ?, ?, 'pending', ?)""",
-            (event_id, token_id, side, price, size_usd, idempotency_key),
+                                   status, idempotency_key, strategy)
+               VALUES ('', ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (event_id, token_id, side, price, size_usd, idempotency_key, strategy),
         )
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
@@ -444,14 +453,18 @@ class Store:
         await self.db.commit()
 
     async def get_filled_sells_with_open_positions(self) -> list[dict]:
-        """Review 🟡 #6: reconcile the SELL hybrid-state window.
+        """Review 🟡 #6 + H-1: reconcile the SELL hybrid-state window.
 
         The executor's SELL path runs finalize_sell_order and
         close_positions_for_token as two separate commits.  If we crash
         between them, we have an orders row with status='filled' (SELL)
-        and an open position for the same (event_id, token_id) that
-        should be closed.  This query finds exactly that pairing so
-        the startup reconciler can heal it.
+        and an open position for the same (event_id, token_id, strategy)
+        that should be closed.
+
+        H-1 (2026-04-24): the JOIN now includes `p.strategy = o.strategy`
+        so if B and D' both hold the same token, B's SELL only closes
+        B's position — D' stays open.  Pre-H-1 the JOIN was (event_id,
+        token_id) only, which could double-close across variants.
         """
         async with self.db.execute(
             """SELECT o.idempotency_key, o.order_id, o.price, o.event_id,
@@ -461,17 +474,16 @@ class Store:
                JOIN positions p
                  ON p.event_id = o.event_id
                 AND p.token_id = o.token_id
+                AND p.strategy = o.strategy
                 AND p.status = 'open'
                WHERE o.side = 'SELL'
                  AND o.status = 'filled'
-                 -- Same (event, token) may have multiple SELL rows over
-                 -- time (e.g. historical TRIM then later EXIT); we only
-                 -- care about the latest by filled_at.  A subquery picks
-                 -- the latest filled SELL per (event_id, token_id).
+                 -- Latest filled SELL per (event_id, token_id, strategy).
                  AND o.filled_at = (
                      SELECT MAX(filled_at) FROM orders o2
                      WHERE o2.event_id = o.event_id
                        AND o2.token_id = o.token_id
+                       AND o2.strategy = o.strategy
                        AND o2.side = 'SELL'
                        AND o2.status = 'filled'
                  )"""

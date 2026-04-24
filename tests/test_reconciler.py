@@ -224,6 +224,61 @@ async def test_probe_exception_leaves_pending_with_critical():
 
 
 @pytest.mark.asyncio
+async def test_sell_hybrid_state_only_closes_matching_strategy():
+    """Review H-1: two variants hold the same (event, token).  A filled SELL
+    from variant B must close ONLY B's position, leaving D''s position open.
+
+    Pre-H-1 the hybrid-state SQL JOINed on (event_id, token_id) only, so
+    both variants' positions would be closed at B's SELL price → double
+    P&L accounting at settlement.
+    """
+    import tempfile
+    from pathlib import Path
+    tmp = Path(tempfile.mkdtemp()) / "bot.db"
+    store = Store(tmp)
+    await store.initialize()
+    alerter = _alerter()
+
+    # Seed B's and D''s positions at the same event/token.
+    b_pos = await store.insert_position(
+        event_id="ev_x", token_id="tok_x", token_type="NO",
+        city="Los Angeles", slot_label="70-74°F", side="BUY",
+        entry_price=0.60, size_usd=6.0, shares=10.0,
+        strategy="B", buy_reason="[B] NO: test",
+    )
+    d_pos = await store.insert_position(
+        event_id="ev_x", token_id="tok_x", token_type="NO",
+        city="Los Angeles", slot_label="70-74°F", side="BUY",
+        entry_price=0.55, size_usd=5.5, shares=10.0,
+        strategy="D", buy_reason="[D] NO: test",
+    )
+    # Only B has a filled SELL (crashed before close).
+    await store.db.execute(
+        """INSERT INTO orders
+           (order_id, event_id, token_id, side, price, size_usd,
+            status, filled_at, idempotency_key, strategy)
+           VALUES ('clob_sell_B', 'ev_x', 'tok_x', 'SELL', 0.75, 7.5,
+                   'filled', datetime('now'), 'sell_b_key', 'B')""",
+    )
+    await store.db.commit()
+
+    await reconcile_pending_orders(
+        store, alerter, query_clob_order=None, is_paper=True,
+    )
+
+    async with store.db.execute(
+        "SELECT strategy, status FROM positions ORDER BY strategy"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    by_strat = {r["strategy"]: r["status"] for r in rows}
+    assert by_strat["B"] == "closed", "B's position should be closed"
+    assert by_strat["D"] == "open", (
+        "D''s position must stay open — pre-H-1 the SQL would have closed it too"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_sell_hybrid_state_closed_on_reconcile():
     """Review 🟡 #6: a filled SELL paired with an open position row — the
     crash window between finalize_sell_order and close_positions_for_token
