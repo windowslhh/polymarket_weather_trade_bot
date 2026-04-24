@@ -131,12 +131,14 @@ def evaluate_no_signals(
     """
     # FIX-22: event and forecast dates must match — Bug #1 (Houston 2026-04-17)
     # was caused by routing today's forecast into D+1/D+2 evaluators.  Every
-    # evaluator asserts the invariant so a regression fails fast instead of
-    # shipping wrong trades.
-    assert forecast.forecast_date == event.market_date, (
-        f"forecast.forecast_date={forecast.forecast_date} != "
-        f"event.market_date={event.market_date} (city={event.city})"
-    )
+    # evaluator enforces the invariant so a regression fails fast instead of
+    # shipping wrong trades.  Uses `if … raise` (not assert) so the guard
+    # still fires under `python -O`.
+    if forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
 
     if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
         logger.debug("Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
@@ -245,10 +247,12 @@ def evaluate_trim_signals(
     produces a SELL signal.
     """
     # FIX-22: forecast date must match event date (see evaluate_no_signals).
-    assert forecast.forecast_date == event.market_date, (
-        f"forecast.forecast_date={forecast.forecast_date} != "
-        f"event.market_date={event.market_date} (city={event.city})"
-    )
+    # `if … raise` so the guard survives `python -O`.
+    if forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
 
     signals: list[TradeSignal] = []
     ep = dict(entry_prices or {})
@@ -390,11 +394,13 @@ def evaluate_exit_signals(
     """
     # FIX-22: when a forecast is supplied it must be for the event's date.
     # `forecast` is optional here because exits can be driven by observation
-    # alone; only assert when it's actually provided.
-    assert forecast is None or forecast.forecast_date == event.market_date, (
-        f"forecast.forecast_date={forecast.forecast_date} != "
-        f"event.market_date={event.market_date} (city={event.city})"
-    )
+    # alone; only enforce the match when it's actually provided.  Use
+    # `if … raise` so `python -O` does not strip the guard.
+    if forecast is not None and forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
 
     if observation is None or daily_max_f is None or days_ahead > 0:
         return []

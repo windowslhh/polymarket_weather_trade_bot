@@ -36,13 +36,26 @@ def _function_takes_forecast_param(fn: ast.FunctionDef) -> bool:
 
 
 def _function_has_date_assert(fn: ast.FunctionDef) -> bool:
-    """True iff the function body contains an ``assert`` whose source
-    references both forecast_date and market_date (or event).
+    """True iff the function body contains an ``assert`` OR an
+    ``if … raise AssertionError`` whose source references both
+    forecast_date and market_date.  Accepts both forms because the
+    ``if … raise`` variant survives `python -O` which strips asserts.
     """
     for node in ast.walk(fn):
         if isinstance(node, ast.Assert):
             text = ast.unparse(node)
             if "forecast_date" in text and "market_date" in text:
+                return True
+        # `if <cond>: raise AssertionError(...)` — walk into the If body
+        # and look for AssertionError / Exception raises whose surrounding
+        # text mentions the two names.
+        if isinstance(node, ast.If):
+            text = ast.unparse(node)
+            if (
+                "forecast_date" in text
+                and "market_date" in text
+                and "raise" in text
+            ):
                 return True
     return False
 
