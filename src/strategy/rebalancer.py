@@ -731,10 +731,10 @@ class Rebalancer:
                             enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
                         )
                         # FIX-P2-11: math.ceil (conservative rounding) instead
-                    # of banker's round — a calibrated threshold of 5.5°F
-                    # shouldn't silently become 6 half the time and 5 the
-                    # other half; 6 is the right floor for "safe entry".
-                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
+                        # of banker's round — a calibrated threshold of 5.5°F
+                        # shouldn't silently become 6 half the time and 5 the
+                        # other half; 6 is the right floor for "safe entry".
+                        strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
 
                     # Build a lightweight event object for signal evaluation
                     event_obj = WeatherMarketEvent(

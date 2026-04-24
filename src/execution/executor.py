@@ -74,7 +74,10 @@ class Executor:
                 getattr(self._clob, "_config", None), "strategy", None,
             )
             limit = getattr(max_total, "max_total_exposure_usd", None) if max_total else None
-            if limit is not None and existing + total_buy_cost > limit:
+            # isinstance guard so a test harness using MagicMock (where the
+            # attribute resolves to a truthy MagicMock instance) doesn't
+            # trip the real comparison with a bogus numeric value.
+            if isinstance(limit, (int, float)) and existing + total_buy_cost > limit:
                 trim_target = max(limit - existing, 0.0)
                 logger.warning(
                     "Executor: batch total_buy_cost=$%.2f would push exposure "
