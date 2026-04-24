@@ -253,7 +253,30 @@ async def run(args: argparse.Namespace) -> None:
     try:
         await stop_event.wait()
     finally:
-        scheduler.shutdown(wait=False)
+        # FIX-09: graceful shutdown with 30s budget.  APScheduler.shutdown
+        # is sync and returns once its jobstores are closed; we wrap it in
+        # wait_for on a thread so a pathologically slow job still gets a
+        # deadline.  After the scheduler stops producing new work, drain
+        # any in-flight executor trades so we don't cut a CLOB POST
+        # mid-flight and leave a pending orders row behind.
+        logger.info("Shutdown: stopping scheduler (waiting for jobs)...")
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(scheduler.shutdown, wait=True),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Shutdown: scheduler.shutdown(wait=True) exceeded 30s — "
+                "forcing; long-running jobs may leave pending state",
+            )
+            scheduler.shutdown(wait=False)
+        drained = await executor.wait_until_idle(timeout=30.0)
+        if not drained:
+            logger.error(
+                "Shutdown: executor did not drain cleanly; pending orders "
+                "will be reconciled on next startup (FIX-05)",
+            )
         await store.close()
         logger.info("Bot stopped.")
 

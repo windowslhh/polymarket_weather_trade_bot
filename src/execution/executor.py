@@ -1,6 +1,7 @@
 """Trade execution: send orders to Polymarket CLOB."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -17,6 +18,35 @@ class Executor:
     def __init__(self, clob: ClobClient, portfolio: PortfolioTracker) -> None:
         self._clob = clob
         self._portfolio = portfolio
+        # FIX-09: tracks in-flight _execute_one calls so graceful shutdown
+        # can await them before the process exits.  Tasks self-remove via
+        # a done callback.
+        self._in_flight: set[asyncio.Task] = set()
+
+    async def wait_until_idle(self, timeout: float = 30.0) -> bool:
+        """Block until all in-flight executions finish, up to `timeout` sec.
+
+        Returns True if everything drained in time, False on timeout.
+        Used by main.py's shutdown path so we don't cut a POST mid-flight.
+        """
+        if not self._in_flight:
+            return True
+        logger.info(
+            "Executor: waiting up to %.0fs for %d in-flight trade(s) to drain",
+            timeout, len(self._in_flight),
+        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._in_flight, return_exceptions=True),
+                timeout=timeout,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.error(
+                "Executor: %d trade(s) still in-flight after %.0fs — abandoning",
+                len(self._in_flight), timeout,
+            )
+            return False
 
     async def execute_signals(self, signals: list[TradeSignal]) -> None:
         """Execute a batch of trade signals sequentially.
@@ -25,8 +55,15 @@ class Executor:
         Exit signals (SELL) are placed at best available price.
         """
         for signal in signals:
+            # FIX-09: register each _execute_one as a tracked Task so
+            # wait_until_idle() can join it during graceful shutdown.
+            # Awaiting the task inline preserves the previous sequential
+            # semantics of the executor.
+            task = asyncio.create_task(self._execute_one(signal))
+            self._in_flight.add(task)
+            task.add_done_callback(self._in_flight.discard)
             try:
-                await self._execute_one(signal)
+                await task
             except Exception:
                 logger.exception(
                     "Failed to execute signal: %s %s %s",
