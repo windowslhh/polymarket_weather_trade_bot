@@ -486,6 +486,19 @@ class Rebalancer:
         except Exception:
             logger.exception("Position check: circuit-breaker check failed; continuing")
 
+        # FIX-11: kill switch also applies to the 15-min cycle — same rule
+        # (no new BUYs, but TRIM/EXIT continue) so paused state is honoured
+        # whether the operator hits pause before or after the full cycle.
+        try:
+            if await self._portfolio.store.get_bot_paused():
+                _cb_block_buys = True
+                logger.warning(
+                    "Position check: kill switch engaged — BUYs suppressed; "
+                    "TRIM/EXIT continue",
+                )
+        except Exception:
+            logger.exception("Position check: kill-switch read failed; continuing")
+
         async with self._cycle_lock:
             try:
                 # Get all open positions grouped by event
@@ -870,6 +883,24 @@ class Rebalancer:
             logger.warning("Circuit breaker triggered: daily P&L = $%.2f", daily_pnl)
             await self._alerter.circuit_breaker(daily_pnl)
             return []
+
+        # FIX-11: check the persistent kill switch.  Paused → skip BUY
+        # generation but let TRIM / EXIT / settlement continue (closing
+        # is always safe; only opening new exposure is blocked).  The
+        # flag is maintained by /api/admin/pause + /api/admin/unpause.
+        self._paused_this_cycle = False
+        try:
+            if await self._portfolio.store.get_bot_paused():
+                self._paused_this_cycle = True
+                logger.warning(
+                    "Kill switch engaged (bot_state.paused=1) — BUYs suppressed "
+                    "for this cycle; TRIM/EXIT/settlement continue"
+                )
+        except Exception:
+            logger.exception(
+                "Kill-switch check failed; continuing (fail-open is safer "
+                "than halting the whole bot on a DB read glitch)",
+            )
 
         # 1. Discover active markets
         events = await discover_weather_markets(
@@ -1261,6 +1292,11 @@ class Rebalancer:
                 cooldown_seconds = strat_cfg.exit_cooldown_hours * 3600
                 # Fix 5: reduce per-city cap for thin-liquidity cities
                 effective_cfg = _effective_city_config(strat_cfg, event.city)
+                # FIX-11: when the kill switch is engaged, skip the BUY
+                # sizing loop entirely.  EXIT/TRIM further down still run.
+                if getattr(self, "_paused_this_cycle", False):
+                    locked_signals = []
+                    no_signals = []
                 # Locked wins first (higher priority), then forecast-based NO
                 for signal in locked_signals + no_signals:
                     # Check exit cooldown: skip BUY if recently exited this slot

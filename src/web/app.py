@@ -749,18 +749,65 @@ def create_app(store, rebalancer, config) -> Flask:
             "trends": state.get("trends", {}),
         })
 
+    def _auth_trigger_secret() -> bool:
+        """Return True when caller is allowed to mutate admin state.
+
+        Factored out so /api/trigger, /api/admin/pause and /api/admin/unpause
+        share the same TRIGGER_SECRET gate.  Empty secret (dev mode) allows
+        everything — production deployments must set TRIGGER_SECRET.
+        """
+        cfg = app.config.get("bot_config")
+        secret = getattr(cfg, "trigger_secret", "") if cfg else ""
+        if not secret:
+            return True
+        auth_header = request.headers.get("Authorization", "")
+        if hmac.compare_digest(auth_header, f"Bearer {secret}"):
+            return True
+        x_secret = request.headers.get("X-Trigger-Secret", "")
+        if x_secret and hmac.compare_digest(x_secret, secret):
+            return True
+        return False
+
+    @app.route("/api/admin/pause", methods=["POST"])
+    def api_admin_pause():
+        """FIX-11: flip the kill switch on — rebalancer will skip BUYs next
+        cycle.  TRIM / EXIT / settlement continue so positions can still be
+        closed.  Auth via TRIGGER_SECRET (Authorization: Bearer … or
+        X-Trigger-Secret header)."""
+        if not _auth_trigger_secret():
+            logger.warning("Unauthorized /api/admin/pause from %s", request.remote_addr)
+            return jsonify({"error": "unauthorized"}), 401
+        s = app.config["bot_store"]
+        try:
+            _run_async(s.set_bot_paused(True), timeout=5)
+            return jsonify({"ok": True, "paused": True})
+        except Exception as e:
+            logger.exception("admin pause failed")
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    @app.route("/api/admin/unpause", methods=["POST"])
+    def api_admin_unpause():
+        """FIX-11: clear the kill switch."""
+        if not _auth_trigger_secret():
+            logger.warning(
+                "Unauthorized /api/admin/unpause from %s", request.remote_addr,
+            )
+            return jsonify({"error": "unauthorized"}), 401
+        s = app.config["bot_store"]
+        try:
+            _run_async(s.set_bot_paused(False), timeout=5)
+            return jsonify({"ok": True, "paused": False})
+        except Exception as e:
+            logger.exception("admin unpause failed")
+            return jsonify({"ok": False, "error": str(e)}), 500
+
     @app.route("/api/trigger", methods=["POST"])
     def api_trigger():
         # Token auth: if TRIGGER_SECRET is set, require "Authorization: Bearer <secret>"
         # so arbitrary callers cannot trigger expensive full rebalance cycles.
-        cfg = app.config.get("bot_config")
-        secret = getattr(cfg, "trigger_secret", "") if cfg else ""
-        if secret:
-            auth_header = request.headers.get("Authorization", "")
-            # W-02 fix: constant-time comparison to prevent timing side-channel attacks
-            if not hmac.compare_digest(auth_header, f"Bearer {secret}"):
-                logger.warning("Unauthorized /api/trigger attempt from %s", request.remote_addr)
-                return jsonify({"error": "unauthorized"}), 401
+        if not _auth_trigger_secret():
+            logger.warning("Unauthorized /api/trigger attempt from %s", request.remote_addr)
+            return jsonify({"error": "unauthorized"}), 401
 
         reb = app.config["bot_rebalancer"]
         _cache.clear()  # Invalidate all caches

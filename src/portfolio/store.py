@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS exit_cooldowns (
     cooldown_hours REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exit_cooldowns_time ON exit_cooldowns(exit_time);
+
+-- FIX-11: persistent kill switch.  Single-row table (id pinned to 1) that the
+-- web /api/admin/pause endpoint flips; the rebalancer reads it at the top of
+-- run() to decide whether to skip BUY signal generation (TRIM/EXIT/settlement
+-- continue either way — closing is always safe).
+CREATE TABLE IF NOT EXISTS bot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    paused INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO bot_state (id, paused) VALUES (1, 0);
 """
 
 
@@ -576,6 +587,32 @@ class Store:
         """Delete a specific token's cooldown (used by tests and admin ops)."""
         await self.db.execute(
             "DELETE FROM exit_cooldowns WHERE token_id = ?", (token_id,),
+        )
+        await self.db.commit()
+
+    # ── FIX-11: kill switch ───────────────────────────────────────────
+
+    async def get_bot_paused(self) -> bool:
+        """Read the pause flag (row id=1)."""
+        async with self.db.execute(
+            "SELECT paused FROM bot_state WHERE id = 1"
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            # Row missing — insert default and report unpaused.
+            await self.db.execute(
+                "INSERT OR IGNORE INTO bot_state (id, paused) VALUES (1, 0)"
+            )
+            await self.db.commit()
+            return False
+        return bool(row[0])
+
+    async def set_bot_paused(self, paused: bool) -> None:
+        """Flip the pause flag; web endpoint calls this after auth."""
+        await self.db.execute(
+            "UPDATE bot_state SET paused = ?, updated_at = datetime('now') "
+            "WHERE id = 1",
+            (1 if paused else 0,),
         )
         await self.db.commit()
 
