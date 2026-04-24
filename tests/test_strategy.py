@@ -1074,9 +1074,12 @@ class TestPostPeakNoSignals:
         """Post-peak boost only applies to same-day markets (days_ahead=0)."""
         slot = _make_slot(80, 84, price_no=0.70)
         event = _make_event(slots=[slot])
-        # Set market_date to tomorrow
-        event.market_date = date.today() + __import__("datetime").timedelta(days=1)
+        # Set market_date to tomorrow — FIX-22 requires the forecast to
+        # move with it, otherwise the new forecast_date invariant asserts.
+        tomorrow = date.today() + __import__("datetime").timedelta(days=1)
+        event.market_date = tomorrow
         forecast = _make_forecast(high=75.0)
+        forecast.forecast_date = tomorrow
         config = StrategyConfig(
             no_distance_threshold_f=3, max_no_price=0.95, min_no_ev=0.01,
             day_ahead_ev_discount=0.7,

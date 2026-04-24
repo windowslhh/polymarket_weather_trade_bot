@@ -129,6 +129,15 @@ def evaluate_no_signals(
     ``GateContext`` for gates to read; each gate caches derived values
     (``distance``, ``win_prob``, ``ev``) so later gates reuse them.
     """
+    # FIX-22: event and forecast dates must match — Bug #1 (Houston 2026-04-17)
+    # was caused by routing today's forecast into D+1/D+2 evaluators.  Every
+    # evaluator asserts the invariant so a regression fails fast instead of
+    # shipping wrong trades.
+    assert forecast.forecast_date == event.market_date, (
+        f"forecast.forecast_date={forecast.forecast_date} != "
+        f"event.market_date={event.market_date} (city={event.city})"
+    )
+
     if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
         logger.debug("Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
                      event.city, hours_to_settlement, config.force_exit_hours)
@@ -186,6 +195,13 @@ def evaluate_locked_win_signals(
 
     ``LockedWinDetectionGate`` sets ``ctx.lock_reason`` / ``is_below_lock``
     mid-chain so the wrapper can build the signal once all gates pass.
+
+    FIX-22 note: this evaluator takes no Forecast so there is no
+    forecast_date/market_date mismatch to assert.  The equivalent
+    invariant — "daily_max is for today's event only" — is enforced by
+    the days_ahead early-return below and by the caller slicing
+    daily_max by city-local date before it ever reaches us.  See
+    rebalancer._route_forecasts for the caller contract.
     """
     if daily_max_f is None or days_ahead > 0 or not config.enable_locked_wins:
         return []
@@ -228,6 +244,12 @@ def evaluate_trim_signals(
     each represent one OR-branch of the trim rule — any firing
     produces a SELL signal.
     """
+    # FIX-22: forecast date must match event date (see evaluate_no_signals).
+    assert forecast.forecast_date == event.market_date, (
+        f"forecast.forecast_date={forecast.forecast_date} != "
+        f"event.market_date={event.market_date} (city={event.city})"
+    )
+
     signals: list[TradeSignal] = []
     ep = dict(entry_prices or {})
     ev_map = dict(entry_ev_map or {})
@@ -366,6 +388,14 @@ def evaluate_exit_signals(
     and Layer 3 (pre-settlement force exit) stay inline because they
     interleave — see ``CLAUDE.md`` 'Hybrid exit' entry.
     """
+    # FIX-22: when a forecast is supplied it must be for the event's date.
+    # `forecast` is optional here because exits can be driven by observation
+    # alone; only assert when it's actually provided.
+    assert forecast is None or forecast.forecast_date == event.market_date, (
+        f"forecast.forecast_date={forecast.forecast_date} != "
+        f"event.market_date={event.market_date} (city={event.city})"
+    )
+
     if observation is None or daily_max_f is None or days_ahead > 0:
         return []
 
