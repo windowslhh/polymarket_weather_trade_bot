@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -52,15 +52,18 @@ async def test_order_retries_on_generic_exception(monkeypatch):
         return v
 
     client._client.create_and_post_order = MagicMock(side_effect=side_effect)
-    # Patch asyncio.sleep so the test finishes fast.
-    with patch.object(clob_mod.asyncio, "sleep", new=MagicMock()) as mock_sleep:
-        # asyncio.sleep is awaited — replace with an awaitable no-op.
-        async def _noop(*_):
-            return None
-        monkeypatch.setattr(clob_mod.asyncio, "sleep", _noop)
-        result = await client.place_limit_order(
-            token_id="tok", side="BUY", price=0.5, size=10,
-        )
+
+    # Patch asyncio.sleep so the test finishes fast.  Monkeypatch tears down
+    # cleanly between tests; a naked `with patch.object(...)` wrapped around
+    # it confused the teardown order and leaked a MagicMock sleep into
+    # other tests.
+    async def _noop(*_):
+        return None
+
+    monkeypatch.setattr(clob_mod.asyncio, "sleep", _noop)
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
     assert result.success
     assert result.order_id == "ok3"
     assert client._client.create_and_post_order.call_count == 3

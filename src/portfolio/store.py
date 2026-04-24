@@ -95,7 +95,11 @@ CREATE TABLE IF NOT EXISTS edge_history (
     win_prob REAL,
     ev REAL,
     distance_f REAL,
-    trend_state TEXT
+    trend_state TEXT,
+    -- FIX-01: the forecast's own forecast_date, so paper-mode audits can
+    -- catch "today's forecast routed into D+1 event" regressions in the
+    -- log even when the evaluator's runtime assert didn't fire.
+    forecast_date TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_log_cycle ON decision_log(cycle_at);
@@ -155,6 +159,8 @@ class Store:
             ("orders", "idempotency_key", "ALTER TABLE orders ADD COLUMN idempotency_key TEXT"),
             ("orders", "failure_reason", "ALTER TABLE orders ADD COLUMN failure_reason TEXT"),
             ("positions", "source_order_id", "ALTER TABLE positions ADD COLUMN source_order_id TEXT DEFAULT 'legacy'"),
+            # FIX-01: forecast_date column for audit.
+            ("edge_history", "forecast_date", "ALTER TABLE edge_history ADD COLUMN forecast_date TEXT"),
         ]
         for table, column, sql in migrations:
             try:
@@ -477,15 +483,16 @@ class Store:
         forecast_high_f: float, price_yes: float, price_no: float,
         win_prob: float, ev: float, distance_f: float, trend_state: str,
         ensemble_spread_f: float | None = None,
+        forecast_date: str | None = None,
     ) -> None:
         await self.db.execute(
             """INSERT INTO edge_history (cycle_at, city, market_date, slot_label,
                forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
-               ensemble_spread_f)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               ensemble_spread_f, forecast_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cycle_at, city, market_date, slot_label,
              forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
-             ensemble_spread_f),
+             ensemble_spread_f, forecast_date),
         )
 
     async def flush_edge_batch(self) -> None:

@@ -109,9 +109,20 @@ class Rebalancer:
         # and every 60 min (full rebalance).  Used by position check for
         # better exit/trim decisions.
         self._cached_forecasts: dict[str, "Forecast"] = {}
+        # FIX-01: cache by (market_date, city) so D+1/D+2 events get the
+        # correct-day forecast instead of today's by accident.  Populated
+        # by run()/backfill, read by run_position_check + dashboard.
+        self._cached_forecasts_by_date: dict[date, dict[str, "Forecast"]] = {}
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
+
+    def _forecast_for_event(self, event: WeatherMarketEvent):
+        """FIX-01: look up the forecast whose forecast_date matches the event's
+        market_date.  Falls back to None (caller must skip the event) rather
+        than returning today's forecast for a D+1 event — that was Bug #1.
+        """
+        return self._cached_forecasts_by_date.get(event.market_date, {}).get(event.city)
 
     def _cleanup_recent_exits(self) -> None:
         """Remove expired entries from _recent_exits to prevent unbounded growth.
@@ -184,7 +195,7 @@ class Rebalancer:
 
             # Fetch forecasts so dashboard has data immediately (not after first rebalance)
             import asyncio
-            today = date.today()
+            today = datetime.now(timezone.utc).date()
             forecasts = await get_forecasts_batch(city_configs)
             self._cached_forecasts.update(forecasts)
 
@@ -199,6 +210,15 @@ class Rebalancer:
                 forecasts_d2 = fc_d2
             except Exception as exc:
                 logger.warning("Backfill: failed to fetch multi-day forecasts: %s", exc)
+
+            # FIX-01: seed by-date cache so run_position_check() can route
+            # forecasts by event.market_date even before the first full
+            # rebalance cycle has populated it.
+            self._cached_forecasts_by_date = {
+                today: dict(forecasts),
+                today + timedelta(days=1): dict(forecasts_d1),
+                today + timedelta(days=2): dict(forecasts_d2),
+            }
 
             self._last_forecasts = {}
             for city, f in forecasts.items():
@@ -597,8 +617,16 @@ class Rebalancer:
                         days_ahead=days_ahead, daily_max_final=_dm_final,
                     )
 
-                    # Use cached forecast for better exit decisions
-                    forecast = self._cached_forecasts.get(city)
+                    # FIX-01: use the forecast for *this event's* market_date.
+                    # Position-check exits on D+1/D+2 positions were using
+                    # today's forecast — see Bug #1 Houston 2026-04-17.  Only
+                    # skip if we can't find a matching-day forecast and the
+                    # event isn't same-day.
+                    forecast = self._cached_forecasts_by_date.get(
+                        market_date, {},
+                    ).get(city)
+                    if forecast is None and market_date == local_today:
+                        forecast = self._cached_forecasts.get(city)
 
                     # Pull trend state for this city so exit thresholds are tighter
                     # during breakout periods (trend is updated by the main 60-min cycle
@@ -766,8 +794,11 @@ class Rebalancer:
         self._cached_forecasts.update(forecasts)  # keep cache fresh
         logger.info("Fetched forecasts for %d cities", len(forecasts))
 
-        # Fetch +1 / +2 day forecasts for dashboard (best-effort, don't block trading)
-        today = date.today()
+        # FIX-01: fetch +1 / +2 day forecasts and route by event.market_date
+        # below.  Previously these were fetched for dashboard display only;
+        # the main evaluation loop fell back to today's forecast for
+        # tomorrow's events, producing Bug #1 (Houston 2026-04-17).
+        today = datetime.now(timezone.utc).date()
         forecasts_d1: dict = {}
         forecasts_d2: dict = {}
         try:
@@ -778,9 +809,17 @@ class Rebalancer:
             )
             forecasts_d1 = fc_d1
             forecasts_d2 = fc_d2
-            logger.info("Fetched +1/+2 day forecasts for dashboard")
+            logger.info("Fetched +1/+2 day forecasts for trading + dashboard")
         except Exception as exc:
             logger.warning("Failed to fetch multi-day forecasts: %s", exc)
+
+        # Rebuild the by-date cache on every full cycle so stale entries
+        # from yesterday can't leak into today's D+1 routing.
+        self._cached_forecasts_by_date = {
+            today: dict(forecasts),
+            today + timedelta(days=1): dict(forecasts_d1),
+            today + timedelta(days=2): dict(forecasts_d2),
+        }
 
         # Save forecast state for dashboard (today + 2 days)
         self._last_forecasts = {}
@@ -818,9 +857,22 @@ class Rebalancer:
         self._last_markets = []
 
         for event in events:
-            forecast = forecasts.get(event.city)
+            # FIX-01: pick the forecast matching event.market_date, not today.
+            # D+1/D+2 events now use tomorrow/day-after forecasts; a missing
+            # entry means we couldn't fetch the right-day forecast and must
+            # skip the event rather than trade on today's data.
+            forecast = self._forecast_for_event(event)
             if not forecast:
-                continue
+                # Fall back to today's if and only if the event is same-day
+                # (keeps the pre-FIX-01 behaviour for the common case).
+                if event.market_date == today:
+                    forecast = forecasts.get(event.city)
+                if not forecast:
+                    logger.info(
+                        "Skipping event %s (%s, date=%s): no forecast for that date",
+                        event.event_id[:8], event.city, event.market_date,
+                    )
+                    continue
 
             # Get daily max for the EVENT's market date (not the latest observation's date).
             # Near midnight local time, the live METAR may map to the next day, returning
@@ -902,6 +954,8 @@ class Rebalancer:
                         distance_f=slot_data["distance"],
                         trend_state=trend_state.value,
                         ensemble_spread_f=forecast.ensemble_spread_f,
+                        # FIX-01: audit trail for "which forecast_date did we evaluate with?"
+                        forecast_date=forecast.forecast_date.isoformat(),
                     )
                 except Exception:
                     logger.debug("Failed to insert edge snapshot for %s %s", event.city, slot_data["label"])
