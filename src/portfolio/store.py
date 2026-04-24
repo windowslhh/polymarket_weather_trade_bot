@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -106,6 +107,17 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_cycle ON decision_log(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_cycle ON edge_history(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_city ON edge_history(city);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_unique ON settlements(event_id, strategy);
+
+-- FIX-08: persist exit cooldowns so a restart doesn't reset the BUY→EXIT→BUY
+-- churn window.  Previously kept only in rebalancer._recent_exits (RAM); a
+-- post-TRIM crash meant the next startup could re-buy the same slot seconds
+-- after exiting.
+CREATE TABLE IF NOT EXISTS exit_cooldowns (
+    token_id TEXT PRIMARY KEY,
+    exit_time TEXT NOT NULL,
+    cooldown_hours REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exit_cooldowns_time ON exit_cooldowns(exit_time);
 """
 
 
@@ -507,6 +519,65 @@ class Store:
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # ── FIX-08: persistent exit cooldowns ─────────────────────────────
+
+    async def record_exit_cooldown(
+        self, token_id: str, exit_time: datetime, cooldown_hours: float,
+    ) -> None:
+        """Upsert an exit-cooldown row (token_id is PK).  If the same token
+        gets exited twice within a window, the later exit_time wins."""
+        await self.db.execute(
+            """INSERT INTO exit_cooldowns (token_id, exit_time, cooldown_hours)
+               VALUES (?, ?, ?)
+               ON CONFLICT(token_id) DO UPDATE SET
+                   exit_time = excluded.exit_time,
+                   cooldown_hours = excluded.cooldown_hours""",
+            (token_id, exit_time.isoformat(), cooldown_hours),
+        )
+        await self.db.commit()
+
+    async def get_active_exit_cooldowns(self) -> list[dict]:
+        """Return cooldown rows whose window hasn't elapsed yet.
+
+        Drops expired rows opportunistically — caller doesn't need to
+        re-check the cooldown_hours math against exit_time.
+        """
+        async with self.db.execute(
+            "SELECT token_id, exit_time, cooldown_hours FROM exit_cooldowns"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        now = datetime.now(timezone.utc)
+        active: list[dict] = []
+        expired_tids: list[str] = []
+        for r in rows:
+            try:
+                t = datetime.fromisoformat(str(r[1]).replace("Z", "+00:00"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if now < t + timedelta(hours=float(r[2])):
+                active.append({
+                    "token_id": r[0], "exit_time": t,
+                    "cooldown_hours": float(r[2]),
+                })
+            else:
+                expired_tids.append(r[0])
+        if expired_tids:
+            await self.db.executemany(
+                "DELETE FROM exit_cooldowns WHERE token_id = ?",
+                [(t,) for t in expired_tids],
+            )
+            await self.db.commit()
+        return active
+
+    async def clear_exit_cooldown(self, token_id: str) -> None:
+        """Delete a specific token's cooldown (used by tests and admin ops)."""
+        await self.db.execute(
+            "DELETE FROM exit_cooldowns WHERE token_id = ?", (token_id,),
+        )
+        await self.db.commit()
 
     async def get_daily_pnl(self, date_str: str) -> float | None:
         async with self.db.execute(

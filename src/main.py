@@ -209,6 +209,11 @@ async def run(args: argparse.Namespace) -> None:
     max_tracker = DailyMaxTracker()
     rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
 
+    # FIX-08: restore persistent exit cooldowns before trading starts.
+    # Without this, a crash inside a cooldown window would reset the
+    # BUY→EXIT→BUY churn guard.
+    await rebalancer.load_persistent_state()
+
     # Backfill today's METAR history so temperature curves show the full day
     logger.info("Backfilling today's METAR observations...")
     await rebalancer.backfill_today_observations()

@@ -95,7 +95,10 @@ class Rebalancer:
         # _cached_forecasts, _last_gamma_prices).
         self._cycle_lock = asyncio.Lock()
 
-        # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn
+        # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn.
+        # FIX-08: this dict is the in-process cache; the DB row is the source
+        # of truth across restarts.  Populated from DB at startup via
+        # load_persistent_state() and dual-written on every EXIT/TRIM.
         self._recent_exits: dict[str, datetime] = {}
         self._last_price_source: str = "gamma"
         self._last_unrealized: float = 0.0
@@ -116,6 +119,43 @@ class Rebalancer:
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
+
+    async def load_persistent_state(self) -> None:
+        """FIX-08: restore exit cooldowns from DB on startup.
+
+        Without this, a restart reset the cooldown window — a TRIM at
+        14:59 followed by a crash at 15:00 could produce a BUY at 15:01,
+        exactly the BUY→EXIT→BUY churn the cooldown was designed to
+        prevent.  The DB row is the source of truth; the in-process
+        `_recent_exits` dict is a read cache populated here.
+        """
+        try:
+            active = await self._portfolio.load_active_exit_cooldowns()
+        except Exception:
+            logger.exception("load_persistent_state failed — starting with empty cooldowns")
+            return
+        self._recent_exits.update(active)
+        if active:
+            logger.info(
+                "Exit cooldowns restored: %d token(s) still in cooldown window",
+                len(active),
+            )
+
+    async def _record_exit_cooldown(self, token_id: str, now: datetime) -> None:
+        """Dual-write: RAM cache + DB row.  Keeps the in-cycle fast path
+        backed by a persistent source of truth."""
+        self._recent_exits[token_id] = now
+        try:
+            await self._portfolio.record_exit_cooldown(
+                token_id=token_id, exit_time=now,
+                cooldown_hours=self._config.strategy.exit_cooldown_hours,
+            )
+        except Exception:
+            # The cache write already happened, so the current process
+            # still respects the cooldown; we just lose durability on a
+            # crash.  Log loudly so the operator knows disk bookkeeping
+            # lagged — critical infra issue but not trade-blocking.
+            logger.exception("record_exit_cooldown DB write failed for %s", token_id)
 
     def _forecast_for_event(self, event: WeatherMarketEvent):
         """FIX-01: look up the forecast whose forecast_date matches the event's
@@ -728,7 +768,7 @@ class Rebalancer:
                     for sig in exit_signals:
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
-                        self._recent_exits[sig.token_id] = now
+                        await self._record_exit_cooldown(sig.token_id, now)
                         signals.append(sig)
 
                     # Tag TRIM signals — reason was already built by the
@@ -737,7 +777,7 @@ class Rebalancer:
                     for sig in trim_signals:
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] {sig.reason or 'TRIM'}"
-                        self._recent_exits[sig.token_id] = now
+                        await self._record_exit_cooldown(sig.token_id, now)
                         signals.append(sig)
 
                 if skipped_no_obs:
@@ -1235,7 +1275,7 @@ class Rebalancer:
                 # inline because evaluate_exit_signals does not set them.
                 for signal in exit_signals + trim_signals:
                     signal.strategy = strat_name
-                    self._recent_exits[signal.token_id] = now
+                    await self._record_exit_cooldown(signal.token_id, now)
                     if signal in exit_signals:
                         signal.reason = (
                             f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot"

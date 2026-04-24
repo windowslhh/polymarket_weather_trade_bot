@@ -229,6 +229,26 @@ class PortfolioTracker:
         """Delegate to store.insert_decision_log()."""
         await self._store.insert_decision_log(**kwargs)
 
+    # ── FIX-08: persistent exit-cooldown API ──────────────────────────
+
+    async def record_exit_cooldown(
+        self, token_id: str, exit_time: date | None = None,
+        cooldown_hours: float = 4.0,
+    ) -> None:
+        """Record a BUY-after-exit cooldown for a token.  Both the DB
+        and any caller-maintained RAM cache should be updated in lockstep.
+        """
+        from datetime import datetime, timezone
+        t = exit_time or datetime.now(timezone.utc)
+        await self._store.record_exit_cooldown(token_id, t, cooldown_hours)
+
+    async def load_active_exit_cooldowns(self) -> dict[str, date]:
+        """Return a dict of {token_id: exit_time} for all cooldowns whose
+        window hasn't yet elapsed.  Expired rows are deleted as a side
+        effect so the DB doesn't balloon forever."""
+        rows = await self._store.get_active_exit_cooldowns()
+        return {r["token_id"]: r["exit_time"] for r in rows}
+
     async def get_daily_pnl(self, day: date | None = None) -> float | None:
         """Get the realized P&L for a given day."""
         d = (day or date.today()).isoformat()
