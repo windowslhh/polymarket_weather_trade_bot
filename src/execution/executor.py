@@ -69,10 +69,32 @@ class Executor:
             signal.event.city,
         )
 
+        # Review 🟡 #7: dry-run mode should produce no DB side effects beyond
+        # the pre-existing "decision_log" trail — in particular it must NOT
+        # write to the orders table, because every dry-run cycle would
+        # append an orders row that's immediately marked 'failed'.  That
+        # pollutes the table and breaks the reconciler's "pending =
+        # orphan" invariant.
+        store = self._portfolio.store
+        # Use `is True` so a MagicMock auto-attribute (truthy by default)
+        # doesn't accidentally flip test harnesses into the dry-run path.
+        clob_config = getattr(self._clob, "_config", None)
+        is_dry_run = getattr(clob_config, "dry_run", False) is True
+
+        if is_dry_run:
+            # Just send the signal to CLOB (which logs [DRY RUN]) and return.
+            # No orders row, no position insert, no reconciler breadcrumb.
+            await self._clob.place_limit_order(
+                token_id=signal.token_id,
+                side=signal.side.value,
+                price=price,
+                size=shares,
+            )
+            return
+
         # FIX-03: persist a pending order before hitting CLOB so a crash between
         # the CLOB fill and the position insert leaves a discoverable breadcrumb.
         idempotency_key = uuid.uuid4().hex
-        store = self._portfolio.store
         await store.insert_pending_order(
             idempotency_key=idempotency_key,
             event_id=signal.event.event_id,

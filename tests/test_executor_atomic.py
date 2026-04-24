@@ -16,6 +16,7 @@ import asyncio
 import tempfile
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -183,6 +184,37 @@ async def test_crash_between_clob_and_record_fill_leaves_pending():
     assert rows[0]["idempotency_key"]
     assert row[0] == 0  # no position was persisted
 
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_writes_nothing_to_orders():
+    """Review 🟡 #7: dry-run mode must not pollute the orders table.
+
+    Pre-fix every dry-run cycle added a pending row that was immediately
+    marked 'failed' — hundreds of junk rows per day, plus it broke the
+    reconciler's "pending means orphan" invariant on the first live
+    startup.
+    """
+    store, _ = await _mk_store()
+    tracker = PortfolioTracker(store)
+
+    # A ClobClient-like mock with a dry_run=True config.
+    class _DryRunClob:
+        _config = SimpleNamespace(dry_run=True, paper=False)
+        async def place_limit_order(self, **kw):
+            return OrderResult(order_id="dry_run", success=False, message="dry")
+
+    executor = Executor(_DryRunClob(), tracker)  # type: ignore[arg-type]
+
+    await executor.execute_signals([_build_signal()])
+
+    async with store.db.execute("SELECT COUNT(*) FROM orders") as cur:
+        (count,) = await cur.fetchone()
+    async with store.db.execute("SELECT COUNT(*) FROM positions") as cur:
+        (pos_count,) = await cur.fetchone()
+    assert count == 0
+    assert pos_count == 0
     await store.close()
 
 
