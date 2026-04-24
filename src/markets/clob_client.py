@@ -335,20 +335,37 @@ class ClobClient:
             return True
 
         def _match_order(order: dict) -> bool:
+            """Match a live CLOB order against the pending intent.
+
+            Review H-7 (2026-04-24): a partially-filled order reports
+            original_size for its intent and size_matched for the filled
+            portion.  The still-live remainder is (original - matched).
+            Pre-H-7 we matched on original_size only, which meant a 10-share
+            intent whose first 3 shares already filled looked like a
+            "7-share open order", not matching our "10-share pending" row
+            by the 0.5-share tolerance.  Now we compute remaining and
+            compare to the intent — still-open orders are correctly
+            identified even after a partial fill.
+            """
             try:
                 oside = str(order.get("side", "")).upper()
                 oprice = float(order.get("price", 0))
-                # 'original_size' | 'size_matched' etc — open orders generally
-                # expose 'original_size' + 'size_matched'; use the remaining
-                # size if available, otherwise original.
-                osize = float(order.get("original_size", order.get("size", 0)))
+                original = float(order.get("original_size", order.get("size", 0)))
+                matched = float(order.get("size_matched", 0))
+                remaining = original - matched if original else 0.0
             except (TypeError, ValueError):
                 return False
             if oside != side.upper():
                 return False
             if abs(oprice - price) > tolerance_price:
                 return False
-            if abs(osize - size_shares) > tolerance_size:
+            # Our intent was size_shares; the remainder on the book must
+            # match that (partial fills leave (size - filled) resting).
+            if abs(remaining - size_shares) > tolerance_size and (
+                # Fall-through: an order with no size_matched field (some
+                # API shapes omit it) should still match if original ≈ intent.
+                abs(original - size_shares) > tolerance_size
+            ):
                 return False
             return True
 

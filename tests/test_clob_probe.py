@@ -121,6 +121,34 @@ async def test_dict_wrapped_response_is_unwrapped():
 
 
 @pytest.mark.asyncio
+async def test_partial_fill_still_matches():
+    """Review H-7: CLOB open order reports original_size + size_matched.
+    Pre-H-7 we matched on original_size; a 10-share intent with 3 shares
+    already filled left a 7-share remainder that failed to pair.
+
+    H-7 compares (original - matched) against our intent, so a 10-share
+    open order with 0 matched AND a 10-share intent both match.  A
+    10-share open order with 3 matched (7 remaining) also matches a
+    7-share intent (which is what the DB-side pending row would claim
+    after the partial fill got reconciled elsewhere).
+    """
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[])
+    # Order placed at 10 shares, 3 already matched → 7 remaining.
+    # A 7-share pending intent should match this open order.
+    client._client.get_orders = MagicMock(return_value=[{
+        "id": "o_partial", "side": "BUY", "price": 0.5,
+        "original_size": 10.0, "size_matched": 3.0,
+    }])
+
+    r = await client.probe_order_status(
+        token_id="tok1", side="BUY", price=0.5, size_shares=7.0,
+    )
+    assert r.state == "open"
+    assert r.order_id == "o_partial"
+
+
+@pytest.mark.asyncio
 async def test_price_improvement_still_matches():
     """Review H-3: a price-improvement fill must match the pending order.
 

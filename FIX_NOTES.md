@@ -19,6 +19,42 @@ sprint.
 - **Backtest integration with live db**: current backtest pipeline is offline; stitching
   it to the live edge_history would let us paper-grade variants without redeploying.
 
+## Runbook — Operator manual actions
+
+**When the reconciler `sys.exit(3)`s on a CLOB/DB mismatch (FIX-05)**:
+
+The container is set to `restart: unless-stopped` by default, which means
+docker-compose will loop on sys.exit until the operator intervenes.  That's
+intentional — we'd rather the bot stay down than start trading on an
+untrusted state.  To recover:
+
+1. Pull the critical alert from your webhook — it names the idempotency_key
+   and the DB vs CLOB numbers.
+2. Log into the Polymarket frontend, look up the order history for the
+   affected token, and confirm manually what actually happened.
+3. On the VPS:
+   ```
+   docker compose exec -T weather-bot python -c \
+       "import asyncio; from pathlib import Path; from src.portfolio.store import Store; \
+        async def main(): \
+            s = Store(Path('data/bot.db')); await s.initialize(); \
+            await s.mark_order_failed('<idempotency_key>', 'operator override: <reason>'); \
+            await s.close(); \
+        asyncio.run(main())"
+   ```
+   or manually close the CLOB position and set the DB row to `'failed'`.
+4. `docker compose stop && docker compose up -d` — reconciler re-runs
+   against a clean state.
+
+Never `--skip-reconciler` (not a flag we've added on purpose — it would
+re-create the "pending → orphan" ambiguity that FIX-05 was designed to fix).
+
+Alternative: if you want the container to halt instead of loop on the
+restart policy, change docker-compose.yml's `restart:` to `no` for the
+weather-bot service.  We keep the default `unless-stopped` because
+transient errors (network blips during the probe) are more common than
+genuine DB/CLOB divergence — a loop self-heals those; a halt doesn't.
+
 ## Known regressions tolerated until after go-live
 
 - VPS deploy path remains `/opt/weather-bot-new` (not `/opt/weather-bot`). Legacy dir

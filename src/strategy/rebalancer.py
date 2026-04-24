@@ -115,6 +115,19 @@ class Rebalancer:
         # FIX-01: cache by (market_date, city) so D+1/D+2 events get the
         # correct-day forecast instead of today's by accident.  Populated
         # by run()/backfill, read by run_position_check + dashboard.
+        #
+        # Known subtlety (H-9): the cache key is UTC today; cities on the
+        # west coast hit local midnight 5-8 hours *after* UTC rolls over.
+        # During that window (00:00-08:00 UTC), an event whose
+        # market_date we've already classified as D+1 can reach TRIM with
+        # forecast=None if the previous day's cache entry was evicted
+        # before today's got populated.  For the 60-min rebalance this
+        # is self-healing (the next cycle refills); for the 15-min
+        # position_check it can briefly skip TRIM.  Not fixed here
+        # because a city-local keying scheme would require carrying
+        # tz/city along every lookup — a larger refactor better done
+        # post go-live.  Operators see a "TRIM skip (missing forecast)"
+        # log line during the window.
         self._cached_forecasts_by_date: dict[date, dict[str, "Forecast"]] = {}
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
@@ -239,17 +252,18 @@ class Rebalancer:
             forecasts = await get_forecasts_batch(city_configs)
             self._cached_forecasts.update(forecasts)
 
-            forecasts_d1: dict = {}
-            forecasts_d2: dict = {}
-            try:
-                fc_d1, fc_d2 = await asyncio.gather(
-                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
-                )
-                forecasts_d1 = fc_d1
-                forecasts_d2 = fc_d2
-            except Exception as exc:
-                logger.warning("Backfill: failed to fetch multi-day forecasts: %s", exc)
+            # Review H-4: return_exceptions=True so one day's failure doesn't
+            # drop the other.  Non-dict results are treated as empty.
+            fc_results = await asyncio.gather(
+                get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                return_exceptions=True,
+            )
+            forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+            forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+            for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+                if isinstance(r, Exception):
+                    logger.warning("Backfill: %s forecast fetch failed — %s", label, r)
 
             # FIX-01: seed by-date cache so run_position_check() can route
             # forecasts by event.market_date even before the first full
@@ -394,14 +408,20 @@ class Rebalancer:
                 # Also refresh D+1/D+2 so held D+1 positions get fresh exit
                 # inputs when TRIM fires for them.
                 today = datetime.now(timezone.utc).date()
-                try:
-                    fc_d1, fc_d2 = await asyncio.gather(
-                        get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                        get_forecasts_batch(city_configs, today + timedelta(days=2)),
-                    )
-                except Exception as exc:
-                    logger.debug("Forecast refresh: D+1/D+2 skipped (%s)", exc)
-                    fc_d1, fc_d2 = {}, {}
+                # Review H-4: return_exceptions=True so one day failing
+                # doesn't bubble up and drop the other.  The per-day
+                # isinstance check below filters out exception objects
+                # before they enter the by-date cache.
+                fc_results = await asyncio.gather(
+                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                    return_exceptions=True,
+                )
+                fc_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+                fc_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+                for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+                    if isinstance(r, Exception):
+                        logger.debug("Forecast refresh %s skipped: %s", label, r)
                 # Replace today's entry outright (fresher is strictly
                 # better); merge-update D+1/D+2 so a transient fetch
                 # failure doesn't blow away still-valid cached data.
@@ -813,7 +833,12 @@ class Rebalancer:
                     # Tag TRIM signals — reason was already built by the
                     # evaluator (e.g. "TRIM [price_stop]: 0.645→0.180");
                     # we only prefix the strategy tag.
+                    # Review H-8: dedup against EXIT signals.  When both
+                    # fire on the same token this cycle, keep EXIT only.
+                    exit_tids_pc = {s.token_id for s in exit_signals}
                     for sig in trim_signals:
+                        if sig.token_id in exit_tids_pc:
+                            continue
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] {sig.reason or 'TRIM'}"
                         await self._record_exit_cooldown(sig.token_id, now)
@@ -975,19 +1000,19 @@ class Rebalancer:
         # the main evaluation loop fell back to today's forecast for
         # tomorrow's events, producing Bug #1 (Houston 2026-04-17).
         today = datetime.now(timezone.utc).date()
-        forecasts_d1: dict = {}
-        forecasts_d2: dict = {}
-        try:
-            import asyncio
-            fc_d1, fc_d2 = await asyncio.gather(
-                get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                get_forecasts_batch(city_configs, today + timedelta(days=2)),
-            )
-            forecasts_d1 = fc_d1
-            forecasts_d2 = fc_d2
-            logger.info("Fetched +1/+2 day forecasts for trading + dashboard")
-        except Exception as exc:
-            logger.warning("Failed to fetch multi-day forecasts: %s", exc)
+        # Review H-4: return_exceptions=True so one day's failure doesn't
+        # drop the other.  Non-dict results are treated as empty.
+        fc_results = await asyncio.gather(
+            get_forecasts_batch(city_configs, today + timedelta(days=1)),
+            get_forecasts_batch(city_configs, today + timedelta(days=2)),
+            return_exceptions=True,
+        )
+        forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+        forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+        for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+            if isinstance(r, Exception):
+                logger.warning("Full cycle: %s forecast fetch failed — %s", label, r)
+        logger.info("Fetched +1/+2 day forecasts for trading + dashboard")
 
         # Rebuild the by-date cache on every full cycle so stale entries
         # from yesterday can't leak into today's D+1 routing.
@@ -1173,6 +1198,29 @@ class Rebalancer:
                 # forecast error is small enough for the 0.08 EV bar to
                 # fire without noise).  Empty = all cities allowed.
                 if strat_cfg.city_whitelist and event.city not in strat_cfg.city_whitelist:
+                    # Review H-6: surface the skip in decision_log so an
+                    # operator investigating "why didn't D' fire on NYC?"
+                    # can distinguish a whitelist reject from a legitimate
+                    # no-signal.  Logged at the event level (no slot) so
+                    # we don't flood the table with one row per slot.
+                    try:
+                        await self._portfolio.insert_decision_log(
+                            cycle_at=cycle_at,
+                            city=event.city,
+                            event_id=event.event_id,
+                            signal_type="REJECT",
+                            slot_label="",
+                            forecast_high_f=forecast.predicted_high_f if forecast else None,
+                            daily_max_f=daily_max,
+                            trend_state=trend_state.value,
+                            win_prob=0.0, expected_value=0.0,
+                            price=0.0, size_usd=0.0,
+                            action="SKIP",
+                            reason=f"[{strat_name}] REJECT: city_not_in_whitelist",
+                            strategy=strat_name,
+                        )
+                    except Exception:
+                        logger.debug("Failed to log whitelist skip for %s", event.city)
                     continue
 
                 # Auto-calibrate distance threshold from historical error data (k×std formula)
@@ -1345,6 +1393,15 @@ class Rebalancer:
                         )
                     else:
                         signal.reason = f"[{strat_name}] {signal.reason or 'TRIM'}"
+                # Review H-8: when the same (event, token, strategy) has
+                # both an EXIT and a TRIM in the same cycle, keep EXIT
+                # only.  Two reasons: (a) EXIT is driven by live daily_max
+                # proximity — a stronger signal than EV decay; (b) sending
+                # both produces two SELL orders racing at CLOB for the
+                # same shares, half of which will fail with "position
+                # closed" and generate noise in the alert channel.
+                exit_tids = {s.token_id for s in exit_signals}
+                trim_signals = [s for s in trim_signals if s.token_id not in exit_tids]
                 all_signals.extend(exit_signals)
                 all_signals.extend(trim_signals)
 
