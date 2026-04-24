@@ -233,8 +233,9 @@ def _substantive_mismatch(row: dict[str, Any], status: ClobOrderStatus) -> bool:
 
     We're permissive on tiny float drift (CLOB may round differently) but
     strict on anything suggesting a different order entirely.
+    Widened to 0.01 (10 ticks) alongside probe_order_status — H-3.
     """
-    if status.price is not None and abs(status.price - float(row["price"])) > 0.005:
+    if status.price is not None and abs(status.price - float(row["price"])) > 0.01:
         return True
     if status.size is not None:
         # size from CLOB is in shares; row.size_usd is dollars.  Re-derive

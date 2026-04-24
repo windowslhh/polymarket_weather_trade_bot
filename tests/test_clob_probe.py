@@ -121,6 +121,43 @@ async def test_dict_wrapped_response_is_unwrapped():
 
 
 @pytest.mark.asyncio
+async def test_price_improvement_still_matches():
+    """Review H-3: a price-improvement fill must match the pending order.
+
+    A BUY@0.50 limit can fill at 0.494 when a marketable sell crosses our
+    bid.  With the pre-H-3 0.005 tolerance |0.494-0.50|=0.006 failed to
+    match; H-3 widens to 0.01 so this real-market behaviour succeeds.
+    """
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[{
+        "id": "improved_1", "side": "BUY", "price": 0.494, "size": 10.0,
+    }])
+    client._client.get_orders = MagicMock(return_value=[])
+
+    r = await client.probe_order_status(
+        token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
+    )
+    assert r.state == "filled", (
+        "Price-improved fill (0.494 vs 0.50 limit, delta 0.006) must match"
+    )
+
+
+@pytest.mark.asyncio
+async def test_price_outside_tolerance_is_unmatched():
+    """H-3 widened tolerance to 0.01; 0.011+ drift still misses intentionally."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[{
+        "id": "far", "side": "BUY", "price": 0.48, "size": 10.0,  # 0.02 off
+    }])
+    client._client.get_orders = MagicMock(return_value=[])
+
+    r = await client.probe_order_status(
+        token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
+    )
+    assert r.state == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_exception_returns_unreachable():
     client = _make_client()
     client._client.get_trades = MagicMock(side_effect=RuntimeError("network"))

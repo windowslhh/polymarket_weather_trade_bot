@@ -309,7 +309,14 @@ class ClobClient:
             )
 
         client = self._get_client()
-        tolerance_price = 0.005
+        # Review H-3 (2026-04-24): widened from 0.005 to 0.01 so a 5-tick
+        # price-improvement fill (e.g. a BUY@0.50 limit that filled at 0.494
+        # because a sell-side order crossed our bid) still matches in the
+        # reconciler.  5 ticks was conservative for exact-match reasoning
+        # but too strict for real market microstructure; 10 ticks is still
+        # tight enough that an unrelated order at ±0.05 won't be mistaken
+        # for our intent.
+        tolerance_price = 0.01
         tolerance_size = 0.5
 
         def _match_trade(trade: dict) -> bool:
