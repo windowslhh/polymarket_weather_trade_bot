@@ -18,6 +18,14 @@ BACKUP_DIR="$BOT_DIR/data/backups"
 
 [ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
 
+# FIX-15: lock down .env to rw------- so the private key and API creds
+# aren't world-readable.  Noop when .env doesn't exist (fresh install
+# will place it later).
+if [ -f "$BOT_DIR/.env" ]; then
+    chmod 600 "$BOT_DIR/.env"
+    echo "  chmod 600 applied to $BOT_DIR/.env"
+fi
+
 cd "$BOT_DIR"
 
 # 1. Stop the bot

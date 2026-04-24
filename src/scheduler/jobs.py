@@ -22,6 +22,20 @@ JOB_COALESCE = True
 JOB_MISFIRE_GRACE_S = 300
 
 
+async def _prune_table(store, table: str, column: str, cutoff_expr: str) -> int:
+    """Delete rows older than `cutoff_expr` (e.g. "-30 days") from `table`.
+
+    Returns the number of rows deleted.  Kept at module level so the test
+    suite can exercise it without spinning up a scheduler.
+    """
+    cursor = await store.db.execute(
+        f"DELETE FROM {table} WHERE {column} < datetime('now', ?)",
+        (cutoff_expr,),
+    )
+    await store.db.commit()
+    return cursor.rowcount or 0
+
+
 def setup_scheduler(
     config: AppConfig,
     rebalancer: Rebalancer,
@@ -79,6 +93,41 @@ def setup_scheduler(
         run_date=datetime.now(timezone.utc) + timedelta(seconds=5),
         id="rebalance_startup",
         name="Initial rebalance on startup",
+        coalesce=JOB_COALESCE,
+        misfire_grace_time=JOB_MISFIRE_GRACE_S,
+    )
+
+    # FIX-13: nightly prune + WAL checkpoint.  Without this, edge_history
+    # grows ~1k rows/day and decision_log grows ~100/day; the SQLite file
+    # balloons and WAL-mode journal stays huge.  Keeping 30 days of
+    # edge_history and 90 days of decision_log is more than enough for
+    # backtesting while capping disk use.
+    async def prune_and_checkpoint():
+        store = rebalancer._portfolio.store  # tracker.store property
+        try:
+            edge_deleted = await _prune_table(
+                store, "edge_history", "cycle_at", "-30 days",
+            )
+            dec_deleted = await _prune_table(
+                store, "decision_log", "cycle_at", "-90 days",
+            )
+            # WAL checkpoint reclaims space from the -wal/-shm files.
+            await store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await store.db.commit()
+            logger.info(
+                "Prune+checkpoint: edge_history=%d rows deleted, decision_log=%d rows deleted",
+                edge_deleted, dec_deleted,
+            )
+        except Exception:
+            logger.exception("prune_and_checkpoint failed")
+
+    scheduler.add_job(
+        prune_and_checkpoint,
+        "cron",
+        hour=3, minute=0,
+        id="prune_job",
+        name="Nightly prune + WAL checkpoint",
+        max_instances=1,
         coalesce=JOB_COALESCE,
         misfire_grace_time=JOB_MISFIRE_GRACE_S,
     )

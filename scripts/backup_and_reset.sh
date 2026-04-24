@@ -12,6 +12,11 @@ BACKUP_DIR="$BOT_DIR/data/backups"
 
 [ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
 
+# FIX-15: same .env lockdown as full_reset_and_deploy.sh.  Idempotent.
+if [ -f "$BOT_DIR/.env" ]; then
+    chmod 600 "$BOT_DIR/.env"
+fi
+
 # 1. Stop the bot
 echo "Stopping bot..."
 cd "$BOT_DIR"
