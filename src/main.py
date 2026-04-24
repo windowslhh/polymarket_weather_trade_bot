@@ -14,6 +14,7 @@ from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
+from src.preflight import run_preflight
 from src.recovery.reconciler import reconcile_pending_orders
 from src.scheduler.jobs import setup_scheduler
 from src.strategy.rebalancer import Rebalancer
@@ -187,6 +188,20 @@ async def run(args: argparse.Namespace) -> None:
         )
 
     is_paper = config.paper or config.dry_run
+
+    # FIX-M7: preflight checks before we touch any state.  DB write /
+    # CLOB reachability / webhook ping — any fatal failure exits 2
+    # before the scheduler starts, so a broken deploy can't silently
+    # run for an hour on a dead dependency.
+    await run_preflight(
+        store=store,
+        clob_client=live_clob_for_probe,
+        alerter=alerter,
+        webhook_url=config.alert_webhook_url,
+        is_paper=config.paper,
+        is_dry_run=config.dry_run,
+    )
+
     await reconcile_pending_orders(
         store=store, alerter=alerter,
         query_clob_order=None if is_paper else _probe,

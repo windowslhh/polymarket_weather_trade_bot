@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent.parent
 
 
-@dataclass
+# FIX-M8: freeze leaf configs so no code path can mutate them at runtime.
+# AppConfig stays mutable because main.py flips dry_run / paper on it
+# right after load based on CLI args; migrating that to `replace()` is
+# a heavier refactor deferred post go-live.
+@dataclass(frozen=True)
 class CityConfig:
     name: str
     icao: str
@@ -19,7 +23,7 @@ class CityConfig:
     tz: str = "America/New_York"  # IANA timezone for local date grouping
 
 
-@dataclass
+@dataclass(frozen=True)
 class StrategyConfig:
     no_distance_threshold_f: int = 8
     min_no_ev: float = 0.03
@@ -176,7 +180,7 @@ def get_strategy_variants() -> dict[str, dict]:
     }
 
 
-@dataclass
+@dataclass(frozen=True)
 class SchedulingConfig:
     discovery_interval_minutes: int = 15
     rebalance_interval_minutes: int = 60

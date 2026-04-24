@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -45,8 +46,14 @@ def _effective_city_config(strat_cfg, city: str):
     """Return a copy of strat_cfg with max_exposure_per_city_usd reduced for
     thin-liquidity cities.  Non-thin cities get the original config back
     unchanged (no allocation).  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+
+    FIX-M9: match case-insensitively so a config with "miami" or
+    "MIAMI" doesn't silently skip the reduction.  Event cities come
+    from Gamma's market titles which are not guaranteed to match the
+    capitalization of our config.
     """
-    if city in strat_cfg.thin_liquidity_cities:
+    thin_ci = {c.lower() for c in strat_cfg.thin_liquidity_cities}
+    if city.lower() in thin_ci:
         reduced = strat_cfg.max_exposure_per_city_usd * strat_cfg.thin_liquidity_exposure_ratio
         return replace(strat_cfg, max_exposure_per_city_usd=reduced)
     return strat_cfg
@@ -302,7 +309,10 @@ class Rebalancer:
         observation_series: dict[str, list[tuple[str, float]]] = {}
         active_cfgs = {c.icao: c for c in (self._active_city_configs or self._config.cities)}
         for icao, cfg in active_cfgs.items():
-            local_day = datetime.now(ZoneInfo(cfg.tz)).date() if cfg.tz else date.today()
+            local_day = (
+                datetime.now(ZoneInfo(cfg.tz)).date() if cfg.tz
+                else datetime.now(timezone.utc).date()  # FIX-M1
+            )
             obs = self._max_tracker.get_observations(icao, day=local_day)
             if obs:
                 observation_series[cfg.name] = obs
@@ -492,7 +502,9 @@ class Rebalancer:
         # still run, because closing out is ALWAYS allowed.
         _cb_block_buys = False
         try:
-            _daily_pnl = await self._portfolio.get_daily_pnl(date.today())
+            _daily_pnl = await self._portfolio.get_daily_pnl(
+                datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
+            )
             if (
                 _daily_pnl is not None
                 and _daily_pnl < -self._config.strategy.daily_loss_limit_usd
@@ -619,7 +631,8 @@ class Rebalancer:
                         local_today = city_now.date()
                     else:
                         local_hour = None
-                        local_today = date.today()
+                        # FIX-M1: UTC day when we have no tz for this city.
+                        local_today = datetime.now(timezone.utc).date()
 
                     observation = city_observations.get(city)
                     error_dist = self._error_dists.get(city)
@@ -717,7 +730,11 @@ class Rebalancer:
                             ensemble_spread_f=_fc.ensemble_spread_f if _fc else None,
                             enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
                         )
-                        strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+                        # FIX-P2-11: math.ceil (conservative rounding) instead
+                    # of banker's round — a calibrated threshold of 5.5°F
+                    # shouldn't silently become 6 half the time and 5 the
+                    # other half; 6 is the right floor for "safe entry".
+                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
 
                     # Build a lightweight event object for signal evaluation
                     event_obj = WeatherMarketEvent(
@@ -903,7 +920,9 @@ class Rebalancer:
         await self.run_settlement_only()
 
         # Check circuit breaker
-        daily_pnl = await self._portfolio.get_daily_pnl(date.today())
+        daily_pnl = await self._portfolio.get_daily_pnl(
+            datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
+        )
         if daily_pnl is not None and daily_pnl < -self._config.strategy.daily_loss_limit_usd:
             logger.warning("Circuit breaker triggered: daily P&L = $%.2f", daily_pnl)
             await self._alerter.circuit_breaker(daily_pnl)
@@ -1230,7 +1249,11 @@ class Rebalancer:
                         ensemble_spread_f=forecast.ensemble_spread_f if forecast else None,
                         enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
                     )
-                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+                    # FIX-P2-11: math.ceil (conservative rounding) instead
+                    # of banker's round — a calibrated threshold of 5.5°F
+                    # shouldn't silently become 6 half the time and 5 the
+                    # other half; 6 is the right floor for "safe entry".
+                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
 
                 # Build current prices map from refreshed event slot data
                 current_slot_prices: dict[str, float] = {}

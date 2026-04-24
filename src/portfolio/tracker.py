@@ -250,8 +250,13 @@ class PortfolioTracker:
         return {r["token_id"]: r["exit_time"] for r in rows}
 
     async def get_daily_pnl(self, day: date | None = None) -> float | None:
-        """Get the realized P&L for a given day."""
-        d = (day or date.today()).isoformat()
+        """Get the realized P&L for a given day.
+
+        FIX-M1: UTC default so server-local clock drift doesn't cross the
+        circuit-breaker into a new bucket one hour early.
+        """
+        from datetime import datetime, timezone
+        d = (day or datetime.now(timezone.utc).date()).isoformat()
         return await self._store.get_daily_pnl(d)
 
     async def compute_unrealized_pnl(
@@ -298,7 +303,10 @@ class PortfolioTracker:
         gamma_prices: dict[str, float] | None = None,
     ) -> None:
         """Take a daily P&L snapshot with unrealized PnL."""
-        today = date.today().isoformat()
+        # FIX-M1: UTC snapshot day matches the daily_pnl PK the rest of
+        # the system keys off of.
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
         exposure = await self._store.get_total_exposure()
         unrealized = await self.compute_unrealized_pnl(clob_client, gamma_prices)
 

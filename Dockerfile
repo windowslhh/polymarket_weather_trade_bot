@@ -21,6 +21,15 @@ COPY config.yaml .
 # Data directory (mount as volume for persistence)
 RUN mkdir -p data/history
 
+# FIX-M5: drop root in the runtime container.  Creates a dedicated `bot`
+# user with uid 1000 (stable for bind-mounted volume ownership) and
+# chowns the app tree + data dir before switching.  Removes the
+# attacker's easy escalation path if any of the Python deps get
+# compromised upstream.
+RUN useradd --uid 1000 --create-home --shell /bin/bash bot \
+    && chown -R bot:bot /app
+USER bot
+
 EXPOSE 5001
 
 # FIX-16: container healthcheck — hit the Flask /api/status endpoint.

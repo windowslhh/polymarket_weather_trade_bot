@@ -54,6 +54,45 @@ class Executor:
         Entry signals (BUY) are placed as limit orders.
         Exit signals (SELL) are placed at best available price.
         """
+        # FIX-M2: pre-compute total BUY cost across the whole batch and
+        # cross-check against the max_total_exposure_usd cap BEFORE we
+        # fire any orders.  The per-signal sizer (rebalancer.compute_size)
+        # already respects the cap, but a batch of signals built from a
+        # stale exposure snapshot could still cross the cap if every
+        # signal independently looked fine.  This belt-and-braces check
+        # trims the tail of the batch rather than rejecting it outright.
+        total_buy_cost = sum(
+            s.suggested_size_usd for s in signals
+            if s.side == Side.BUY and s.suggested_size_usd > 0
+        )
+        if total_buy_cost > 0:
+            try:
+                existing = await self._portfolio.get_total_exposure()
+            except Exception:
+                existing = 0.0  # fail-open; per-signal check still applies
+            max_total = getattr(
+                getattr(self._clob, "_config", None), "strategy", None,
+            )
+            limit = getattr(max_total, "max_total_exposure_usd", None) if max_total else None
+            if limit is not None and existing + total_buy_cost > limit:
+                trim_target = max(limit - existing, 0.0)
+                logger.warning(
+                    "Executor: batch total_buy_cost=$%.2f would push exposure "
+                    "to $%.2f (cap $%.2f) — trimming new BUYs to $%.2f",
+                    total_buy_cost, existing + total_buy_cost, limit, trim_target,
+                )
+                # Walk BUYs in order, keeping each whole signal while
+                # budget remains; mark the rest suggested_size_usd=0 so
+                # _execute_one short-circuits.
+                running = 0.0
+                for s in signals:
+                    if s.side != Side.BUY or s.suggested_size_usd <= 0:
+                        continue
+                    if running + s.suggested_size_usd > trim_target:
+                        s.suggested_size_usd = 0.0
+                    else:
+                        running += s.suggested_size_usd
+
         for signal in signals:
             # FIX-09: register each _execute_one as a tracked Task so
             # wait_until_idle() can join it during graceful shutdown.
