@@ -5,6 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:5001:5001"
+    # Blocker 1 (review): FIX-09 budgets up to 60s for graceful shutdown
+    # (30s scheduler.shutdown(wait=True) + 30s executor wait_until_idle).
+    # Docker's default SIGTERM→SIGKILL window is 10s, which would
+    # decapitate any in-flight CLOB POST and defeat FIX-09 entirely.
+    # 90s is the 60s budget plus a 30s safety pad for slow APScheduler
+    # job teardown — tested locally, FIX-09's "abandoning" log line
+    # never appeared within this window.
+    stop_grace_period: 90s
     volumes:
       - ./data:/app/data          # Persist SQLite DB + cache
       - ./.env:/app/.env:ro       # Inject secrets

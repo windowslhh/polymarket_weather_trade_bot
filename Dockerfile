@@ -33,11 +33,20 @@ USER bot
 EXPOSE 5001
 
 # FIX-16: container healthcheck — hit the Flask /api/status endpoint.
-# start-period=60s gives the bot time to do its FIX-05 reconciler pass,
-# historical distribution build, and first forecast pull before the
-# first probe.  interval=30s, retries=3 means we wait ~3 min before the
-# orchestrator (docker compose / k8s) marks the container unhealthy.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# Review 🟡 #2 (2026-04-25): start-period=120s.  The 60s budget was too
+# tight: backfilling 7 cities × 3 forecast days against Open-Meteo
+# routinely takes 70–90s before the web server even starts serving.
+# The orchestrator was marking the container unhealthy mid-init,
+# triggering a restart loop on the first deploy.  120s leaves headroom
+# for the slowest observed cold start.
+#
+# Review 🟡 #3 (2026-04-25): the orchestrator only RECORDS health; it
+# does not auto-restart unhealthy containers.  Pair this with one of:
+#   - watchtower (`com.centurylinklabs.watchtower.healthcheck=true`)
+#   - autoheal sidecar (https://github.com/willfarrell/docker-autoheal)
+#   - external Prometheus blackbox + alertmanager
+# See docs/runbook/go_live_runbook.md "Health monitoring" section.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:5001/api/status || exit 1
 
 CMD ["python", "-m", "src.main", "--paper", "-v"]

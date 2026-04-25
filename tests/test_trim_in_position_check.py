@@ -52,7 +52,9 @@ def _make_config() -> AppConfig:
         ),
         scheduling=SchedulingConfig(),
         cities=[
-            CityConfig("New York", "KLGA", 40.7128, -74.006, tz="America/New_York"),
+            # tz="" to keep DailyMaxTracker on UTC keying — avoids NYC vs UTC
+            # split during the 4-hour overnight UTC window.
+            CityConfig("New York", "KLGA", 40.7128, -74.006, tz=""),
         ],
         dry_run=True,
         db_path=Path("/tmp/test_trim_pc.db"),
@@ -60,10 +62,14 @@ def _make_config() -> AppConfig:
 
 
 def _open_position(entry_price: float, token_id: str = "no_1"):
+    # Blocker 2 (review): rebuild the date suffix from today's UTC date
+    # so the test isn't time-bombed.  position_check parses with
+    # `re.search(r'on (\w+ \d+)', label)` so any "on <Month> <day>" works.
+    today_suffix = datetime.now(timezone.utc).strftime("on %B %-d")
     return {
         "id": 1, "event_id": "evt_1", "city": "New York",
         "token_id": token_id, "token_type": "NO", "side": "BUY",
-        "slot_label": "70°F to 74°F on April 24",
+        "slot_label": f"70°F to 74°F {today_suffix}",
         "strategy": "B", "entry_price": entry_price,
         "size_usd": 10.0, "shares": 10.0 / entry_price,
         "status": "open", "created_at": datetime.now(timezone.utc).isoformat(),
@@ -78,6 +84,14 @@ def _mock_rebalancer(positions):
     mock_portfolio.get_all_open_positions = AsyncMock(return_value=positions)
     mock_portfolio.get_city_exposure = AsyncMock(return_value=0.0)
     mock_portfolio.get_total_exposure = AsyncMock(return_value=0.0)
+    mock_portfolio.get_daily_pnl = AsyncMock(return_value=None)
+    mock_portfolio.record_exit_cooldown = AsyncMock()
+    mock_portfolio.load_active_exit_cooldowns = AsyncMock(return_value={})
+    # Blocker 2 (review) parity: FIX-11 reads portfolio.store.get_bot_paused
+    # at the top of run_position_check; without an AsyncMock the await
+    # raises and the kill-switch read errors out (caught but cascades).
+    mock_portfolio.store = MagicMock()
+    mock_portfolio.store.get_bot_paused = AsyncMock(return_value=False)
     mock_executor = MagicMock(spec=Executor)
     mock_executor.execute_signals = AsyncMock(return_value=[])
     return Rebalancer(

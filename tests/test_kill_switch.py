@@ -107,9 +107,15 @@ async def test_pause_endpoint_accepts_x_trigger_secret_header():
 async def test_unpause_endpoint():
     s = await _mk_store()
     await s.set_bot_paused(True)
-    app = _make_flask_app(s, secret="")  # empty secret → no auth
+    # Blocker 5 (review): empty secret no longer fail-opens.  Set a
+    # secret + send the header so this test exercises the unpause
+    # response shape, not auth bypass.
+    app = _make_flask_app(s, secret="UNPAUSE_SECRET")
     client = app.test_client()
-    r = client.post("/api/admin/unpause")
+    r = client.post(
+        "/api/admin/unpause",
+        headers={"Authorization": "Bearer UNPAUSE_SECRET"},
+    )
     assert r.status_code == 200
     assert (await s.get_bot_paused()) is False
     await s.close()
@@ -124,4 +130,65 @@ async def test_wrong_secret_rejected():
         "/api/admin/pause", headers={"Authorization": "Bearer wrong"},
     )
     assert r.status_code == 401
+    await s.close()
+
+
+# ── Blocker 5: empty TRIGGER_SECRET semantics ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_empty_secret_returns_503_by_default(monkeypatch):
+    """No TRIGGER_SECRET + no ADMIN_NOAUTH opt-in + paper=False (live) →
+    admin endpoint must refuse with 503, not fail-open."""
+    monkeypatch.delenv("ADMIN_NOAUTH", raising=False)
+    s = await _mk_store()
+    cfg = SimpleNamespace(
+        trigger_secret="",
+        scheduling=SimpleNamespace(rebalance_interval_minutes=60),
+        cities=[], paper=False, dry_run=False,
+    )
+    from src.web.app import create_app as _create
+    app = _create(store=s, rebalancer=MagicMock(), config=cfg)
+    client = app.test_client()
+    r = client.post("/api/admin/pause")
+    assert r.status_code == 503
+    body = r.get_json()
+    assert "TRIGGER_SECRET not configured" in body["error"]
+    # Pause flag is untouched.
+    assert (await s.get_bot_paused()) is False
+    await s.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_secret_admin_noauth_only_in_dev_mode(monkeypatch):
+    """With ADMIN_NOAUTH=1 + paper=True, no-secret allow goes through;
+    with ADMIN_NOAUTH=1 + paper=False, it still 503's."""
+    s = await _mk_store()
+
+    # Dev mode: paper=True, opt-in flag set → allowed.
+    monkeypatch.setenv("ADMIN_NOAUTH", "1")
+    cfg = SimpleNamespace(
+        trigger_secret="",
+        scheduling=SimpleNamespace(rebalance_interval_minutes=60),
+        cities=[], paper=True, dry_run=False,
+    )
+    from src.web.app import create_app as _create
+    app = _create(store=s, rebalancer=MagicMock(), config=cfg)
+    client = app.test_client()
+    r = client.post("/api/admin/pause")
+    assert r.status_code == 200
+    assert (await s.get_bot_paused()) is True
+
+    # Live mode: paper=False, opt-in flag still set → STILL 503.
+    cfg2 = SimpleNamespace(
+        trigger_secret="",
+        scheduling=SimpleNamespace(rebalance_interval_minutes=60),
+        cities=[], paper=False, dry_run=False,
+    )
+    app2 = _create(store=s, rebalancer=MagicMock(), config=cfg2)
+    client2 = app2.test_client()
+    r2 = client2.post("/api/admin/unpause")
+    assert r2.status_code == 503, "Live mode must never honour ADMIN_NOAUTH"
+    # Pause flag from the dev-mode call survives because unpause was rejected.
+    assert (await s.get_bot_paused()) is True
     await s.close()

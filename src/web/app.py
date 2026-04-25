@@ -227,7 +227,13 @@ def create_app(store, rebalancer, config) -> Flask:
         positions = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
-        daily_pnl_val = _run_async(st.get_daily_pnl(date.today().isoformat()))
+        # Blocker 4 (review): tracker's daily_pnl PK is UTC; using
+        # server-local date.today() here meant ET evening dashboards
+        # showed $0 because they queried tomorrow's still-empty bucket.
+        from datetime import datetime as _dt, timezone as _tz
+        daily_pnl_val = _run_async(
+            st.get_daily_pnl(_dt.now(_tz.utc).date().isoformat()),
+        )
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
         strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
@@ -749,24 +755,55 @@ def create_app(store, rebalancer, config) -> Flask:
             "trends": state.get("trends", {}),
         })
 
-    def _auth_trigger_secret() -> bool:
-        """Return True when caller is allowed to mutate admin state.
+    def _admin_auth_check():
+        """Gate for /api/trigger, /api/admin/pause and /api/admin/unpause.
 
-        Factored out so /api/trigger, /api/admin/pause and /api/admin/unpause
-        share the same TRIGGER_SECRET gate.  Empty secret (dev mode) allows
-        everything — production deployments must set TRIGGER_SECRET.
+        Blocker 5 (review): the previous implementation fail-OPENED on an
+        empty TRIGGER_SECRET — fine for loopback-only dev, but the same
+        binary runs on the VPS where `curl http://198.23.134.31:5001/...`
+        is reachable from the public internet.  Without auth, anyone could
+        flip the kill switch or fire a rebalance.
+
+        New behaviour:
+          - secret set, header matches  → allow (return None)
+          - secret set, header missing/wrong  → 401
+          - secret empty + ADMIN_NOAUTH=1 + paper/dry-run mode  → allow
+            (explicit dev opt-in; never works in live mode)
+          - secret empty otherwise  → 503 admin disabled
+
+        Returns None when the caller is authorized.  Returns a Flask
+        response tuple `(jsonify(...), status)` otherwise — the endpoint
+        propagates it via `if err is not None: return err`.
         """
+        import os
         cfg = app.config.get("bot_config")
         secret = getattr(cfg, "trigger_secret", "") if cfg else ""
         if not secret:
-            return True
+            # Dev-only opt-in; never honour in live mode.
+            opt_in = os.environ.get("ADMIN_NOAUTH") == "1"
+            is_non_prod = bool(
+                getattr(cfg, "paper", False) or getattr(cfg, "dry_run", False)
+            )
+            if opt_in and is_non_prod:
+                return None
+            logger.warning(
+                "Admin endpoint refused (no TRIGGER_SECRET; ADMIN_NOAUTH=%s, "
+                "paper=%s, dry_run=%s) from %s",
+                os.environ.get("ADMIN_NOAUTH"),
+                getattr(cfg, "paper", False), getattr(cfg, "dry_run", False),
+                request.remote_addr,
+            )
+            return (
+                jsonify({"error": "admin endpoints disabled — TRIGGER_SECRET not configured"}),
+                503,
+            )
         auth_header = request.headers.get("Authorization", "")
         if hmac.compare_digest(auth_header, f"Bearer {secret}"):
-            return True
+            return None
         x_secret = request.headers.get("X-Trigger-Secret", "")
         if x_secret and hmac.compare_digest(x_secret, secret):
-            return True
-        return False
+            return None
+        return jsonify({"error": "unauthorized"}), 401
 
     @app.route("/api/admin/pause", methods=["POST"])
     def api_admin_pause():
@@ -774,9 +811,9 @@ def create_app(store, rebalancer, config) -> Flask:
         cycle.  TRIM / EXIT / settlement continue so positions can still be
         closed.  Auth via TRIGGER_SECRET (Authorization: Bearer … or
         X-Trigger-Secret header)."""
-        if not _auth_trigger_secret():
-            logger.warning("Unauthorized /api/admin/pause from %s", request.remote_addr)
-            return jsonify({"error": "unauthorized"}), 401
+        err = _admin_auth_check()
+        if err is not None:
+            return err
         s = app.config["bot_store"]
         try:
             _run_async(s.set_bot_paused(True), timeout=5)
@@ -788,11 +825,9 @@ def create_app(store, rebalancer, config) -> Flask:
     @app.route("/api/admin/unpause", methods=["POST"])
     def api_admin_unpause():
         """FIX-11: clear the kill switch."""
-        if not _auth_trigger_secret():
-            logger.warning(
-                "Unauthorized /api/admin/unpause from %s", request.remote_addr,
-            )
-            return jsonify({"error": "unauthorized"}), 401
+        err = _admin_auth_check()
+        if err is not None:
+            return err
         s = app.config["bot_store"]
         try:
             _run_async(s.set_bot_paused(False), timeout=5)
@@ -805,9 +840,9 @@ def create_app(store, rebalancer, config) -> Flask:
     def api_trigger():
         # Token auth: if TRIGGER_SECRET is set, require "Authorization: Bearer <secret>"
         # so arbitrary callers cannot trigger expensive full rebalance cycles.
-        if not _auth_trigger_secret():
-            logger.warning("Unauthorized /api/trigger attempt from %s", request.remote_addr)
-            return jsonify({"error": "unauthorized"}), 401
+        err = _admin_auth_check()
+        if err is not None:
+            return err
 
         reb = app.config["bot_rebalancer"]
         _cache.clear()  # Invalidate all caches

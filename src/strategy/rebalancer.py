@@ -1195,7 +1195,12 @@ class Rebalancer:
                 local_today = city_now.date()
             else:
                 local_hour = None
-                local_today = date.today()
+                # Blocker 3 (review): UTC fallback to match position_check's
+                # equivalent path (line 634 in run_position_check).  Using
+                # server-local `date.today()` here while position_check used
+                # UTC could classify the same event as D+0 in one cycle and
+                # D+1 in the next during the UTC-midnight crossover window.
+                local_today = datetime.now(timezone.utc).date()
             days_ahead = (event.market_date - local_today).days
 
             # Collect all evaluated signals across all strategy variants for decision logging
