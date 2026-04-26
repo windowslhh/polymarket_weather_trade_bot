@@ -43,6 +43,10 @@
     <dict>
         <key>TZ</key>
         <string>UTC</string>
+        <!-- Disable Python stdout/stderr buffering so log lines hit
+             StandardOutPath in real time, not in 4 KB chunks. -->
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>

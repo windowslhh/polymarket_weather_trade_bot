@@ -68,6 +68,17 @@ def test_run_local_forwards_args():
     assert "tee -a logs/bot.log" in text
 
 
+def test_run_local_uses_unbuffered_python():
+    """Without -u, Python block-buffers stdout once stdout is a pipe
+    (tee / launchd both pipe).  Logs would then arrive in 4 KB chunks
+    every few minutes, hiding bot progress and breaking incident
+    response — operators only see what already crashed."""
+    text = (ROOT / "scripts" / "run_local.sh").read_text()
+    assert "python -u -m src.main" in text, (
+        "run_local.sh must invoke python with -u (unbuffered)"
+    )
+
+
 def test_launchd_template_exists():
     p = ROOT / "launchd" / "com.user.weather-bot.plist.template"
     assert p.is_file(), "launchd plist template missing"
@@ -98,6 +109,20 @@ def test_launchd_template_logs_under_bot_dir():
     src = (ROOT / "launchd" / "com.user.weather-bot.plist.template").read_text()
     assert "__BOT_DIR__/logs/launchd.out" in src
     assert "__BOT_DIR__/logs/launchd.err" in src
+
+
+def test_launchd_template_pythonunbuffered_is_set(tmp_path):
+    """Launchd doesn't read .bashrc / .zshrc — environment must come
+    from the plist itself.  PYTHONUNBUFFERED=1 is mandatory; without
+    it the bot's stdout buffers until process exit and StandardOutPath
+    looks frozen for the entire run."""
+    src = (ROOT / "launchd" / "com.user.weather-bot.plist.template").read_text()
+    populated = src.replace("__BOT_DIR__", str(tmp_path))
+    parsed = plistlib.loads(populated.encode("utf-8"))
+    env = parsed["EnvironmentVariables"]
+    assert env.get("PYTHONUNBUFFERED") == "1", (
+        "launchd plist must export PYTHONUNBUFFERED=1"
+    )
 
 
 def test_runbook_exists():

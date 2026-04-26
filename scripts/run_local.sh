@@ -18,4 +18,8 @@ fi
 source .venv/bin/activate
 
 mkdir -p logs
-exec python -m src.main "$@" 2>&1 | tee -a logs/bot.log
+# -u disables stdout/stderr buffering so log lines hit the file (and any
+# tail / launchd reader) immediately instead of in 4 KB chunks every few
+# minutes.  Block buffering is the default once stdout is a pipe (tee /
+# launchd) and would otherwise hide the bot's progress for long stretches.
+exec python -u -m src.main "$@" 2>&1 | tee -a logs/bot.log
