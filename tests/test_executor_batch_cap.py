@@ -189,6 +189,27 @@ async def test_batch_cap_writes_BATCH_CAP_EXCEEDED_decision_log():
 
 
 @pytest.mark.asyncio
+async def test_batch_cap_skip_uses_token_strategy_business_key():
+    """C-2 follow-up (2026-04-26): the skip set is keyed on
+    (token_id, strategy), not id(signal).  This pin catches a
+    revert that re-introduces id(signal) — Python may reuse object
+    IDs for short-lived objects and the business key is more robust."""
+    body = (Path(__file__).resolve().parents[1] / "src" / "execution" / "executor.py").read_text()
+    assert "skipped_keys: set[tuple[str, str]]" in body, (
+        "C-2: skipped set must be typed on the (token_id, strategy) tuple"
+    )
+    assert "skipped_keys.add((s.token_id, s.strategy))" in body, (
+        "C-2: trim must record the business key, not id(signal)"
+    )
+    assert "(signal.token_id, signal.strategy) in skipped_keys" in body, (
+        "C-2: lookup must use the business key"
+    )
+    # And the legacy id-based mechanism is gone
+    assert "id(signal) in skipped_ids" not in body
+    assert "skipped_ids.add(id(s))" not in body
+
+
+@pytest.mark.asyncio
 async def test_executor_uses_injected_config_not_clob_internal():
     """C-2: when an explicit config is injected, the executor must NOT
     fall back to self._clob._config.  Pin by attaching a *different*

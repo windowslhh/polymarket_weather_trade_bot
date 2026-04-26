@@ -109,16 +109,26 @@ class Executor:
         # peeking at `self._clob._config` (reverse coupling).  Both
         # changed: the cap is now read via _resolve_max_total_exposure
         # (constructor injection preferred), and trimmed signals are
-        # tracked in a `skipped_ids` set passed to _execute_one — the
+        # tracked in a `skipped_keys` set passed to _execute_one — the
         # caller's TradeSignal objects are never mutated, so they remain
         # auditable and replay-safe.  Each trimmed signal also gets a
         # decision_log REJECT entry with reason=BATCH_CAP_EXCEEDED so
         # the dashboard can show "why didn't this trade fire?".
+        #
+        # C-2 follow-up (2026-04-26): the original implementation keyed
+        # `skipped_ids` on `id(signal)` — works for short-lived in-cycle
+        # objects but is brittle (Python may reuse object IDs once the
+        # original is GC'd).  Switched to a business key
+        # (token_id, strategy) which is the natural unique identifier
+        # for "this position's BUY in this variant".  Idempotent under
+        # multiple equivalent signals (only one trim entry persists)
+        # and survives any future caching that might create new
+        # TradeSignal instances mid-batch.
         total_buy_cost = sum(
             s.suggested_size_usd for s in signals
             if s.side == Side.BUY and s.suggested_size_usd > 0
         )
-        skipped_ids: set[int] = set()
+        skipped_keys: set[tuple[str, str]] = set()
         if total_buy_cost > 0:
             try:
                 existing = await self._portfolio.get_total_exposure()
@@ -133,14 +143,14 @@ class Executor:
                     total_buy_cost, existing + total_buy_cost, limit, trim_target,
                 )
                 # Walk BUYs in order, keeping each whole signal while
-                # budget remains; collect the rest in skipped_ids so
+                # budget remains; collect the rest in skipped_keys so
                 # _execute_one short-circuits without mutating the input.
                 running = 0.0
                 for s in signals:
                     if s.side != Side.BUY or s.suggested_size_usd <= 0:
                         continue
                     if running + s.suggested_size_usd > trim_target:
-                        skipped_ids.add(id(s))
+                        skipped_keys.add((s.token_id, s.strategy))
                         await self._log_batch_cap_reject(
                             s, existing, trim_target, limit,
                         )
@@ -148,7 +158,7 @@ class Executor:
                         running += s.suggested_size_usd
 
         for signal in signals:
-            if id(signal) in skipped_ids:
+            if (signal.token_id, signal.strategy) in skipped_keys:
                 continue  # C-2: skipped above with decision_log entry
             # FIX-09: register each _execute_one as a tracked Task so
             # wait_until_idle() can join it during graceful shutdown.
