@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Awaitable, Callable, Iterable
 
@@ -34,6 +35,36 @@ logger = logging.getLogger(__name__)
 # in the past; ±10 bps (0.1%) lets the bot tolerate a minor adjustment
 # while still firing if the rate moves materially (e.g. 5% → 6%).
 FEE_RATE_TOLERANCE_BPS = 10
+
+# C-1 (2026-04-26): docker-compose's `restart: unless-stopped` policy means
+# `sys.exit(2)` from a preflight failure spawns a fresh container immediately.
+# If the underlying problem is persistent (DB volume read-only, CLOB creds
+# wrong), the bot loops at high frequency — hammers the CLOB API, fills
+# logs, churns webhooks.  The 60s sleep before exit gives the restart
+# loop a back-off floor so a misconfigured deploy doesn't trip rate-limits
+# upstream while operators investigate.
+#
+# Override via PREFLIGHT_FAIL_SLEEP_SECONDS=0 in tests / dev so unit tests
+# don't actually sleep a minute.
+PREFLIGHT_FAIL_SLEEP_SECONDS = int(
+    os.environ.get("PREFLIGHT_FAIL_SLEEP_SECONDS", "60")
+)
+
+
+async def _fatal_exit(reason: str, code: int = 2) -> None:
+    """Sleep for ``PREFLIGHT_FAIL_SLEEP_SECONDS`` (back-off the docker
+    restart loop) then ``sys.exit(code)``.  Centralised so every fatal
+    path inherits the back-off without each call site remembering."""
+    sleep_s = PREFLIGHT_FAIL_SLEEP_SECONDS
+    if sleep_s > 0:
+        logger.error(
+            "Preflight FATAL (%s): sleeping %ds before sys.exit(%d) so "
+            "docker's restart-on-fail loop doesn't hammer the CLOB / "
+            "fill the logs while operators investigate",
+            reason, sleep_s, code,
+        )
+        await asyncio.sleep(sleep_s)
+    sys.exit(code)
 
 
 async def check_db_writable(store) -> tuple[bool, str]:
@@ -163,7 +194,7 @@ async def run_preflight(
     if not db_ok:
         await alerter.send("critical", f"Preflight DB failure: {db_msg}")
         logger.error("Preflight DB FAIL: %s", db_msg)
-        sys.exit(2)
+        await _fatal_exit(f"db_not_writable: {db_msg}")
     logger.info("Preflight: %s", db_msg)
 
     clob_ok, clob_msg = await check_clob_reachable(
@@ -172,7 +203,7 @@ async def run_preflight(
     if not clob_ok:
         await alerter.send("critical", f"Preflight CLOB failure: {clob_msg}")
         logger.error("Preflight CLOB FAIL: %s", clob_msg)
-        sys.exit(2)
+        await _fatal_exit(f"clob_unreachable: {clob_msg}")
     logger.info("Preflight: %s", clob_msg)
 
     if sample_token_provider is not None and expected_fee_rate is not None:

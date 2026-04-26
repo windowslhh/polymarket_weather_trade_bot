@@ -15,10 +15,20 @@ import pytest
 
 from src.alerts import Alerter
 from src.portfolio.store import Store
+from src import preflight as preflight_mod
 from src.preflight import (
     FEE_RATE_TOLERANCE_BPS,
     check_db_writable, check_fee_rate, check_webhook_reachable, run_preflight,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_preflight_fatal_sleep(monkeypatch):
+    """C-1: PREFLIGHT_FAIL_SLEEP_SECONDS defaults to 60 in production so
+    docker's restart-on-fail loop has a back-off floor.  Tests that
+    drive the SystemExit path otherwise sleep 60s each — kill that here.
+    Per-test override available via monkeypatch.setattr inside the test."""
+    monkeypatch.setattr(preflight_mod, "PREFLIGHT_FAIL_SLEEP_SECONDS", 0)
 
 
 async def _mk_store() -> Store:
@@ -221,4 +231,78 @@ async def test_run_preflight_alerts_on_fee_drift_but_does_not_exit():
         c for c in alerter.send.call_args_list if c.args[0] == "critical"
     ]
     assert any("fee_rate_drift" in c.args[1] for c in critical_calls)
+    await store.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# C-1 fatal back-off sleep before sys.exit(2)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_preflight_sleeps_before_exit_when_db_fails(monkeypatch):
+    """C-1: when preflight has to sys.exit(2), it must sleep first so
+    docker's restart-on-fail loop has a back-off floor.  Pre-fix the
+    exit was immediate, producing a tight loop that hammered the CLOB
+    and filled logs while the operator investigated."""
+    store = await _mk_store()
+    alerter = Alerter(webhook_url="")
+    alerter.send = AsyncMock()
+
+    # Force a non-zero sleep but capture asyncio.sleep so the test stays fast.
+    monkeypatch.setattr(preflight_mod, "PREFLIGHT_FAIL_SLEEP_SECONDS", 60)
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(preflight_mod.asyncio, "sleep", _record_sleep)
+
+    # Force DB check to fail
+    async def _bad_check(_store):
+        return False, "db_not_writable: simulated"
+
+    monkeypatch.setattr(preflight_mod, "check_db_writable", _bad_check)
+
+    with pytest.raises(SystemExit) as excinfo:
+        await run_preflight(
+            store=store, clob_client=MagicMock(), alerter=alerter,
+            webhook_url="", is_paper=False, is_dry_run=False,
+        )
+    assert excinfo.value.code == 2
+    assert sleep_calls == [60], (
+        f"C-1: expected one 60s sleep before exit, got {sleep_calls}"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_sleep_zero_disables_backoff(monkeypatch):
+    """Setting PREFLIGHT_FAIL_SLEEP_SECONDS=0 (e.g. in tests / dev)
+    must skip the sleep entirely — exit immediately."""
+    store = await _mk_store()
+    alerter = Alerter(webhook_url="")
+    alerter.send = AsyncMock()
+
+    monkeypatch.setattr(preflight_mod, "PREFLIGHT_FAIL_SLEEP_SECONDS", 0)
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(preflight_mod.asyncio, "sleep", _record_sleep)
+
+    async def _bad_check(_store):
+        return False, "db_not_writable: simulated"
+
+    monkeypatch.setattr(preflight_mod, "check_db_writable", _bad_check)
+
+    with pytest.raises(SystemExit):
+        await run_preflight(
+            store=store, clob_client=MagicMock(), alerter=alerter,
+            webhook_url="", is_paper=False, is_dry_run=False,
+        )
+    assert sleep_calls == [], (
+        "C-1: PREFLIGHT_FAIL_SLEEP_SECONDS=0 must skip the back-off sleep"
+    )
     await store.close()
