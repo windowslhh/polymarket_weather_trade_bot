@@ -53,7 +53,8 @@ async def get_nws_forecast(
 
     Returns None on failure (caller should fallback to Open-Meteo).
     """
-    target = target_date or date.today()
+    # C-3: UTC-anchored fallback (see src/weather/forecast.py for rationale)
+    target = target_date or datetime.now(timezone.utc).date()
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=15, headers=NWS_HEADERS)
 

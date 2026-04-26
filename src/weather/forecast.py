@@ -64,7 +64,12 @@ async def get_ensemble_forecast(
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get ensemble forecast from Open-Meteo (GFS + ICON + ECMWF)."""
-    target = target_date or date.today()
+    # C-3 (2026-04-26): UTC-anchored fallback.  Production callers
+    # always pass an explicit ``target_date`` derived from
+    # ``city_local_date``; this default is reached only by ad-hoc /
+    # legacy callers and must not silently disagree with the rest of
+    # the bot's date arithmetic.
+    target = target_date or datetime.now(timezone.utc).date()
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -145,7 +150,12 @@ async def get_single_forecast(
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get single-model Open-Meteo forecast (last resort fallback)."""
-    target = target_date or date.today()
+    # C-3 (2026-04-26): UTC-anchored fallback.  Production callers
+    # always pass an explicit ``target_date`` derived from
+    # ``city_local_date``; this default is reached only by ad-hoc /
+    # legacy callers and must not silently disagree with the rest of
+    # the bot's date arithmetic.
+    target = target_date or datetime.now(timezone.utc).date()
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -190,7 +200,12 @@ async def get_forecast(
     - Ensemble mean: 50% weight (multi-model consensus)
     - Confidence = ensemble std (data-driven uncertainty)
     """
-    target = target_date or date.today()
+    # C-3 (2026-04-26): UTC-anchored fallback.  Production callers
+    # always pass an explicit ``target_date`` derived from
+    # ``city_local_date``; this default is reached only by ad-hoc /
+    # legacy callers and must not silently disagree with the rest of
+    # the bot's date arithmetic.
+    target = target_date or datetime.now(timezone.utc).date()
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
 

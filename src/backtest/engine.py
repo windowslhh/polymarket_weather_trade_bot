@@ -291,7 +291,10 @@ async def run_backtest(
     error_dist: ForecastErrorDistribution | None = None,
 ) -> BacktestResult:
     """Run a full backtest for one city over the specified period."""
-    end = date.today() - timedelta(days=1)
+    # C-3 (2026-04-26): UTC-anchored end date.  Pre-fix `date.today()`
+    # used server-local time, so a backtest on a non-UTC dev box
+    # produced a different sample window than on the UTC container.
+    end = datetime.now(timezone.utc).date() - timedelta(days=1)
     start = end - timedelta(days=lookback_days)
 
     async with httpx.AsyncClient(timeout=60) as client:

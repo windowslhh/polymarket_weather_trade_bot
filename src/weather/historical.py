@@ -216,6 +216,13 @@ async def build_error_distribution(
     cache_dir = cache_dir or _CACHE_DIR
     cache_file = cache_dir / f"{city.icao}_errors.json"
 
+    # C-3 (2026-04-26): the three date.today() calls below are
+    # intentionally left server-local — they're cache-staleness math
+    # ("days since built") and historical-window endpoints, both
+    # tolerant of a ±1d shift between server-local and UTC.  Audit
+    # explicitly exempted these (offline cache metadata).  The hot
+    # business-logic paths use UTC anchors elsewhere.
+
     # Check cache (refresh if older than 7 days)
     if cache_file.exists():
         try:
