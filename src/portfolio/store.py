@@ -118,11 +118,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_unique ON settlements(event_id
 -- churn window.  Previously kept only in rebalancer._recent_exits (RAM); a
 -- post-TRIM crash meant the next startup could re-buy the same slot seconds
 -- after exiting.
+-- C-4 (2026-04-26): cooldown is keyed on (token_id, strategy), not token_id
+-- alone.  Two variants (e.g. B and C) can hold the SAME token_id; pre-fix
+-- a TRIM in B silenced re-entry for C too, even though C's risk model
+-- might still favor that slot.  Composite key is enforced via a UNIQUE
+-- INDEX (rather than PRIMARY KEY) so the migration path can simply
+-- ADD COLUMN strategy + CREATE UNIQUE INDEX without recreating the
+-- table on existing databases.
 CREATE TABLE IF NOT EXISTS exit_cooldowns (
-    token_id TEXT PRIMARY KEY,
+    token_id TEXT NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'B',
     exit_time TEXT NOT NULL,
     cooldown_hours REAL NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exit_cooldowns_token_strategy
+    ON exit_cooldowns(token_id, strategy);
 CREATE INDEX IF NOT EXISTS idx_exit_cooldowns_time ON exit_cooldowns(exit_time);
 
 -- FIX-11: persistent kill switch.  Single-row table (id pinned to 1) that the
@@ -192,6 +202,12 @@ class Store:
             ("orders", "strategy", "ALTER TABLE orders ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             # FIX-01: forecast_date column for audit.
             ("edge_history", "forecast_date", "ALTER TABLE edge_history ADD COLUMN forecast_date TEXT"),
+            # C-4: per-strategy exit cooldown.  ALTER ADD COLUMN
+            # alongside the SCHEMA's composite UNIQUE INDEX is enough —
+            # no need to rebuild the table.  Existing rows default to
+            # strategy='B' (matches the historical default that pre-C-4
+            # callers would have implicitly intended).
+            ("exit_cooldowns", "strategy", "ALTER TABLE exit_cooldowns ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
         ]
         for table, column, sql in migrations:
             try:
@@ -223,6 +239,17 @@ class Store:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key "
                 "ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL",
                 "unique idempotency_key on orders — reconciler keys off this",
+            ),
+            # C-4: composite uniqueness on exit_cooldowns(token_id, strategy).
+            # On a pre-C-4 DB the table was PRIMARY KEY(token_id) only;
+            # the column-add migration above has just inserted the new
+            # `strategy` column, and now we install the unique index that
+            # makes the ON CONFLICT(token_id, strategy) clause work.
+            (
+                "idx_exit_cooldowns_token_strategy",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_exit_cooldowns_token_strategy "
+                "ON exit_cooldowns(token_id, strategy)",
+                "composite uniqueness on exit_cooldowns(token_id, strategy)",
             ),
         ]
         async with self.db.execute(
@@ -546,17 +573,23 @@ class Store:
     # ── FIX-08: persistent exit cooldowns ─────────────────────────────
 
     async def record_exit_cooldown(
-        self, token_id: str, exit_time: datetime, cooldown_hours: float,
+        self,
+        token_id: str,
+        exit_time: datetime,
+        cooldown_hours: float,
+        strategy: str = "B",
     ) -> None:
-        """Upsert an exit-cooldown row (token_id is PK).  If the same token
-        gets exited twice within a window, the later exit_time wins."""
+        """Upsert an exit-cooldown row (composite key: token_id + strategy,
+        C-4).  If the same (token, strategy) pair gets exited twice within
+        a window, the later exit_time wins.  Different strategies' cooldowns
+        on the same token are independent rows."""
         await self.db.execute(
-            """INSERT INTO exit_cooldowns (token_id, exit_time, cooldown_hours)
-               VALUES (?, ?, ?)
-               ON CONFLICT(token_id) DO UPDATE SET
+            """INSERT INTO exit_cooldowns (token_id, strategy, exit_time, cooldown_hours)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(token_id, strategy) DO UPDATE SET
                    exit_time = excluded.exit_time,
                    cooldown_hours = excluded.cooldown_hours""",
-            (token_id, exit_time.isoformat(), cooldown_hours),
+            (token_id, strategy, exit_time.isoformat(), cooldown_hours),
         )
         await self.db.commit()
 
@@ -565,41 +598,55 @@ class Store:
 
         Drops expired rows opportunistically — caller doesn't need to
         re-check the cooldown_hours math against exit_time.
+
+        C-4: each row carries `strategy` so callers can scope cooldown
+        checks to the active variant.
         """
         async with self.db.execute(
-            "SELECT token_id, exit_time, cooldown_hours FROM exit_cooldowns"
+            "SELECT token_id, strategy, exit_time, cooldown_hours FROM exit_cooldowns"
         ) as cursor:
             rows = await cursor.fetchall()
         now = datetime.now(timezone.utc)
         active: list[dict] = []
-        expired_tids: list[str] = []
+        expired_keys: list[tuple[str, str]] = []
         for r in rows:
             try:
-                t = datetime.fromisoformat(str(r[1]).replace("Z", "+00:00"))
+                t = datetime.fromisoformat(str(r[2]).replace("Z", "+00:00"))
                 if t.tzinfo is None:
                     t = t.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
-            if now < t + timedelta(hours=float(r[2])):
+            if now < t + timedelta(hours=float(r[3])):
                 active.append({
-                    "token_id": r[0], "exit_time": t,
-                    "cooldown_hours": float(r[2]),
+                    "token_id": r[0], "strategy": r[1],
+                    "exit_time": t, "cooldown_hours": float(r[3]),
                 })
             else:
-                expired_tids.append(r[0])
-        if expired_tids:
+                expired_keys.append((r[0], r[1]))
+        if expired_keys:
             await self.db.executemany(
-                "DELETE FROM exit_cooldowns WHERE token_id = ?",
-                [(t,) for t in expired_tids],
+                "DELETE FROM exit_cooldowns WHERE token_id = ? AND strategy = ?",
+                expired_keys,
             )
             await self.db.commit()
         return active
 
-    async def clear_exit_cooldown(self, token_id: str) -> None:
-        """Delete a specific token's cooldown (used by tests and admin ops)."""
-        await self.db.execute(
-            "DELETE FROM exit_cooldowns WHERE token_id = ?", (token_id,),
-        )
+    async def clear_exit_cooldown(
+        self, token_id: str, strategy: str | None = None,
+    ) -> None:
+        """Delete cooldown row(s) for a token.  When ``strategy`` is None,
+        clears every variant's cooldown for that token (matches the
+        pre-C-4 behaviour and stays useful for admin ops); when supplied
+        only the specific (token, strategy) row goes."""
+        if strategy is None:
+            await self.db.execute(
+                "DELETE FROM exit_cooldowns WHERE token_id = ?", (token_id,),
+            )
+        else:
+            await self.db.execute(
+                "DELETE FROM exit_cooldowns WHERE token_id = ? AND strategy = ?",
+                (token_id, strategy),
+            )
         await self.db.commit()
 
     # ── FIX-11: kill switch ───────────────────────────────────────────

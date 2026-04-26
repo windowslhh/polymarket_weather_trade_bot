@@ -105,11 +105,14 @@ class Rebalancer:
         # _cached_forecasts, _last_gamma_prices).
         self._cycle_lock = asyncio.Lock()
 
-        # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn.
+        # Exit cooldown: {(token_id, strategy): exit_datetime} to prevent
+        # BUY→EXIT→BUY churn.  C-4 (2026-04-26) widened the key from
+        # token_id alone to (token_id, strategy) so a TRIM in B doesn't
+        # silence re-entry in C.
         # FIX-08: this dict is the in-process cache; the DB row is the source
         # of truth across restarts.  Populated from DB at startup via
         # load_persistent_state() and dual-written on every EXIT/TRIM.
-        self._recent_exits: dict[str, datetime] = {}
+        self._recent_exits: dict[tuple[str, str], datetime] = {}
         self._last_price_source: str = "gamma"
         self._last_unrealized: float = 0.0
         self._last_gamma_prices: dict[str, float] = {}
@@ -163,21 +166,31 @@ class Rebalancer:
                 len(active),
             )
 
-    async def _record_exit_cooldown(self, token_id: str, now: datetime) -> None:
+    async def _record_exit_cooldown(
+        self, token_id: str, now: datetime, strategy: str = "B",
+    ) -> None:
         """Dual-write: RAM cache + DB row.  Keeps the in-cycle fast path
-        backed by a persistent source of truth."""
-        self._recent_exits[token_id] = now
+        backed by a persistent source of truth.
+
+        C-4: cooldown is per (token_id, strategy) so two variants holding
+        the same token are tracked independently.
+        """
+        self._recent_exits[(token_id, strategy)] = now
         try:
             await self._portfolio.record_exit_cooldown(
                 token_id=token_id, exit_time=now,
                 cooldown_hours=self._config.strategy.exit_cooldown_hours,
+                strategy=strategy,
             )
         except Exception:
             # The cache write already happened, so the current process
             # still respects the cooldown; we just lose durability on a
             # crash.  Log loudly so the operator knows disk bookkeeping
             # lagged — critical infra issue but not trade-blocking.
-            logger.exception("record_exit_cooldown DB write failed for %s", token_id)
+            logger.exception(
+                "record_exit_cooldown DB write failed for %s/%s",
+                token_id, strategy,
+            )
 
     def _forecast_for_event(self, event: WeatherMarketEvent):
         """FIX-01: look up the forecast whose forecast_date matches the event's
@@ -202,9 +215,10 @@ class Rebalancer:
         else:
             max_cooldown_h = self._config.strategy.exit_cooldown_hours
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_cooldown_h)
-        expired = [tid for tid, t in self._recent_exits.items() if t < cutoff]
-        for tid in expired:
-            del self._recent_exits[tid]
+        # C-4: keys are (token_id, strategy) tuples
+        expired = [k for k, t in self._recent_exits.items() if t < cutoff]
+        for k in expired:
+            del self._recent_exits[k]
         if expired:
             logger.debug("Cleaned up %d expired exit cooldown entries", len(expired))
 
@@ -379,6 +393,41 @@ class Rebalancer:
                     daily_max, _is_new_high = self._max_tracker.update(metar_obs)
                     daily_maxes[city_cfg.name] = daily_max
                     city_observations[city_cfg.name] = metar_obs
+                    # C-5: persist a decision_log breadcrumb whenever a
+                    # daily_max-fallback ICAO was used (e.g. Denver
+                    # KBKF→KDEN).  Pre-fix the fallback only emitted a
+                    # logger.warning, so any anomaly the fallback caused
+                    # (KDEN reads a few °F off KBKF on warm afternoons)
+                    # had no DB trail to correlate against trades.
+                    if obs.used_fallback:
+                        try:
+                            from datetime import datetime as _dt, timezone as _tz
+                            await self._portfolio.store.insert_decision_log(
+                                cycle_at=_dt.now(_tz.utc).isoformat(timespec="seconds"),
+                                city=city_cfg.name,
+                                event_id="",
+                                signal_type="STATION_FALLBACK",
+                                slot_label="",
+                                forecast_high_f=None,
+                                daily_max_f=daily_max,
+                                trend_state="",
+                                win_prob=0.0,
+                                expected_value=0.0,
+                                price=0.0,
+                                size_usd=0.0,
+                                action="OBSERVE",
+                                reason=(
+                                    f"{city_cfg.name}: daily_max fallback "
+                                    f"primary={obs.primary_icao} → used={obs.icao} "
+                                    f"(temp_f={obs.temp_f:.1f})"
+                                ),
+                                strategy="",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to log STATION_FALLBACK for %s",
+                                city_cfg.name,
+                            )
         return daily_maxes, city_observations
 
     async def refresh_metar(self) -> None:
@@ -876,7 +925,8 @@ class Rebalancer:
                     for sig in exit_signals:
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
-                        await self._record_exit_cooldown(sig.token_id, now)
+                        # C-4: cooldown is per (token_id, strategy)
+                        await self._record_exit_cooldown(sig.token_id, now, strategy=strat_name)
                         signals.append(sig)
 
                     # Tag TRIM signals — reason was already built by the
@@ -890,7 +940,8 @@ class Rebalancer:
                             continue
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] {sig.reason or 'TRIM'}"
-                        await self._record_exit_cooldown(sig.token_id, now)
+                        # C-4: cooldown is per (token_id, strategy)
+                        await self._record_exit_cooldown(sig.token_id, now, strategy=strat_name)
                         signals.append(sig)
 
                 if skipped_no_obs:
@@ -1421,9 +1472,11 @@ class Rebalancer:
                     no_signals = []
                 # Locked wins first (higher priority), then forecast-based NO
                 for signal in locked_signals + no_signals:
-                    # Check exit cooldown: skip BUY if recently exited this slot
+                    # Check exit cooldown: skip BUY if recently exited this slot.
+                    # C-4: cooldown is per (token_id, strategy) so a TRIM in
+                    # variant B doesn't suppress a re-entry by variant C.
                     tid = signal.token_id
-                    exit_time = self._recent_exits.get(tid)
+                    exit_time = self._recent_exits.get((tid, strat_name))
                     if exit_time and (now - exit_time).total_seconds() < cooldown_seconds:
                         signal._cooled_down = True  # type: ignore[attr-defined]
                         continue
@@ -1459,7 +1512,10 @@ class Rebalancer:
                 # inline because evaluate_exit_signals does not set them.
                 for signal in exit_signals + trim_signals:
                     signal.strategy = strat_name
-                    await self._record_exit_cooldown(signal.token_id, now)
+                    # C-4: cooldown is per (token_id, strategy)
+                    await self._record_exit_cooldown(
+                        signal.token_id, now, strategy=strat_name,
+                    )
                     if signal in exit_signals:
                         signal.reason = (
                             f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot"

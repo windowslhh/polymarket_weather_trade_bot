@@ -131,6 +131,9 @@ class _Obs:
         self.temp_f = temp_f
         self.observation_time = datetime.now(timezone.utc)
         self.raw_data = ""
+        # C-5: SettlementObservation now exposes these — default to "no fallback".
+        self.primary_icao = icao
+        self.used_fallback = False
 
 
 @pytest.mark.asyncio

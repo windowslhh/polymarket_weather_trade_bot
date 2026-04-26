@@ -234,20 +234,31 @@ class PortfolioTracker:
     async def record_exit_cooldown(
         self, token_id: str, exit_time: date | None = None,
         cooldown_hours: float = 4.0,
+        strategy: str = "B",
     ) -> None:
-        """Record a BUY-after-exit cooldown for a token.  Both the DB
-        and any caller-maintained RAM cache should be updated in lockstep.
+        """Record a BUY-after-exit cooldown for (token_id, strategy).
+
+        C-4 (2026-04-26): cooldowns are now scoped per-strategy so a
+        TRIM in one variant doesn't suppress re-entry in a different
+        variant that holds the same token.  Default strategy='B'
+        preserves pre-C-4 behaviour for callers that haven't migrated.
         """
         from datetime import datetime, timezone
         t = exit_time or datetime.now(timezone.utc)
-        await self._store.record_exit_cooldown(token_id, t, cooldown_hours)
+        await self._store.record_exit_cooldown(
+            token_id, t, cooldown_hours, strategy=strategy,
+        )
 
-    async def load_active_exit_cooldowns(self) -> dict[str, date]:
-        """Return a dict of {token_id: exit_time} for all cooldowns whose
-        window hasn't yet elapsed.  Expired rows are deleted as a side
-        effect so the DB doesn't balloon forever."""
+    async def load_active_exit_cooldowns(self) -> dict[tuple[str, str], date]:
+        """Return a dict of {(token_id, strategy): exit_time} for all
+        active cooldowns.  Expired rows are deleted as a side effect.
+
+        C-4: key is the (token, strategy) tuple so the rebalancer's
+        per-variant skip logic can look up cooldowns scoped to the
+        variant under evaluation.
+        """
         rows = await self._store.get_active_exit_cooldowns()
-        return {r["token_id"]: r["exit_time"] for r in rows}
+        return {(r["token_id"], r["strategy"]): r["exit_time"] for r in rows}
 
     async def get_daily_pnl(self, day: date | None = None) -> float | None:
         """Get the realized P&L for a given day.

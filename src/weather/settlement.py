@@ -76,13 +76,24 @@ SETTLEMENT_STATIONS: dict[str, tuple[str, str, str]] = {
 
 @dataclass
 class SettlementObservation:
-    """Temperature observation matched to settlement station."""
+    """Temperature observation matched to settlement station.
+
+    C-5 (2026-04-26): ``primary_icao`` and ``used_fallback`` let callers
+    distinguish "we got data from the primary station" from "we had to
+    reach into DAILY_MAX_FALLBACK_ICAO".  Pre-fix the fact that Denver
+    fell back from KBKF to KDEN was only visible in stdout — the
+    dashboard had no way to attribute Denver-specific anomalies to a
+    fallback observation.  Now the rebalancer can persist a
+    decision_log entry whenever ``used_fallback=True``.
+    """
     city: str
     icao: str
     temp_f: float
     observation_time: datetime
     source: str  # "metar" or "wu"
     raw_data: str = ""
+    primary_icao: str = ""
+    used_fallback: bool = False
 
 
 def get_settlement_icao(city: str) -> str | None:
@@ -173,7 +184,8 @@ async def fetch_settlement_temp(
             except (ValueError, AttributeError):
                 obs_time = datetime.now(timezone.utc)
 
-            if candidate != icao:
+            used_fallback = candidate != icao
+            if used_fallback:
                 logger.warning(
                     "%s: daily_max fallback — used %s because %s METAR was "
                     "unavailable.  Settlement judgment still uses %s.",
@@ -186,6 +198,8 @@ async def fetch_settlement_temp(
                 observation_time=obs_time,
                 source="metar",
                 raw_data=latest.get("rawOb", ""),
+                primary_icao=icao,
+                used_fallback=used_fallback,
             )
 
         logger.warning(
