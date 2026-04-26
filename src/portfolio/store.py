@@ -131,8 +131,15 @@ CREATE TABLE IF NOT EXISTS exit_cooldowns (
     exit_time TEXT NOT NULL,
     cooldown_hours REAL NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_exit_cooldowns_token_strategy
-    ON exit_cooldowns(token_id, strategy);
+-- C-4 hotfix (2026-04-26): the unique index on (token_id, strategy) is
+-- created in `_migrate_indexes` only — NOT here.  On a pre-C-4 prod DB
+-- the existing exit_cooldowns table is preserved by `IF NOT EXISTS`
+-- and lacks the `strategy` column until `_migrate_columns` adds it.
+-- If we put the unique index in this SCHEMA executescript() (which
+-- runs BEFORE `_migrate_columns`), CREATE INDEX raises
+-- "no such column: strategy" and the bot crashes at startup.  Letting
+-- the migration helpers run in the documented order fixes it for
+-- both fresh installs and upgrades.
 CREATE INDEX IF NOT EXISTS idx_exit_cooldowns_time ON exit_cooldowns(exit_time);
 
 -- FIX-11: persistent kill switch.  Single-row table (id pinned to 1) that the

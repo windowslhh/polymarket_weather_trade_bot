@@ -167,3 +167,61 @@ async def test_clear_exit_cooldown_targets_one_strategy():
     active = await tracker.load_active_exit_cooldowns()
     assert not any(k[0] == "tok_x" for k in active)
     await store.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# C-4 hotfix (2026-04-26): SCHEMA must NOT install the (token_id, strategy)
+# unique index — the migration helpers do that AFTER _migrate_columns
+# has added the strategy column.  Putting the index in SCHEMA breaks
+# upgrade-path startup with "no such column: strategy".
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_initialize_works_on_pre_c4_exit_cooldowns_table():
+    """C-4 hotfix: simulate a pre-C-4 production DB by dropping the
+    `strategy` column from exit_cooldowns before re-initializing.
+    Initialize must succeed (migrate adds the column + creates the
+    composite unique index)."""
+    import aiosqlite
+    tmp = Path(tempfile.mkdtemp()) / "bot.db"
+
+    # Pre-create an exit_cooldowns table with the OLD schema (token_id PK only)
+    raw = await aiosqlite.connect(str(tmp))
+    await raw.execute("""
+        CREATE TABLE exit_cooldowns (
+            token_id TEXT PRIMARY KEY,
+            exit_time TEXT NOT NULL,
+            cooldown_hours REAL NOT NULL
+        )
+    """)
+    # Seed one legacy row to confirm it survives the migration
+    await raw.execute(
+        "INSERT INTO exit_cooldowns VALUES (?, ?, ?)",
+        ("legacy_token", "2026-04-25 12:00:00", 4.0),
+    )
+    await raw.commit()
+    await raw.close()
+
+    # Now run the regular Store.initialize against this DB
+    store = Store(tmp)
+    await store.initialize()
+
+    # The strategy column was added (defaulted to 'B' for the legacy row)
+    async with store.db.execute(
+        "SELECT token_id, strategy FROM exit_cooldowns"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert ("legacy_token", "B") in [(r[0], r[1]) for r in rows]
+
+    # The composite unique index exists
+    async with store.db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND name='idx_exit_cooldowns_token_strategy'"
+    ) as cur:
+        idx_rows = await cur.fetchall()
+    assert idx_rows, (
+        "C-4 hotfix: idx_exit_cooldowns_token_strategy must be created "
+        "by _migrate_indexes after _migrate_columns adds strategy"
+    )
+    await store.close()
