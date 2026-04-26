@@ -189,10 +189,35 @@ async def run(args: argparse.Namespace) -> None:
 
     is_paper = config.paper or config.dry_run
 
-    # FIX-M7: preflight checks before we touch any state.  DB write /
-    # CLOB reachability / webhook ping — any fatal failure exits 2
-    # before the scheduler starts, so a broken deploy can't silently
-    # run for an hour on a dead dependency.
+    # FIX-2P-6: lazy provider for one live weather token.  Runs only when
+    # preflight reaches the fee-rate check (live mode) — paper/dry-run
+    # short-circuit ahead of this and the discover call never fires.
+    async def _sample_token_provider() -> str | None:
+        try:
+            from src.markets.discovery import discover_weather_markets
+            events = await discover_weather_markets(
+                config.cities,
+                min_volume=config.strategy.min_market_volume,
+                max_spread=config.strategy.max_slot_spread,
+                max_days_ahead=config.strategy.max_days_ahead,
+            )
+            for ev in events:
+                for slot in ev.slots:
+                    if slot.token_id_no:
+                        return slot.token_id_no
+            return None
+        except Exception:
+            logger.exception("Sample-token discovery failed")
+            return None
+
+    from src.strategy.gates import TAKER_FEE_RATE  # canonical constant
+
+    # FIX-M7 + FIX-2P-6: preflight checks before we touch any state.  DB
+    # write / CLOB reachability / fee-rate confirmation / webhook ping —
+    # any fatal failure exits 2 before the scheduler starts, so a broken
+    # deploy can't silently run for an hour on a dead dependency.  Fee
+    # drift is non-fatal (alert only) since a transient CLOB hiccup
+    # shouldn't ground the bot.
     await run_preflight(
         store=store,
         clob_client=live_clob_for_probe,
@@ -200,6 +225,8 @@ async def run(args: argparse.Namespace) -> None:
         webhook_url=config.alert_webhook_url,
         is_paper=config.paper,
         is_dry_run=config.dry_run,
+        sample_token_provider=_sample_token_provider,
+        expected_fee_rate=TAKER_FEE_RATE,
     )
 
     await reconcile_pending_orders(
