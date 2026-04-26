@@ -789,20 +789,35 @@ def create_app(store, rebalancer, config) -> Flask:
 
         Blocker 5 (review): the previous implementation fail-OPENED on an
         empty TRIGGER_SECRET — fine for loopback-only dev, but the same
-        binary runs on the VPS where `curl http://198.23.134.31:5001/...`
+        binary runs on the VPS where `curl http://198.23.134.31:5002/...`
         is reachable from the public internet.  Without auth, anyone could
         flip the kill switch or fire a rebalance.
 
-        New behaviour:
-          - secret set, header matches  → allow (return None)
-          - secret set, header missing/wrong  → 401
-          - secret empty + ADMIN_NOAUTH=1 + paper/dry-run mode  → allow
-            (explicit dev opt-in; never works in live mode)
-          - secret empty otherwise  → 503 admin disabled
+        Authorization matrix (C-7, confirmed 2026-04-26):
+
+        ┌─────────────────────┬───────────────┬──────────────┬────────┐
+        │ TRIGGER_SECRET set? │ Auth header?  │ ADMIN_NOAUTH │ Result │
+        ├─────────────────────┼───────────────┼──────────────┼────────┤
+        │ yes                 │ matches       │ —            │ 200    │
+        │ yes                 │ missing/wrong │ —            │ 401    │
+        │ no (empty)          │ —             │ =1 + paper   │ 200    │
+        │ no (empty)          │ —             │ =1 + LIVE    │ 503    │
+        │ no (empty)          │ —             │ unset/0      │ 503    │
+        └─────────────────────┴───────────────┴──────────────┴────────┘
+
+        Critical: ``ADMIN_NOAUTH=1`` is **only** honoured when the bot is
+        running paper or dry-run.  In live mode it is silently ignored
+        and the request returns 503.  This means a stale dev override
+        leaking into a live deploy can't accidentally unprotect the
+        admin endpoints — the live mode acts as a second-layer veto.
+
+        Auth headers accepted: ``Authorization: Bearer <secret>`` (RFC
+        6750) or the legacy ``X-Trigger-Secret: <secret>``.  Both use
+        ``hmac.compare_digest`` to defeat timing oracles.
 
         Returns None when the caller is authorized.  Returns a Flask
-        response tuple `(jsonify(...), status)` otherwise — the endpoint
-        propagates it via `if err is not None: return err`.
+        response tuple ``(jsonify(...), status)`` otherwise — every
+        endpoint propagates it via ``if err is not None: return err``.
         """
         import os
         cfg = app.config.get("bot_config")
