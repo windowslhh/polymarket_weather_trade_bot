@@ -100,24 +100,6 @@ do not skip steps.  All commands assume:
       [ "$(grep ^TRIGGER_SECRET= .env | cut -d= -f2-)" != "" ] && echo OK || echo MISSING
       ```
       Expect: `OK`
-- [ ] **D-2** (2026-04-26): `DASHBOARD_SECRET` is **not empty** — empty
-      secret in live mode means the dashboard returns 503 on every
-      page (fail-closed):
-      ```
-      [ "$(grep ^DASHBOARD_SECRET= .env | cut -d= -f2-)" != "" ] && echo OK || echo MISSING
-      ```
-      Expect: `OK`.  This is a separate secret from `TRIGGER_SECRET` —
-      grant `DASHBOARD_SECRET` to reviewers who need read access; keep
-      `TRIGGER_SECRET` to operators who can pause/unpause.  After
-      cutover, log in via:
-      ```
-      # Browser:
-      http://198.23.134.31:5002/login?secret=<DASHBOARD_SECRET>
-      # → cookie set, subsequent /,/positions,/trades,etc. work
-
-      # CLI:
-      curl -H "X-Dashboard-Secret: <DASHBOARD_SECRET>" http://198.23.134.31:5002/api/status
-      ```
 - [ ] Permissions locked down:
       ```
       chmod 600 /opt/weather-bot-new/.env

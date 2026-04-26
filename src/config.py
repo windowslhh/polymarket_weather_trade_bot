@@ -205,15 +205,6 @@ class AppConfig:
     # Set TRIGGER_SECRET in .env; if empty the endpoint is unprotected (dev only).
     trigger_secret: str = ""
 
-    # D-2 (2026-04-26): separate secret for the dashboard / view-only API.
-    # Operators want to share read-only dashboard access with reviewers
-    # without handing over TRIGGER_SECRET (which can pause/unpause the
-    # bot).  Two-secret design: DASHBOARD_SECRET grants "I can see the
-    # data"; TRIGGER_SECRET grants "I can flip the kill switch".  The
-    # latter is a strict superset only via explicit cookie/header
-    # ownership — sharing one doesn't imply the other.
-    dashboard_secret: str = ""
-
     # Sub-configs
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -245,7 +236,6 @@ def load_config(config_path: str | Path | None = None, env_path: str | Path | No
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
         trigger_secret=os.getenv("TRIGGER_SECRET", ""),
-        dashboard_secret=os.getenv("DASHBOARD_SECRET", ""),
         strategy=StrategyConfig(**strategy_raw),
         scheduling=SchedulingConfig(**scheduling_raw),
         cities=[CityConfig(**c) for c in cities_raw],
