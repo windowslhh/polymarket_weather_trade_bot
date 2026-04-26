@@ -3,16 +3,13 @@
 {% block content %}
 <div class="page-title">Trade Timeline</div>
 
-<!-- Strategy P&L Summary -->
-{% set strat_meta = {'A': 'Conservative Far', 'B': 'Locked Aggressor', 'C': 'Close Range', 'D': 'Quick Exit'} %}
+<!-- Strategy P&L Summary (B-only live; legacy A/C/D rolled into B for display) -->
 <div class="metrics">
-    {% for sk in ['A', 'B', 'C', 'D'] %}
     <div class="metric-card">
-        <div class="metric-label">Strategy {{ sk }} <span style="font-size:10px;color:var(--text-dim);">({{ strat_meta.get(sk, sk) }})</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl.get(sk, 0) >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.get(sk, 0)) }}</div>
-        <div class="metric-sub">{{ strat_counts.get(sk, {}).get('open', 0) }} open / {{ strat_counts.get(sk, {}).get('settled', 0) }} closed / ${{ "%.1f"|format(strat_exposure.get(sk, 0)) }}</div>
+        <div class="metric-label">Strategy B <span style="font-size:10px;color:var(--text-dim);">(Locked Aggressor)</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.get('B', 0) >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.get('B', 0)) }}</div>
+        <div class="metric-sub">{{ strat_counts.get('B', {}).get('open', 0) }} open / {{ strat_counts.get('B', {}).get('settled', 0) }} closed / ${{ "%.1f"|format(strat_exposure.get('B', 0)) }}</div>
     </div>
-    {% endfor %}
 </div>
 
 <!-- Full Trade Timeline -->

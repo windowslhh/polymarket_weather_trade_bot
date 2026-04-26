@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -28,13 +29,21 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT NOT NULL,
+    order_id TEXT NOT NULL DEFAULT '',
     event_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
     side TEXT NOT NULL,
     price REAL NOT NULL,
     size_usd REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'filled', 'cancelled', 'failed'
+    idempotency_key TEXT,
+    failure_reason TEXT,
+    -- Review H-1 (2026-04-24): strategy tag so the reconciler can match
+    -- a SELL order to the right variant's position row.  Two variants
+    -- (e.g. B and D' for LA) can hold the same (event_id, token_id) slot;
+    -- without this column, the hybrid-state SQL could close B's SELL
+    -- against D's still-open position and double-count P&L at settlement.
+    strategy TEXT NOT NULL DEFAULT 'B',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     filled_at TEXT
 );
@@ -80,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_city ON positions(city);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS edge_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -92,13 +102,39 @@ CREATE TABLE IF NOT EXISTS edge_history (
     win_prob REAL,
     ev REAL,
     distance_f REAL,
-    trend_state TEXT
+    trend_state TEXT,
+    -- FIX-01: the forecast's own forecast_date, so paper-mode audits can
+    -- catch "today's forecast routed into D+1 event" regressions in the
+    -- log even when the evaluator's runtime assert didn't fire.
+    forecast_date TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_log_cycle ON decision_log(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_cycle ON edge_history(cycle_at);
 CREATE INDEX IF NOT EXISTS idx_edge_history_city ON edge_history(city);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_unique ON settlements(event_id, strategy);
+
+-- FIX-08: persist exit cooldowns so a restart doesn't reset the BUY→EXIT→BUY
+-- churn window.  Previously kept only in rebalancer._recent_exits (RAM); a
+-- post-TRIM crash meant the next startup could re-buy the same slot seconds
+-- after exiting.
+CREATE TABLE IF NOT EXISTS exit_cooldowns (
+    token_id TEXT PRIMARY KEY,
+    exit_time TEXT NOT NULL,
+    cooldown_hours REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exit_cooldowns_time ON exit_cooldowns(exit_time);
+
+-- FIX-11: persistent kill switch.  Single-row table (id pinned to 1) that the
+-- web /api/admin/pause endpoint flips; the rebalancer reads it at the top of
+-- run() to decide whether to skip BUY signal generation (TRIM/EXIT/settlement
+-- continue either way — closing is always safe).
+CREATE TABLE IF NOT EXISTS bot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    paused INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO bot_state (id, paused) VALUES (1, 0);
 """
 
 
@@ -144,6 +180,18 @@ class Store:
             # Fix 4: relative EV-decay TRIM — see docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-4
             ("positions", "entry_ev", "ALTER TABLE positions ADD COLUMN entry_ev REAL"),
             ("positions", "entry_win_prob", "ALTER TABLE positions ADD COLUMN entry_win_prob REAL"),
+            # FIX-03: orders↔positions linkage. idempotency_key uniquely names the
+            # pending order across crashes so the reconciler can match it back to
+            # a CLOB fill. source_order_id on positions points to the concrete CLOB
+            # order_id that opened the row — existing rows are tagged 'legacy' so
+            # the invariant "every position has a source" holds without backfill.
+            ("orders", "idempotency_key", "ALTER TABLE orders ADD COLUMN idempotency_key TEXT"),
+            ("orders", "failure_reason", "ALTER TABLE orders ADD COLUMN failure_reason TEXT"),
+            ("positions", "source_order_id", "ALTER TABLE positions ADD COLUMN source_order_id TEXT DEFAULT 'legacy'"),
+            # Review H-1: see schema header for rationale.
+            ("orders", "strategy", "ALTER TABLE orders ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
+            # FIX-01: forecast_date column for audit.
+            ("edge_history", "forecast_date", "ALTER TABLE edge_history ADD COLUMN forecast_date TEXT"),
         ]
         for table, column, sql in migrations:
             try:
@@ -169,6 +217,12 @@ class Store:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_no_dup "
                 "ON positions(event_id, token_id, strategy) WHERE status = 'open'",
                 "deduplication index on open positions(event_id, token_id, strategy)",
+            ),
+            (
+                "idx_orders_idempotency_key",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key "
+                "ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL",
+                "unique idempotency_key on orders — reconciler keys off this",
             ),
         ]
         async with self.db.execute(
@@ -311,6 +365,269 @@ class Store:
         )
         await self.db.commit()
 
+    # ── FIX-03: pending-order lifecycle ────────────────────────────────
+    # The executor flow is: persist pending row → hit CLOB → on success atomically
+    # promote row to 'filled' + INSERT position. If the executor crashes between
+    # steps, the 'pending' row survives and the reconciler (FIX-05) matches it
+    # against CLOB state via idempotency_key.
+
+    async def insert_pending_order(
+        self,
+        idempotency_key: str,
+        event_id: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size_usd: float,
+        strategy: str = "B",
+    ) -> int:
+        cursor = await self.db.execute(
+            """INSERT INTO orders (order_id, event_id, token_id, side, price, size_usd,
+                                   status, idempotency_key, strategy)
+               VALUES ('', ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (event_id, token_id, side, price, size_usd, idempotency_key, strategy),
+        )
+        await self.db.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    async def finalize_buy_order(
+        self,
+        idempotency_key: str,
+        order_id: str,
+        event_id: str,
+        token_id: str,
+        token_type: str,
+        city: str,
+        slot_label: str,
+        side: str,
+        entry_price: float,
+        size_usd: float,
+        shares: float,
+        strategy: str = "B",
+        buy_reason: str = "",
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
+    ) -> int:
+        """Promote a pending BUY order to filled AND insert the position row atomically.
+
+        Returns the new position id.  Raises if idempotency_key has no pending row.
+        """
+        # aiosqlite commits on close of execute_script or explicit commit;
+        # we wrap the two writes in a single commit so a crash between them
+        # is impossible — either both land or neither does.
+        async with self.db.execute(
+            "SELECT id FROM orders WHERE idempotency_key = ? AND status = 'pending'",
+            (idempotency_key,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"finalize_buy_order: no pending order for key={idempotency_key}"
+            )
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now') "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        pos_cursor = await self.db.execute(
+            """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
+                                       entry_price, size_usd, shares, strategy, buy_reason,
+                                       entry_ev, entry_win_prob, source_order_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, token_id, token_type, city, slot_label, side,
+             entry_price, size_usd, shares, strategy, buy_reason,
+             entry_ev, entry_win_prob, order_id),
+        )
+        await self.db.commit()
+        return pos_cursor.lastrowid  # type: ignore[return-value]
+
+    async def finalize_sell_order(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Promote a pending SELL order to filled. Position closure is done separately."""
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now') "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
+    async def get_filled_sells_with_open_positions(self) -> list[dict]:
+        """Review 🟡 #6 + H-1: reconcile the SELL hybrid-state window.
+
+        The executor's SELL path runs finalize_sell_order and
+        close_positions_for_token as two separate commits.  If we crash
+        between them, we have an orders row with status='filled' (SELL)
+        and an open position for the same (event_id, token_id, strategy)
+        that should be closed.
+
+        H-1 (2026-04-24): the JOIN now includes `p.strategy = o.strategy`
+        so if B and D' both hold the same token, B's SELL only closes
+        B's position — D' stays open.  Pre-H-1 the JOIN was (event_id,
+        token_id) only, which could double-close across variants.
+        """
+        async with self.db.execute(
+            """SELECT o.idempotency_key, o.order_id, o.price, o.event_id,
+                      o.token_id, p.id AS position_id, p.entry_price,
+                      p.shares, p.strategy
+               FROM orders o
+               JOIN positions p
+                 ON p.event_id = o.event_id
+                AND p.token_id = o.token_id
+                AND p.strategy = o.strategy
+                AND p.status = 'open'
+               WHERE o.side = 'SELL'
+                 AND o.status = 'filled'
+                 -- Latest filled SELL per (event_id, token_id, strategy).
+                 AND o.filled_at = (
+                     SELECT MAX(filled_at) FROM orders o2
+                     WHERE o2.event_id = o.event_id
+                       AND o2.token_id = o.token_id
+                       AND o2.strategy = o.strategy
+                       AND o2.side = 'SELL'
+                       AND o2.status = 'filled'
+                 )"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+    async def mark_order_filled_orphan(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Reconciler-only: mark an orders row 'filled' without inserting a
+        position.  Used when CLOB confirms a fill for a pending BUY but we
+        lack the signal metadata (strategy/reason/slot) needed to create a
+        proper position row — the operator completes that by hand.
+
+        Semantically distinct from `finalize_sell_order` (which assumes the
+        position existed and the orders-row update is one side of a close)
+        even though the SQL body is similar; keeping them separate so future
+        audit queries can tell ops-created orphans from real SELL fills.
+        """
+        await self.db.execute(
+            "UPDATE orders SET status = 'filled', order_id = ?, filled_at = datetime('now'), "
+            "failure_reason = 'orphan_reconciled_by_operator' "
+            "WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
+    async def mark_order_open(
+        self, idempotency_key: str, order_id: str,
+    ) -> None:
+        """Reconciler: CLOB says the order is still resting unfilled in its
+        order book.  Promote our DB row to 'open' so it can be cleanly
+        re-reconciled later (either by a fill or by an operator cancel).
+        """
+        await self.db.execute(
+            "UPDATE orders SET status = 'open', order_id = ? WHERE idempotency_key = ?",
+            (order_id, idempotency_key),
+        )
+        await self.db.commit()
+
+    async def mark_order_failed(
+        self, idempotency_key: str, reason: str,
+    ) -> None:
+        await self.db.execute(
+            "UPDATE orders SET status = 'failed', failure_reason = ? "
+            "WHERE idempotency_key = ?",
+            (reason[:500], idempotency_key),
+        )
+        await self.db.commit()
+
+    async def get_pending_orders(self) -> list[dict]:
+        """Fetch all orders stuck in 'pending' — used by FIX-05 reconciler on startup."""
+        async with self.db.execute(
+            "SELECT * FROM orders WHERE status = 'pending' ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # ── FIX-08: persistent exit cooldowns ─────────────────────────────
+
+    async def record_exit_cooldown(
+        self, token_id: str, exit_time: datetime, cooldown_hours: float,
+    ) -> None:
+        """Upsert an exit-cooldown row (token_id is PK).  If the same token
+        gets exited twice within a window, the later exit_time wins."""
+        await self.db.execute(
+            """INSERT INTO exit_cooldowns (token_id, exit_time, cooldown_hours)
+               VALUES (?, ?, ?)
+               ON CONFLICT(token_id) DO UPDATE SET
+                   exit_time = excluded.exit_time,
+                   cooldown_hours = excluded.cooldown_hours""",
+            (token_id, exit_time.isoformat(), cooldown_hours),
+        )
+        await self.db.commit()
+
+    async def get_active_exit_cooldowns(self) -> list[dict]:
+        """Return cooldown rows whose window hasn't elapsed yet.
+
+        Drops expired rows opportunistically — caller doesn't need to
+        re-check the cooldown_hours math against exit_time.
+        """
+        async with self.db.execute(
+            "SELECT token_id, exit_time, cooldown_hours FROM exit_cooldowns"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        now = datetime.now(timezone.utc)
+        active: list[dict] = []
+        expired_tids: list[str] = []
+        for r in rows:
+            try:
+                t = datetime.fromisoformat(str(r[1]).replace("Z", "+00:00"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if now < t + timedelta(hours=float(r[2])):
+                active.append({
+                    "token_id": r[0], "exit_time": t,
+                    "cooldown_hours": float(r[2]),
+                })
+            else:
+                expired_tids.append(r[0])
+        if expired_tids:
+            await self.db.executemany(
+                "DELETE FROM exit_cooldowns WHERE token_id = ?",
+                [(t,) for t in expired_tids],
+            )
+            await self.db.commit()
+        return active
+
+    async def clear_exit_cooldown(self, token_id: str) -> None:
+        """Delete a specific token's cooldown (used by tests and admin ops)."""
+        await self.db.execute(
+            "DELETE FROM exit_cooldowns WHERE token_id = ?", (token_id,),
+        )
+        await self.db.commit()
+
+    # ── FIX-11: kill switch ───────────────────────────────────────────
+
+    async def get_bot_paused(self) -> bool:
+        """Read the pause flag (row id=1)."""
+        async with self.db.execute(
+            "SELECT paused FROM bot_state WHERE id = 1"
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            # Row missing — insert default and report unpaused.
+            await self.db.execute(
+                "INSERT OR IGNORE INTO bot_state (id, paused) VALUES (1, 0)"
+            )
+            await self.db.commit()
+            return False
+        return bool(row[0])
+
+    async def set_bot_paused(self, paused: bool) -> None:
+        """Flip the pause flag; web endpoint calls this after auth."""
+        await self.db.execute(
+            "UPDATE bot_state SET paused = ?, updated_at = datetime('now') "
+            "WHERE id = 1",
+            (1 if paused else 0,),
+        )
+        await self.db.commit()
+
     async def get_daily_pnl(self, date_str: str) -> float | None:
         async with self.db.execute(
             "SELECT realized_pnl FROM daily_pnl WHERE date = ?", (date_str,)
@@ -356,15 +673,16 @@ class Store:
         forecast_high_f: float, price_yes: float, price_no: float,
         win_prob: float, ev: float, distance_f: float, trend_state: str,
         ensemble_spread_f: float | None = None,
+        forecast_date: str | None = None,
     ) -> None:
         await self.db.execute(
             """INSERT INTO edge_history (cycle_at, city, market_date, slot_label,
                forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
-               ensemble_spread_f)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               ensemble_spread_f, forecast_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (cycle_at, city, market_date, slot_label,
              forecast_high_f, price_yes, price_no, win_prob, ev, distance_f, trend_state,
-             ensemble_spread_f),
+             ensemble_spread_f, forecast_date),
         )
 
     async def flush_edge_batch(self) -> None:
@@ -430,8 +748,13 @@ class Store:
             return [dict(row) for row in rows]
 
     async def get_strategy_realized_pnl(self) -> dict[str, float]:
-        """Get realized P&L per strategy as a simple dict."""
-        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        """Get realized P&L per strategy as a simple dict.
+
+        B is the only live variant; legacy A/C/D rows in the settlements
+        table are kept as audit trail and surfaced under their original
+        strategy key so callers can still query history if needed.
+        """
+        result: dict[str, float] = {"B": 0.0}
         async with self.db.execute("""
             SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
             FROM settlements
@@ -439,8 +762,7 @@ class Store:
         """) as cursor:
             async for row in cursor:
                 s = row[0]
-                if s in result:
-                    result[s] = float(row[1])
+                result[s] = float(row[1])
         return result
 
     async def get_closed_positions(self, limit: int = 20) -> list[dict]:

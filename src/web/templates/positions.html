@@ -33,15 +33,15 @@
     {% endfor %}
 </div>
 
-<!-- Positions by Strategy -->
-{% set strat_labels = {'A':'Conservative Far', 'B':'Locked Aggressor', 'C':'Close Range', 'D':'Quick Exit'} %}
+<!-- Positions by Strategy (B-only live; legacy A/C/D rolled into B for display) -->
+{% set strat_labels = {'B':'Locked Aggressor'} %}
 {% for strat_name in strategies.keys()|sort %}
 {% set strat_label = strat_labels.get(strat_name, strat_name) %}
 {% set strat_positions = strategies[strat_name] %}
 <div class="panel" style="margin-bottom:16px;">
     <div class="panel-header">
         <h3>
-            <span class="tag {% if strat_name == 'A' %}tag-settling{% elif strat_name == 'B' %}tag-stable{% elif strat_name == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            <span class="tag tag-stable" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
             {{ strat_label }}
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">

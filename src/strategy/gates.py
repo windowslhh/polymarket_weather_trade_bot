@@ -533,12 +533,28 @@ class RelativeEvDecayGate:
     """TRIM trigger: current EV < entry_ev × (1 − trim_ev_decay_ratio).
 
     Inactive when no positive entry_ev is known (legacy pre-migration
-    positions) so absolute-only semantics kick in."""
+    positions) so absolute-only semantics kick in.
+
+    FIX-P2-9 (2026-04-24): only fires when the position is in a *floating
+    loss* (current_price_no < entry_price_no).  Without this guard, a
+    position that made a sensible ev-decay move but is still in profit
+    (e.g. entry_ev 0.10, current_ev 0.02 at entry_price 0.40 → 0.45) was
+    being trimmed prematurely, locking in a smaller win than we could have
+    ridden out.  The price-side filter keeps relative-decay focused on
+    "we're losing and EV already tells us to cut," not "EV shrank but
+    we're still above water."
+    """
 
     def check(self, ctx: GateContext) -> GateResult | None:
         assert ctx.ev is not None
         entry_ev = ctx.entry_ev_map.get(ctx.slot.token_id_no)
         if entry_ev is None or entry_ev <= 0:
+            return None
+        entry_price = ctx.entry_prices.get(ctx.slot.token_id_no)
+        # FIX-P2-9: require a floating loss before relative-decay fires.
+        # If we don't have an entry price (legacy position), fall through
+        # to the decay check — the absolute gate still protects us.
+        if entry_price is not None and ctx.slot.price_no >= entry_price:
             return None
         gate_ev = entry_ev * (1.0 - ctx.config.trim_ev_decay_ratio)
         if ctx.ev < gate_ev:

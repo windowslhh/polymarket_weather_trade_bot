@@ -50,7 +50,14 @@ def _make_config(**overrides) -> AppConfig:
 
 
 def _mock_rebalancer(config=None, positions=None):
-    """Create a Rebalancer with mocked external dependencies."""
+    """Create a Rebalancer with mocked external dependencies.
+
+    🟡 #10 + Blocker 2 (review, 2026-04-25): mock the kill-switch read
+    AND short-circuit refresh_forecasts so the test doesn't hit live
+    Open-Meteo (whose forecast_date triggers FIX-22's assert when the
+    test event's market_date — built from NYC-local-today — disagrees
+    with UTC-today across the overnight window).
+    """
     config = config or _make_config()
 
     mock_clob = MagicMock()
@@ -62,6 +69,11 @@ def _mock_rebalancer(config=None, positions=None):
     mock_portfolio.get_all_open_positions = AsyncMock(return_value=positions or [])
     mock_portfolio.get_city_exposure = AsyncMock(return_value=0.0)
     mock_portfolio.get_total_exposure = AsyncMock(return_value=0.0)
+    mock_portfolio.get_daily_pnl = AsyncMock(return_value=None)
+    mock_portfolio.record_exit_cooldown = AsyncMock()
+    mock_portfolio.load_active_exit_cooldowns = AsyncMock(return_value={})
+    mock_portfolio.store = MagicMock()
+    mock_portfolio.store.get_bot_paused = AsyncMock(return_value=False)
 
     tracker = DailyMaxTracker()
 
@@ -72,6 +84,31 @@ def _mock_rebalancer(config=None, positions=None):
         executor=mock_executor,
         max_tracker=tracker,
     )
+    # Replace refresh_forecasts with a no-op so the test doesn't hit
+    # live Open-Meteo.
+    rebalancer.refresh_forecasts = AsyncMock(return_value=None)
+    # Pre-seed the by-date forecast cache for every (city, candidate
+    # market_date) combination the position_check might infer.  Without
+    # a forecast, evaluate_exit_signals bails at Layer 2; with a real
+    # forecast whose forecast_date doesn't match event.market_date,
+    # FIX-22 raises.  Seeding both UTC-today and NYC-local-today covers
+    # the overnight UTC window where they differ.
+    from datetime import datetime as _dt, timezone as _tz
+    from zoneinfo import ZoneInfo as _Zi
+    from src.weather.models import Forecast as _Fc
+    candidate_dates = {_dt.now(_tz.utc).date()}
+    for c in config.cities:
+        if c.tz:
+            candidate_dates.add(_dt.now(_Zi(c.tz)).date())
+    for d in candidate_dates:
+        rebalancer._cached_forecasts_by_date.setdefault(d, {})
+        for c in config.cities:
+            rebalancer._cached_forecasts_by_date[d][c.name] = _Fc(
+                city=c.name, forecast_date=d,
+                predicted_high_f=78.0, predicted_low_f=60.0,
+                confidence_interval_f=4.0, source="test",
+                fetched_at=_dt.now(_tz.utc),
+            )
     return rebalancer
 
 

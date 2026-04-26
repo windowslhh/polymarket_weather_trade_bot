@@ -14,7 +14,10 @@ from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
+from src.preflight import run_preflight
+from src.recovery.reconciler import reconcile_pending_orders
 from src.scheduler.jobs import setup_scheduler
+from src.security import load_eth_private_key
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
@@ -51,9 +54,19 @@ async def run(args: argparse.Namespace) -> None:
     elif config.paper:
         logger.info("*** PAPER TRADING MODE — simulated fills, positions tracked ***")
 
-    if not config.dry_run and not config.paper and not config.eth_private_key:
-        logger.error("ETH_PRIVATE_KEY not set. Use --paper for simulated trading or --dry-run for signal preview.")
-        sys.exit(1)
+    # Live mode: resolve the signing key from Keychain, *overriding* any
+    # ETH_PRIVATE_KEY that load_config() picked up from .env.  Spec says
+    # Keychain is the source of truth; an .env value left over from an
+    # old paper deploy must not silently sign on the live path.
+    # load_eth_private_key() falls through to ETH_PRIVATE_KEY itself
+    # (Keychain miss → env → raise), so non-mac live deploys still work.
+    # Paper / dry-run do not touch Keychain at all.
+    if not config.dry_run and not config.paper:
+        try:
+            config.eth_private_key = load_eth_private_key()
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            sys.exit(1)
 
     logger.info("Loaded %d cities from config", len(config.cities))
 
@@ -146,6 +159,66 @@ async def run(args: argparse.Namespace) -> None:
     store = Store(config.db_path)
     await store.initialize()
 
+    # FIX-05 + Review Blocker #2: resolve orphaned pending orders before
+    # generating any new signals.  In live mode we probe the CLOB via
+    # get_trades / get_orders (matched on token_id / side / price /
+    # size_shares since py-clob-client doesn't echo our idempotency_key
+    # back to Polymarket — see clob_client.probe_order_status).  Paper
+    # and dry-run mark all pending rows failed (no live CLOB to probe).
+    live_clob_for_probe = ClobClient(config)
+
+    async def _probe(row: dict):
+        """Adapter: reconciler hands us the orders row; we unpack into the
+        CLOB probe's parameters."""
+        from datetime import datetime, timezone
+        created_at_epoch = None
+        created_at = row.get("created_at")
+        if created_at:
+            try:
+                # SQLite stores ISO8601 naive UTC; pad to UTC and convert.
+                dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                # Widen the window by 5 minutes to accommodate clock skew.
+                created_at_epoch = int(dt.timestamp()) - 300
+            except ValueError:
+                pass
+        price_usd = float(row.get("price", 0))
+        size_usd = float(row.get("size_usd", 0))
+        size_shares = size_usd / price_usd if price_usd > 0 else 0.0
+        probe = await live_clob_for_probe.probe_order_status(
+            token_id=row["token_id"], side=row["side"],
+            price=price_usd, size_shares=size_shares,
+            created_at_epoch=created_at_epoch,
+        )
+        # Bridge ProbeResult (clob_client) → ClobOrderStatus (reconciler).
+        from src.recovery.reconciler import ClobOrderStatus
+        return ClobOrderStatus(
+            state=probe.state, order_id=probe.order_id,
+            price=probe.price, size=probe.size, message=probe.message,
+        )
+
+    is_paper = config.paper or config.dry_run
+
+    # FIX-M7: preflight checks before we touch any state.  DB write /
+    # CLOB reachability / webhook ping — any fatal failure exits 2
+    # before the scheduler starts, so a broken deploy can't silently
+    # run for an hour on a dead dependency.
+    await run_preflight(
+        store=store,
+        clob_client=live_clob_for_probe,
+        alerter=alerter,
+        webhook_url=config.alert_webhook_url,
+        is_paper=config.paper,
+        is_dry_run=config.dry_run,
+    )
+
+    await reconcile_pending_orders(
+        store=store, alerter=alerter,
+        query_clob_order=None if is_paper else _probe,
+        is_paper=is_paper,
+    )
+
     # Build empirical forecast error distributions (cached, ~7 day refresh)
     logger.info("Loading forecast error distributions...")
     error_dists = await build_all_distributions(config.cities)
@@ -162,12 +235,17 @@ async def run(args: argparse.Namespace) -> None:
     max_tracker = DailyMaxTracker()
     rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
 
+    # FIX-08: restore persistent exit cooldowns before trading starts.
+    # Without this, a crash inside a cooldown window would reset the
+    # BUY→EXIT→BUY churn guard.
+    await rebalancer.load_persistent_state()
+
     # Backfill today's METAR history so temperature curves show the full day
     logger.info("Backfilling today's METAR observations...")
     await rebalancer.backfill_today_observations()
 
-    # Setup scheduler
-    scheduler = setup_scheduler(config, rebalancer)
+    # Setup scheduler — alerter wired in so FIX-06's job_error listener can page.
+    scheduler = setup_scheduler(config, rebalancer, alerter=alerter)
 
     # Handle graceful shutdown
     loop = asyncio.get_event_loop()
@@ -201,7 +279,30 @@ async def run(args: argparse.Namespace) -> None:
     try:
         await stop_event.wait()
     finally:
-        scheduler.shutdown(wait=False)
+        # FIX-09: graceful shutdown with 30s budget.  APScheduler.shutdown
+        # is sync and returns once its jobstores are closed; we wrap it in
+        # wait_for on a thread so a pathologically slow job still gets a
+        # deadline.  After the scheduler stops producing new work, drain
+        # any in-flight executor trades so we don't cut a CLOB POST
+        # mid-flight and leave a pending orders row behind.
+        logger.info("Shutdown: stopping scheduler (waiting for jobs)...")
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(scheduler.shutdown, wait=True),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Shutdown: scheduler.shutdown(wait=True) exceeded 30s — "
+                "forcing; long-running jobs may leave pending state",
+            )
+            scheduler.shutdown(wait=False)
+        drained = await executor.wait_until_idle(timeout=30.0)
+        if not drained:
+            logger.error(
+                "Shutdown: executor did not drain cleanly; pending orders "
+                "will be reconciled on next startup (FIX-05)",
+            )
         await store.close()
         logger.info("Bot stopped.")
 

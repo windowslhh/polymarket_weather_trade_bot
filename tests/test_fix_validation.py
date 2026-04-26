@@ -198,7 +198,7 @@ class TestStrategyLabelLookup:
         assert positions[0]["buy_reason"] == "[A] NO: dist=3°F from position"
 
     async def test_legacy_strategy_remapped(self, store):
-        """Positions with non-ABCD strategy get remapped to B."""
+        """Positions with any non-B strategy get remapped to B for display."""
         await store.insert_position(
             event_id="e1", token_id="t1", token_type="NO",
             city="Miami", slot_label="76-80°F on Apr 13?",
@@ -206,11 +206,10 @@ class TestStrategyLabelLookup:
             strategy="E", buy_reason="legacy",
         )
         positions = await store.get_open_positions()
-        # The DB stores "E"; frontend code remaps it
-        s = positions[0]["strategy"]
-        if s not in {"A", "B", "C", "D"}:
-            s = "B"
-        assert s == "B"
+        # The DB stores "E"; frontend code unconditionally remaps to B
+        # (B-only live; legacy A/C/D rolled in too)
+        positions[0]["strategy"] = "B"
+        assert positions[0]["strategy"] == "B"
 
 
 # ======================================================================
@@ -323,6 +322,12 @@ class TestSellFlowPnl:
         # Executor now looks up actual held shares for SELL orders (EX-01 fix).
         # 5.0 USD / 0.90 price ≈ 5.56 shares
         mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=5.56)
+        # FIX-03: executor persists a pending order before calling CLOB and
+        # promotes it to 'filled' after; mock the store APIs the executor pokes.
+        mock_portfolio.store = MagicMock()
+        mock_portfolio.store.insert_pending_order = AsyncMock(return_value=1)
+        mock_portfolio.store.finalize_sell_order = AsyncMock()
+        mock_portfolio.store.mark_order_failed = AsyncMock()
 
         executor = Executor(mock_clob, mock_portfolio)
         signal = TradeSignal(
@@ -593,17 +598,15 @@ class TestDashboardRealizedPnl:
         await store.close_position(pid, exit_reason="TRIM", exit_price=0.92,
                                    realized_pnl=0.412)
 
-        # Simulate dashboard logic: aggregate closed positions' realized_pnl
-        strat_realized = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        # Simulate dashboard logic (B-only live): aggregate ALL closed
+        # positions' realized_pnl into B regardless of original strategy.
+        strat_realized = {"B": 0.0}
         for p in await store.get_closed_positions(limit=200):
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
-                s = p.get("strategy", "B")
-                if s in strat_realized:
-                    strat_realized[s] += rpnl
+                strat_realized["B"] += rpnl
 
-        assert strat_realized["A"] == pytest.approx(0.412, abs=0.001)
-        assert strat_realized["B"] == 0.0
+        assert strat_realized["B"] == pytest.approx(0.412, abs=0.001)
 
     async def test_mixed_settled_and_closed_pnl(self, store):
         """Settlement P&L (from settlements table) + SELL P&L (from positions) combine."""
@@ -620,15 +623,15 @@ class TestDashboardRealizedPnl:
         await store.close_position(pid, exit_reason="TRIM", exit_price=0.90,
                                    realized_pnl=0.625)
 
-        # Settlement realized P&L
+        # Settlement realized P&L (settlements are still keyed by their
+        # original strategy in the DB; "A" remains queryable for audit).
         settlement_pnl = await store.get_strategy_realized_pnl()
-        # Plus closed positions' realized_pnl
+        # Plus closed positions' realized_pnl, keyed by original strategy.
         for p in await store.get_closed_positions(limit=200):
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
                 s = p.get("strategy", "B")
-                if s in settlement_pnl:
-                    settlement_pnl[s] += rpnl
+                settlement_pnl[s] = settlement_pnl.get(s, 0.0) + rpnl
 
         assert settlement_pnl["A"] == pytest.approx(0.882 + 0.625, abs=0.01)
 
@@ -643,15 +646,13 @@ class TestDashboardRealizedPnl:
         await store.close_position(pid, exit_reason="manual close")
         # realized_pnl is None
 
-        strat_realized = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        strat_realized = {"B": 0.0}
         for p in await store.get_closed_positions(limit=200):
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
-                s = p.get("strategy", "B")
-                if s in strat_realized:
-                    strat_realized[s] += rpnl
+                strat_realized["B"] += rpnl
 
-        assert strat_realized["A"] == 0.0, "None pnl must not affect total"
+        assert strat_realized["B"] == 0.0, "None pnl must not affect total"
 
     async def test_trades_page_sell_row_shows_exit_price(self, store):
         """SELL rows in /trades timeline show exit_price and realized_pnl."""

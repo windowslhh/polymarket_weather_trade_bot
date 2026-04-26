@@ -91,14 +91,48 @@ def get_settlement_icao(city: str) -> str | None:
     return entry[0] if entry else None
 
 
+# FIX-12: daily-max-only fallback stations.  Polymarket's settlement judgment
+# still uses the primary ICAO (SETTLEMENT_STATIONS), but daily_max tracking
+# can tolerate the occasional METAR gap by querying a nearby backup station.
+# Denver's primary is KBKF (Buckley SFB, per resolutionSource URLs); KDEN
+# (Denver International) is ~30 miles away and the closest alt ASOS.
+# KDEN must NOT be used for settlement judgment — that would silently lie.
+DAILY_MAX_FALLBACK_ICAO: dict[str, list[str]] = {
+    "Denver": ["KDEN"],
+}
+
+
+async def _fetch_metar_at(
+    icao: str, client: httpx.AsyncClient,
+) -> dict | None:
+    """Pull the latest METAR record from aviationweather.gov for a given ICAO."""
+    resp = await client.get(
+        "https://aviationweather.gov/api/data/metar",
+        params={"ids": icao, "format": "json"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data:
+        return None
+    return data[0]
+
+
 async def fetch_settlement_temp(
     city: str,
     client: httpx.AsyncClient | None = None,
+    *,
+    for_settlement: bool = False,
 ) -> SettlementObservation | None:
     """Fetch the current temperature from the settlement-consistent station.
 
     Uses METAR from aviationweather.gov (same underlying ASOS/AWOS station
     that Weather Underground reports from).
+
+    FIX-12: by default this is called for daily_max tracking, which will
+    try a nearby fallback ICAO (see DAILY_MAX_FALLBACK_ICAO) if the primary
+    station's METAR fetch fails.  Pass `for_settlement=True` to force
+    primary-only lookup — the bot's settlement judgment must only ever use
+    the exact station Polymarket resolves against.
     """
     icao = get_settlement_icao(city)
     if not icao:
@@ -108,37 +142,57 @@ async def fetch_settlement_temp(
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=15)
     try:
-        resp = await client.get(
-            "https://aviationweather.gov/api/data/metar",
-            params={"ids": icao, "format": "json"},
+        tried: list[str] = []
+        candidates = [icao]
+        if not for_settlement:
+            candidates += DAILY_MAX_FALLBACK_ICAO.get(city, [])
+
+        for candidate in candidates:
+            tried.append(candidate)
+            try:
+                latest = await _fetch_metar_at(candidate, client)
+            except Exception:
+                logger.warning(
+                    "METAR fetch failed for %s (%s)%s",
+                    city, candidate,
+                    " — trying fallback" if candidate != candidates[-1] else "",
+                    exc_info=True,
+                )
+                latest = None
+            if latest is None:
+                continue
+
+            temp_c = latest.get("temp")
+            if temp_c is None:
+                continue
+
+            temp_f = float(temp_c) * 9.0 / 5.0 + 32.0
+            obs_time_str = latest.get("reportTime", "")
+            try:
+                obs_time = datetime.fromisoformat(obs_time_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                obs_time = datetime.now(timezone.utc)
+
+            if candidate != icao:
+                logger.warning(
+                    "%s: daily_max fallback — used %s because %s METAR was "
+                    "unavailable.  Settlement judgment still uses %s.",
+                    city, candidate, icao, icao,
+                )
+            return SettlementObservation(
+                city=city,
+                icao=candidate,
+                temp_f=temp_f,
+                observation_time=obs_time,
+                source="metar",
+                raw_data=latest.get("rawOb", ""),
+            )
+
+        logger.warning(
+            "fetch_settlement_temp: all candidates failed for %s (tried=%s, for_settlement=%s)",
+            city, tried, for_settlement,
         )
-        resp.raise_for_status()
-        data = resp.json()
-
-        if not data:
-            return None
-
-        latest = data[0]
-        temp_c = latest.get("temp")
-        if temp_c is None:
-            return None
-
-        temp_f = float(temp_c) * 9.0 / 5.0 + 32.0
-
-        obs_time_str = latest.get("reportTime", "")
-        try:
-            obs_time = datetime.fromisoformat(obs_time_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            obs_time = datetime.now(timezone.utc)
-
-        return SettlementObservation(
-            city=city,
-            icao=icao,
-            temp_f=temp_f,
-            observation_time=obs_time,
-            source="metar",
-            raw_data=latest.get("rawOb", ""),
-        )
+        return None
     except Exception:
         logger.exception("Failed to fetch settlement temp for %s (%s)", city, icao)
         return None

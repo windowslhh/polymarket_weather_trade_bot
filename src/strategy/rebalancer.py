@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -45,8 +46,14 @@ def _effective_city_config(strat_cfg, city: str):
     """Return a copy of strat_cfg with max_exposure_per_city_usd reduced for
     thin-liquidity cities.  Non-thin cities get the original config back
     unchanged (no allocation).  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-5.
+
+    FIX-M9: match case-insensitively so a config with "miami" or
+    "MIAMI" doesn't silently skip the reduction.  Event cities come
+    from Gamma's market titles which are not guaranteed to match the
+    capitalization of our config.
     """
-    if city in strat_cfg.thin_liquidity_cities:
+    thin_ci = {c.lower() for c in strat_cfg.thin_liquidity_cities}
+    if city.lower() in thin_ci:
         reduced = strat_cfg.max_exposure_per_city_usd * strat_cfg.thin_liquidity_exposure_ratio
         return replace(strat_cfg, max_exposure_per_city_usd=reduced)
     return strat_cfg
@@ -95,7 +102,10 @@ class Rebalancer:
         # _cached_forecasts, _last_gamma_prices).
         self._cycle_lock = asyncio.Lock()
 
-        # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn
+        # Exit cooldown: {token_id: exit_datetime} to prevent BUY→EXIT→BUY churn.
+        # FIX-08: this dict is the in-process cache; the DB row is the source
+        # of truth across restarts.  Populated from DB at startup via
+        # load_persistent_state() and dual-written on every EXIT/TRIM.
         self._recent_exits: dict[str, datetime] = {}
         self._last_price_source: str = "gamma"
         self._last_unrealized: float = 0.0
@@ -109,9 +119,70 @@ class Rebalancer:
         # and every 60 min (full rebalance).  Used by position check for
         # better exit/trim decisions.
         self._cached_forecasts: dict[str, "Forecast"] = {}
+        # FIX-01: cache by (market_date, city) so D+1/D+2 events get the
+        # correct-day forecast instead of today's by accident.  Populated
+        # by run()/backfill, read by run_position_check + dashboard.
+        #
+        # Known subtlety (H-9): the cache key is UTC today; cities on the
+        # west coast hit local midnight 5-8 hours *after* UTC rolls over.
+        # During that window (00:00-08:00 UTC), an event whose
+        # market_date we've already classified as D+1 can reach TRIM with
+        # forecast=None if the previous day's cache entry was evicted
+        # before today's got populated.  For the 60-min rebalance this
+        # is self-healing (the next cycle refills); for the 15-min
+        # position_check it can briefly skip TRIM.  Not fixed here
+        # because a city-local keying scheme would require carrying
+        # tz/city along every lookup — a larger refactor better done
+        # post go-live.  Operators see a "TRIM skip (missing forecast)"
+        # log line during the window.
+        self._cached_forecasts_by_date: dict[date, dict[str, "Forecast"]] = {}
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
         self._error_dists = dists
+
+    async def load_persistent_state(self) -> None:
+        """FIX-08: restore exit cooldowns from DB on startup.
+
+        Without this, a restart reset the cooldown window — a TRIM at
+        14:59 followed by a crash at 15:00 could produce a BUY at 15:01,
+        exactly the BUY→EXIT→BUY churn the cooldown was designed to
+        prevent.  The DB row is the source of truth; the in-process
+        `_recent_exits` dict is a read cache populated here.
+        """
+        try:
+            active = await self._portfolio.load_active_exit_cooldowns()
+        except Exception:
+            logger.exception("load_persistent_state failed — starting with empty cooldowns")
+            return
+        self._recent_exits.update(active)
+        if active:
+            logger.info(
+                "Exit cooldowns restored: %d token(s) still in cooldown window",
+                len(active),
+            )
+
+    async def _record_exit_cooldown(self, token_id: str, now: datetime) -> None:
+        """Dual-write: RAM cache + DB row.  Keeps the in-cycle fast path
+        backed by a persistent source of truth."""
+        self._recent_exits[token_id] = now
+        try:
+            await self._portfolio.record_exit_cooldown(
+                token_id=token_id, exit_time=now,
+                cooldown_hours=self._config.strategy.exit_cooldown_hours,
+            )
+        except Exception:
+            # The cache write already happened, so the current process
+            # still respects the cooldown; we just lose durability on a
+            # crash.  Log loudly so the operator knows disk bookkeeping
+            # lagged — critical infra issue but not trade-blocking.
+            logger.exception("record_exit_cooldown DB write failed for %s", token_id)
+
+    def _forecast_for_event(self, event: WeatherMarketEvent):
+        """FIX-01: look up the forecast whose forecast_date matches the event's
+        market_date.  Falls back to None (caller must skip the event) rather
+        than returning today's forecast for a D+1 event — that was Bug #1.
+        """
+        return self._cached_forecasts_by_date.get(event.market_date, {}).get(event.city)
 
     def _cleanup_recent_exits(self) -> None:
         """Remove expired entries from _recent_exits to prevent unbounded growth.
@@ -184,21 +255,31 @@ class Rebalancer:
 
             # Fetch forecasts so dashboard has data immediately (not after first rebalance)
             import asyncio
-            today = date.today()
+            today = datetime.now(timezone.utc).date()
             forecasts = await get_forecasts_batch(city_configs)
             self._cached_forecasts.update(forecasts)
 
-            forecasts_d1: dict = {}
-            forecasts_d2: dict = {}
-            try:
-                fc_d1, fc_d2 = await asyncio.gather(
-                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
-                )
-                forecasts_d1 = fc_d1
-                forecasts_d2 = fc_d2
-            except Exception as exc:
-                logger.warning("Backfill: failed to fetch multi-day forecasts: %s", exc)
+            # Review H-4: return_exceptions=True so one day's failure doesn't
+            # drop the other.  Non-dict results are treated as empty.
+            fc_results = await asyncio.gather(
+                get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                return_exceptions=True,
+            )
+            forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+            forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+            for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+                if isinstance(r, Exception):
+                    logger.warning("Backfill: %s forecast fetch failed — %s", label, r)
+
+            # FIX-01: seed by-date cache so run_position_check() can route
+            # forecasts by event.market_date even before the first full
+            # rebalance cycle has populated it.
+            self._cached_forecasts_by_date = {
+                today: dict(forecasts),
+                today + timedelta(days=1): dict(forecasts_d1),
+                today + timedelta(days=2): dict(forecasts_d2),
+            }
 
             self._last_forecasts = {}
             for city, f in forecasts.items():
@@ -228,7 +309,10 @@ class Rebalancer:
         observation_series: dict[str, list[tuple[str, float]]] = {}
         active_cfgs = {c.icao: c for c in (self._active_city_configs or self._config.cities)}
         for icao, cfg in active_cfgs.items():
-            local_day = datetime.now(ZoneInfo(cfg.tz)).date() if cfg.tz else date.today()
+            local_day = (
+                datetime.now(ZoneInfo(cfg.tz)).date() if cfg.tz
+                else datetime.now(timezone.utc).date()  # FIX-M1
+            )
             obs = self._max_tracker.get_observations(icao, day=local_day)
             if obs:
                 observation_series[cfg.name] = obs
@@ -328,6 +412,35 @@ class Rebalancer:
             forecasts = await get_forecasts_batch(city_configs)
             if forecasts:
                 self._cached_forecasts.update(forecasts)
+                # Review 🟡 #2: keep the by-date cache fresh so the 15-min
+                # TRIM in run_position_check reads same-day forecasts up to
+                # 15 min old (not up to 60 min from the last full cycle).
+                # Also refresh D+1/D+2 so held D+1 positions get fresh exit
+                # inputs when TRIM fires for them.
+                today = datetime.now(timezone.utc).date()
+                # Review H-4: return_exceptions=True so one day failing
+                # doesn't bubble up and drop the other.  The per-day
+                # isinstance check below filters out exception objects
+                # before they enter the by-date cache.
+                fc_results = await asyncio.gather(
+                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
+                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
+                    return_exceptions=True,
+                )
+                fc_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+                fc_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+                for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+                    if isinstance(r, Exception):
+                        logger.debug("Forecast refresh %s skipped: %s", label, r)
+                # Replace today's entry outright (fresher is strictly
+                # better); merge-update D+1/D+2 so a transient fetch
+                # failure doesn't blow away still-valid cached data.
+                self._cached_forecasts_by_date[today] = dict(forecasts)
+                for delta, fc in ((1, fc_d1), (2, fc_d2)):
+                    if fc:
+                        self._cached_forecasts_by_date.setdefault(
+                            today + timedelta(days=delta), {},
+                        ).update(fc)
                 logger.info(
                     "Forecast refresh: %d cities updated (%s)",
                     len(forecasts),
@@ -380,6 +493,43 @@ class Rebalancer:
 
         logger.info("--- Position check start ---")
         signals: list[TradeSignal] = []
+
+        # FIX-10: once the daily loss limit has fired, the full rebalance
+        # stops generating BUYs — but the 15-min position_check used to
+        # keep issuing locked-win BUYs because it never consulted daily_pnl.
+        # That could deepen a bad day's loss by 15 min at a time.  Now we
+        # check the limit up front and flip a flag; TRIM / EXIT / settlement
+        # still run, because closing out is ALWAYS allowed.
+        _cb_block_buys = False
+        try:
+            _daily_pnl = await self._portfolio.get_daily_pnl(
+                datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
+            )
+            if (
+                _daily_pnl is not None
+                and _daily_pnl < -self._config.strategy.daily_loss_limit_usd
+            ):
+                _cb_block_buys = True
+                logger.warning(
+                    "Position check circuit breaker: daily P&L = $%.2f — blocking new BUYs "
+                    "(TRIM/EXIT/settlement continue)",
+                    _daily_pnl,
+                )
+        except Exception:
+            logger.exception("Position check: circuit-breaker check failed; continuing")
+
+        # FIX-11: kill switch also applies to the 15-min cycle — same rule
+        # (no new BUYs, but TRIM/EXIT continue) so paused state is honoured
+        # whether the operator hits pause before or after the full cycle.
+        try:
+            if await self._portfolio.store.get_bot_paused():
+                _cb_block_buys = True
+                logger.warning(
+                    "Position check: kill switch engaged — BUYs suppressed; "
+                    "TRIM/EXIT continue",
+                )
+        except Exception:
+            logger.exception("Position check: kill-switch read failed; continuing")
 
         async with self._cycle_lock:
             try:
@@ -481,7 +631,8 @@ class Rebalancer:
                         local_today = city_now.date()
                     else:
                         local_hour = None
-                        local_today = date.today()
+                        # FIX-M1: UTC day when we have no tz for this city.
+                        local_today = datetime.now(timezone.utc).date()
 
                     observation = city_observations.get(city)
                     error_dist = self._error_dists.get(city)
@@ -559,15 +710,31 @@ class Rebalancer:
                     overrides = variants.get(strat_name, {})
                     strat_cfg = replace(self._config.strategy, **overrides)
 
-                    # Auto-calibrate distance if enabled (k×std dynamic formula)
+                    # FIX-17: respect city_whitelist in position_check too,
+                    # so a held position from an earlier, broader variant
+                    # doesn't keep generating TRIM/EXIT for a variant that
+                    # shouldn't be touching that city anymore.
+                    if strat_cfg.city_whitelist and city not in strat_cfg.city_whitelist:
+                        continue
+
+                    # Auto-calibrate distance if enabled (k×std dynamic formula).
+                    # Review 🟡 #3: pull the forecast matching this event's
+                    # market_date so D+1/D+2 positions use the correct-day
+                    # ensemble spread rather than today's.
                     if strat_cfg.auto_calibrate_distance and error_dist is not None:
-                        _fc = self._cached_forecasts.get(city)
+                        _fc = self._cached_forecasts_by_date.get(
+                            market_date, {},
+                        ).get(city) or self._cached_forecasts.get(city)
                         cal_dist = calibrate_distance_dynamic(
                             error_dist,
                             ensemble_spread_f=_fc.ensemble_spread_f if _fc else None,
                             enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
                         )
-                        strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+                        # FIX-P2-11: math.ceil (conservative rounding) instead
+                        # of banker's round — a calibrated threshold of 5.5°F
+                        # shouldn't silently become 6 half the time and 5 the
+                        # other half; 6 is the right floor for "safe entry".
+                        strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
 
                     # Build a lightweight event object for signal evaluation
                     event_obj = WeatherMarketEvent(
@@ -597,8 +764,16 @@ class Rebalancer:
                         days_ahead=days_ahead, daily_max_final=_dm_final,
                     )
 
-                    # Use cached forecast for better exit decisions
-                    forecast = self._cached_forecasts.get(city)
+                    # FIX-01: use the forecast for *this event's* market_date.
+                    # Position-check exits on D+1/D+2 positions were using
+                    # today's forecast — see Bug #1 Houston 2026-04-17.  Only
+                    # skip if we can't find a matching-day forecast and the
+                    # event isn't same-day.
+                    forecast = self._cached_forecasts_by_date.get(
+                        market_date, {},
+                    ).get(city)
+                    if forecast is None and market_date == local_today:
+                        forecast = self._cached_forecasts.get(city)
 
                     # Pull trend state for this city so exit thresholds are tighter
                     # during breakout periods (trend is updated by the main 60-min cycle
@@ -613,6 +788,36 @@ class Rebalancer:
                         local_hour=local_hour,
                     )
 
+                    # FIX-02: run TRIM evaluation at 15-min cadence so price-stop
+                    # and EV-decay exits fire at finer granularity than the
+                    # 60-min full cycle.  Chicago 80-81 (2026-04-15) bled
+                    # 72% because TRIM was 60-min-only; a 15-min check would
+                    # have caught the price collapse roughly 45 min sooner.
+                    # Requires forecast (skipped when absent, e.g. D+1 events
+                    # with no tomorrow forecast cached).
+                    trim_signals: list[TradeSignal] = []
+                    if forecast is not None:
+                        entry_prices: dict[str, float] = {}
+                        entry_ev_map: dict[str, float] = {}
+                        locked_win_token_ids: set[str] = set()
+                        for pos in positions:
+                            tid = pos.get("token_id")
+                            if not tid:
+                                continue
+                            if "LOCKED WIN" in (pos.get("buy_reason") or ""):
+                                locked_win_token_ids.add(tid)
+                            if pos.get("entry_price"):
+                                entry_prices[tid] = pos["entry_price"]
+                            if pos.get("entry_ev") is not None:
+                                entry_ev_map[tid] = pos["entry_ev"]
+                        trim_signals = evaluate_trim_signals(
+                            event_obj, forecast, held_no_slots, strat_cfg, error_dist,
+                            entry_prices=entry_prices,
+                            locked_win_token_ids=locked_win_token_ids,
+                            daily_max_f=daily_max,
+                            entry_ev_map=entry_ev_map,
+                        )
+
                     # P0-3 FIX: Query exposure once before loop, accumulate in-memory
                     strat_city_exp = await self._portfolio.get_city_exposure(city, strategy=strat_name)
                     strat_total_exp = await self._portfolio.get_total_exposure(strategy=strat_name)
@@ -620,22 +825,40 @@ class Rebalancer:
                     # Fix 5: reduce per-city cap for thin-liquidity cities
                     effective_cfg = _effective_city_config(strat_cfg, city)
 
-                    # Size and tag locked-win signals
-                    for sig in locked_signals:
-                        size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
-                        if size > 0:
-                            sig.suggested_size_usd = size
-                            sig.strategy = strat_name
-                            sig.reason = f"[{strat_name}] {sig.reason}, EV={sig.expected_value:.3f}"
-                            signals.append(sig)
-                            strat_city_exp += size
-                            strat_total_exp += size
+                    # Size and tag locked-win signals.  FIX-10: once the
+                    # daily loss limit has fired, skip new BUYs here but
+                    # keep processing EXIT/TRIM below — closing is safe,
+                    # only opening is blocked.
+                    if not _cb_block_buys:
+                        for sig in locked_signals:
+                            size = compute_size(sig, strat_city_exp, strat_total_exp, effective_cfg)
+                            if size > 0:
+                                sig.suggested_size_usd = size
+                                sig.strategy = strat_name
+                                sig.reason = f"[{strat_name}] {sig.reason}, EV={sig.expected_value:.3f}"
+                                signals.append(sig)
+                                strat_city_exp += size
+                                strat_total_exp += size
 
                     # Tag exit signals
                     for sig in exit_signals:
                         sig.strategy = strat_name
                         sig.reason = f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot" if daily_max else f"[{strat_name}] EXIT: temp approaching"
-                        self._recent_exits[sig.token_id] = now
+                        await self._record_exit_cooldown(sig.token_id, now)
+                        signals.append(sig)
+
+                    # Tag TRIM signals — reason was already built by the
+                    # evaluator (e.g. "TRIM [price_stop]: 0.645→0.180");
+                    # we only prefix the strategy tag.
+                    # Review H-8: dedup against EXIT signals.  When both
+                    # fire on the same token this cycle, keep EXIT only.
+                    exit_tids_pc = {s.token_id for s in exit_signals}
+                    for sig in trim_signals:
+                        if sig.token_id in exit_tids_pc:
+                            continue
+                        sig.strategy = strat_name
+                        sig.reason = f"[{strat_name}] {sig.reason or 'TRIM'}"
+                        await self._record_exit_cooldown(sig.token_id, now)
                         signals.append(sig)
 
                 if skipped_no_obs:
@@ -647,10 +870,15 @@ class Rebalancer:
 
                 # Execute any urgent trades
                 if signals:
-                    logger.info("Position check: %d urgent signals (locked=%d, exit=%d)",
-                               len(signals),
-                               sum(1 for s in signals if s.side.value == "BUY"),
-                               sum(1 for s in signals if s.side.value == "SELL"))
+                    # FIX-02: SELL signals now include both EXIT and TRIM since
+                    # TRIM runs in position_check; break them out in the log.
+                    n_buy = sum(1 for s in signals if s.side.value == "BUY")
+                    n_sell = sum(1 for s in signals if s.side.value == "SELL")
+                    n_trim = sum(1 for s in signals if "TRIM" in (s.reason or ""))
+                    logger.info(
+                        "Position check: %d urgent signals (locked=%d, exit=%d, trim=%d)",
+                        len(signals), n_buy, n_sell - n_trim, n_trim,
+                    )
                     await self._executor.execute_signals(signals)
                 else:
                     logger.debug("Position check: no urgent signals")
@@ -692,11 +920,31 @@ class Rebalancer:
         await self.run_settlement_only()
 
         # Check circuit breaker
-        daily_pnl = await self._portfolio.get_daily_pnl(date.today())
+        daily_pnl = await self._portfolio.get_daily_pnl(
+            datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
+        )
         if daily_pnl is not None and daily_pnl < -self._config.strategy.daily_loss_limit_usd:
             logger.warning("Circuit breaker triggered: daily P&L = $%.2f", daily_pnl)
             await self._alerter.circuit_breaker(daily_pnl)
             return []
+
+        # FIX-11: check the persistent kill switch.  Paused → skip BUY
+        # generation but let TRIM / EXIT / settlement continue (closing
+        # is always safe; only opening new exposure is blocked).  The
+        # flag is maintained by /api/admin/pause + /api/admin/unpause.
+        self._paused_this_cycle = False
+        try:
+            if await self._portfolio.store.get_bot_paused():
+                self._paused_this_cycle = True
+                logger.warning(
+                    "Kill switch engaged (bot_state.paused=1) — BUYs suppressed "
+                    "for this cycle; TRIM/EXIT/settlement continue"
+                )
+        except Exception:
+            logger.exception(
+                "Kill-switch check failed; continuing (fail-open is safer "
+                "than halting the whole bot on a DB read glitch)",
+            )
 
         # 1. Discover active markets
         events = await discover_weather_markets(
@@ -766,21 +1014,32 @@ class Rebalancer:
         self._cached_forecasts.update(forecasts)  # keep cache fresh
         logger.info("Fetched forecasts for %d cities", len(forecasts))
 
-        # Fetch +1 / +2 day forecasts for dashboard (best-effort, don't block trading)
-        today = date.today()
-        forecasts_d1: dict = {}
-        forecasts_d2: dict = {}
-        try:
-            import asyncio
-            fc_d1, fc_d2 = await asyncio.gather(
-                get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                get_forecasts_batch(city_configs, today + timedelta(days=2)),
-            )
-            forecasts_d1 = fc_d1
-            forecasts_d2 = fc_d2
-            logger.info("Fetched +1/+2 day forecasts for dashboard")
-        except Exception as exc:
-            logger.warning("Failed to fetch multi-day forecasts: %s", exc)
+        # FIX-01: fetch +1 / +2 day forecasts and route by event.market_date
+        # below.  Previously these were fetched for dashboard display only;
+        # the main evaluation loop fell back to today's forecast for
+        # tomorrow's events, producing Bug #1 (Houston 2026-04-17).
+        today = datetime.now(timezone.utc).date()
+        # Review H-4: return_exceptions=True so one day's failure doesn't
+        # drop the other.  Non-dict results are treated as empty.
+        fc_results = await asyncio.gather(
+            get_forecasts_batch(city_configs, today + timedelta(days=1)),
+            get_forecasts_batch(city_configs, today + timedelta(days=2)),
+            return_exceptions=True,
+        )
+        forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
+        forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
+        for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
+            if isinstance(r, Exception):
+                logger.warning("Full cycle: %s forecast fetch failed — %s", label, r)
+        logger.info("Fetched +1/+2 day forecasts for trading + dashboard")
+
+        # Rebuild the by-date cache on every full cycle so stale entries
+        # from yesterday can't leak into today's D+1 routing.
+        self._cached_forecasts_by_date = {
+            today: dict(forecasts),
+            today + timedelta(days=1): dict(forecasts_d1),
+            today + timedelta(days=2): dict(forecasts_d2),
+        }
 
         # Save forecast state for dashboard (today + 2 days)
         self._last_forecasts = {}
@@ -818,9 +1077,22 @@ class Rebalancer:
         self._last_markets = []
 
         for event in events:
-            forecast = forecasts.get(event.city)
+            # FIX-01: pick the forecast matching event.market_date, not today.
+            # D+1/D+2 events now use tomorrow/day-after forecasts; a missing
+            # entry means we couldn't fetch the right-day forecast and must
+            # skip the event rather than trade on today's data.
+            forecast = self._forecast_for_event(event)
             if not forecast:
-                continue
+                # Fall back to today's if and only if the event is same-day
+                # (keeps the pre-FIX-01 behaviour for the common case).
+                if event.market_date == today:
+                    forecast = forecasts.get(event.city)
+                if not forecast:
+                    logger.info(
+                        "Skipping event %s (%s, date=%s): no forecast for that date",
+                        event.event_id[:8], event.city, event.market_date,
+                    )
+                    continue
 
             # Get daily max for the EVENT's market date (not the latest observation's date).
             # Near midnight local time, the live METAR may map to the next day, returning
@@ -902,6 +1174,8 @@ class Rebalancer:
                         distance_f=slot_data["distance"],
                         trend_state=trend_state.value,
                         ensemble_spread_f=forecast.ensemble_spread_f,
+                        # FIX-01: audit trail for "which forecast_date did we evaluate with?"
+                        forecast_date=forecast.forecast_date.isoformat(),
                     )
                 except Exception:
                     logger.debug("Failed to insert edge snapshot for %s %s", event.city, slot_data["label"])
@@ -921,7 +1195,12 @@ class Rebalancer:
                 local_today = city_now.date()
             else:
                 local_hour = None
-                local_today = date.today()
+                # Blocker 3 (review): UTC fallback to match position_check's
+                # equivalent path (line 634 in run_position_check).  Using
+                # server-local `date.today()` here while position_check used
+                # UTC could classify the same event as D+0 in one cycle and
+                # D+1 in the next during the UTC-midnight crossover window.
+                local_today = datetime.now(timezone.utc).date()
             days_ahead = (event.market_date - local_today).days
 
             # Collect all evaluated signals across all strategy variants for decision logging
@@ -938,6 +1217,36 @@ class Rebalancer:
                 # Build strategy config for this variant
                 strat_cfg = replace(self._config.strategy, **overrides)
 
+                # FIX-17: city_whitelist lets a variant opt into a narrow
+                # geography (D' targets LA/Seattle/Denver where historical
+                # forecast error is small enough for the 0.08 EV bar to
+                # fire without noise).  Empty = all cities allowed.
+                if strat_cfg.city_whitelist and event.city not in strat_cfg.city_whitelist:
+                    # Review H-6: surface the skip in decision_log so an
+                    # operator investigating "why didn't D' fire on NYC?"
+                    # can distinguish a whitelist reject from a legitimate
+                    # no-signal.  Logged at the event level (no slot) so
+                    # we don't flood the table with one row per slot.
+                    try:
+                        await self._portfolio.insert_decision_log(
+                            cycle_at=cycle_at,
+                            city=event.city,
+                            event_id=event.event_id,
+                            signal_type="REJECT",
+                            slot_label="",
+                            forecast_high_f=forecast.predicted_high_f if forecast else None,
+                            daily_max_f=daily_max,
+                            trend_state=trend_state.value,
+                            win_prob=0.0, expected_value=0.0,
+                            price=0.0, size_usd=0.0,
+                            action="SKIP",
+                            reason=f"[{strat_name}] REJECT: city_not_in_whitelist",
+                            strategy=strat_name,
+                        )
+                    except Exception:
+                        logger.debug("Failed to log whitelist skip for %s", event.city)
+                    continue
+
                 # Auto-calibrate distance threshold from historical error data (k×std formula)
                 if strat_cfg.auto_calibrate_distance and error_dist is not None:
                     cal_dist = calibrate_distance_dynamic(
@@ -945,7 +1254,11 @@ class Rebalancer:
                         ensemble_spread_f=forecast.ensemble_spread_f if forecast else None,
                         enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
                     )
-                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=round(cal_dist))
+                    # FIX-P2-11: math.ceil (conservative rounding) instead
+                    # of banker's round — a calibrated threshold of 5.5°F
+                    # shouldn't silently become 6 half the time and 5 the
+                    # other half; 6 is the right floor for "safe entry".
+                    strat_cfg = replace(strat_cfg, no_distance_threshold_f=math.ceil(cal_dist))
 
                 # Build current prices map from refreshed event slot data
                 current_slot_prices: dict[str, float] = {}
@@ -1055,6 +1368,11 @@ class Rebalancer:
                 cooldown_seconds = strat_cfg.exit_cooldown_hours * 3600
                 # Fix 5: reduce per-city cap for thin-liquidity cities
                 effective_cfg = _effective_city_config(strat_cfg, event.city)
+                # FIX-11: when the kill switch is engaged, skip the BUY
+                # sizing loop entirely.  EXIT/TRIM further down still run.
+                if getattr(self, "_paused_this_cycle", False):
+                    locked_signals = []
+                    no_signals = []
                 # Locked wins first (higher priority), then forecast-based NO
                 for signal in locked_signals + no_signals:
                     # Check exit cooldown: skip BUY if recently exited this slot
@@ -1095,7 +1413,7 @@ class Rebalancer:
                 # inline because evaluate_exit_signals does not set them.
                 for signal in exit_signals + trim_signals:
                     signal.strategy = strat_name
-                    self._recent_exits[signal.token_id] = now
+                    await self._record_exit_cooldown(signal.token_id, now)
                     if signal in exit_signals:
                         signal.reason = (
                             f"[{strat_name}] EXIT: daily max {daily_max:.0f}°F approaching slot"
@@ -1103,6 +1421,15 @@ class Rebalancer:
                         )
                     else:
                         signal.reason = f"[{strat_name}] {signal.reason or 'TRIM'}"
+                # Review H-8: when the same (event, token, strategy) has
+                # both an EXIT and a TRIM in the same cycle, keep EXIT
+                # only.  Two reasons: (a) EXIT is driven by live daily_max
+                # proximity — a stronger signal than EV decay; (b) sending
+                # both produces two SELL orders racing at CLOB for the
+                # same shares, half of which will fail with "position
+                # closed" and generate noise in the alert channel.
+                exit_tids = {s.token_id for s in exit_signals}
+                trim_signals = [s for s in trim_signals if s.token_id not in exit_tids]
                 all_signals.extend(exit_signals)
                 all_signals.extend(trim_signals)
 
