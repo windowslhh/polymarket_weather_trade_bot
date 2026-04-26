@@ -10,7 +10,14 @@ import time
 from datetime import date
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import (
+    Flask,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +213,110 @@ def create_app(store, rebalancer, config) -> Flask:
 
     # Register Jinja filter for UTC → Beijing time
     app.jinja_env.filters["beijing"] = _utc_to_beijing
+
+    # D-2 (2026-04-26) — dashboard authentication.
+    #
+    # Two-secret design: DASHBOARD_SECRET gates view (everything except
+    # /api/admin/*); TRIGGER_SECRET still gates write/admin actions.
+    #
+    # Authorization precedence (per-request):
+    #   1. /login + /api/health are always public
+    #   2. cookie `dashboard_session` matching DASHBOARD_SECRET → allow
+    #   3. header `X-Dashboard-Secret` matching DASHBOARD_SECRET → allow
+    #   4. DASHBOARD_SECRET empty + ADMIN_NOAUTH=1 + paper/dry-run → allow
+    #   5. otherwise → 401 (browser) or 503 (when DASHBOARD_SECRET unset)
+    #
+    # /api/admin/* keep their own _admin_auth_check (TRIGGER_SECRET);
+    # so an attacker who steals the dashboard cookie can read but
+    # cannot pause / unpause / trigger.
+    _PUBLIC_PATHS = {"/login", "/api/health"}
+    _DASHBOARD_COOKIE = "dashboard_session"
+
+    def _dashboard_auth_ok() -> bool:
+        """Return True iff the current request is permitted to view the
+        dashboard.  Pure read; no side effects."""
+        import os
+        cfg = app.config.get("bot_config")
+        secret = getattr(cfg, "dashboard_secret", "") if cfg else ""
+        if not secret:
+            # Dev-only opt-in; never honoured in live mode.
+            opt_in = os.environ.get("ADMIN_NOAUTH") == "1"
+            is_non_prod = bool(
+                getattr(cfg, "paper", False) or getattr(cfg, "dry_run", False)
+            )
+            return bool(opt_in and is_non_prod)
+        cookie = request.cookies.get(_DASHBOARD_COOKIE, "")
+        if cookie and hmac.compare_digest(cookie, secret):
+            return True
+        x_dash = request.headers.get("X-Dashboard-Secret", "")
+        if x_dash and hmac.compare_digest(x_dash, secret):
+            return True
+        return False
+
+    @app.before_request
+    def _enforce_dashboard_auth():
+        if request.path in _PUBLIC_PATHS:
+            return None
+        # /api/admin/* uses its own _admin_auth_check (TRIGGER_SECRET).
+        # Bypassing the dashboard auth here keeps the two secrets cleanly
+        # separated: ops can script admin actions with just
+        # X-Trigger-Secret without needing a dashboard cookie.  The
+        # admin endpoint itself remains protected by _admin_auth_check
+        # — a missing/wrong TRIGGER_SECRET still returns 401/503 there.
+        if request.path.startswith("/api/admin/"):
+            return None
+        if _dashboard_auth_ok():
+            return None
+        # /api endpoints get a JSON 401; everything else gets a redirect
+        # to /login (better UX for browser users).
+        cfg = app.config.get("bot_config")
+        secret = getattr(cfg, "dashboard_secret", "") if cfg else ""
+        if request.path.startswith("/api/"):
+            if not secret:
+                return jsonify({"error": "dashboard disabled — DASHBOARD_SECRET not configured"}), 503
+            return jsonify({"error": "unauthorized — provide X-Dashboard-Secret or login first"}), 401
+        if not secret:
+            return jsonify({"error": "dashboard disabled — DASHBOARD_SECRET not configured"}), 503
+        return redirect("/login", code=302)
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        cfg = app.config["bot_config"]
+        secret = getattr(cfg, "dashboard_secret", "")
+        # Accept secret from query (GET ?secret=…) or form post (POST secret=)
+        candidate = request.args.get("secret") or request.form.get("secret") or ""
+        if secret and candidate and hmac.compare_digest(candidate, secret):
+            resp = make_response(redirect("/", code=302))
+            # Session cookie scoped tight: httpOnly so JS can't read it,
+            # SameSite=Strict to defeat CSRF, max_age 24h.  Secure flag
+            # would require HTTPS which the VPS deploy doesn't terminate
+            # — leaving it off avoids breaking the existing http: setup.
+            resp.set_cookie(
+                _DASHBOARD_COOKIE, secret,
+                max_age=86400, httponly=True, samesite="Strict",
+            )
+            return resp
+        # Render a tiny login page.  No template file — keeps the patch
+        # surgical and avoids accidentally exposing the page to crawlers
+        # via a templates/ scan.
+        return (
+            "<!doctype html><meta charset=utf-8>"
+            "<title>weather-bot dashboard login</title>"
+            "<form method=post style='font-family:sans-serif;max-width:320px;margin:80px auto;'>"
+            "<h3>weather-bot dashboard</h3>"
+            "<input name=secret type=password placeholder='DASHBOARD_SECRET' "
+            "style='width:100%;padding:8px;font-size:14px;'>"
+            "<button type=submit style='margin-top:8px;padding:8px 16px;'>Sign in</button>"
+            "</form>",
+            (200 if not candidate else 401),
+            {"Content-Type": "text/html; charset=utf-8"},
+        )
+
+    @app.route("/api/health")
+    def api_health():
+        """Public liveness probe — no auth so docker HEALTHCHECK / external
+        monitors can ping without provisioning a secret."""
+        return jsonify({"ok": True})
 
     def _mode():
         if config.dry_run:
