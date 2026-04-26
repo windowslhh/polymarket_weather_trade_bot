@@ -54,16 +54,19 @@ async def run(args: argparse.Namespace) -> None:
     elif config.paper:
         logger.info("*** PAPER TRADING MODE — simulated fills, positions tracked ***")
 
-    # Live mode: resolve the signing key lazily (Keychain on macOS, env
-    # fallback elsewhere).  Skipped in paper / dry-run so a missing key
-    # — or a Mac without Keychain access — doesn't block simulation runs.
+    # Live mode: resolve the signing key from Keychain, *overriding* any
+    # ETH_PRIVATE_KEY that load_config() picked up from .env.  Spec says
+    # Keychain is the source of truth; an .env value left over from an
+    # old paper deploy must not silently sign on the live path.
+    # load_eth_private_key() falls through to ETH_PRIVATE_KEY itself
+    # (Keychain miss → env → raise), so non-mac live deploys still work.
+    # Paper / dry-run do not touch Keychain at all.
     if not config.dry_run and not config.paper:
-        if not config.eth_private_key:
-            try:
-                config.eth_private_key = load_eth_private_key()
-            except RuntimeError as exc:
-                logger.error("%s", exc)
-                sys.exit(1)
+        try:
+            config.eth_private_key = load_eth_private_key()
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            sys.exit(1)
 
     logger.info("Loaded %d cities from config", len(config.cities))
 

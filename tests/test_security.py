@@ -123,3 +123,42 @@ class TestLoadEthPrivateKey:
         with patch("src.security.load_key_from_keychain", return_value=None):
             with pytest.raises(RuntimeError):
                 load_eth_private_key()
+
+
+class TestMainLiveModeKeychainOverride:
+    """Regression test for P-A8: in live mode, src.main must call
+    load_eth_private_key() *unconditionally* and assign the result to
+    config.eth_private_key — even when .env already populated it.
+
+    Source-level checks are brittle but cheap; the alternative is
+    spinning up the full async run() with mocks for Store / Alerter /
+    scheduler / preflight / etc., which is far more code for the same
+    invariant: the Keychain entry is the source of truth on a Mac
+    with it set up.
+    """
+
+    def test_live_branch_does_not_guard_on_existing_key(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "src" / "main.py").read_text()
+
+        # Locate the live branch.
+        marker = "if not config.dry_run and not config.paper:"
+        assert marker in src, "live-mode branch in src/main.py is missing"
+
+        live_block = src.split(marker, 1)[1].split("\n\n", 1)[0]
+
+        # The pre-P-A8 code wrapped the call in:
+        #   if not config.eth_private_key:
+        #       config.eth_private_key = load_eth_private_key()
+        # which let an .env value short-circuit Keychain.  P-A8 removes
+        # that guard, so the call must be unconditional.
+        assert "if not config.eth_private_key" not in live_block, (
+            "live-mode branch must call load_eth_private_key() unconditionally "
+            "(P-A8 regression — .env should not short-circuit Keychain)"
+        )
+        assert "load_eth_private_key()" in live_block, (
+            "live-mode branch must call load_eth_private_key()"
+        )
+        assert "config.eth_private_key = load_eth_private_key()" in live_block, (
+            "result of load_eth_private_key() must be assigned to config.eth_private_key"
+        )

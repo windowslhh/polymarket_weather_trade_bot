@@ -86,9 +86,16 @@ def load_eth_private_key() -> str:
     """Return the Ethereum private key for live trading.
 
     Order: macOS Keychain → ``ETH_PRIVATE_KEY`` env → raise.  The env
-    fallback exists so paper / dry-run runs on a VPS (no Keychain) still
-    work — paper mode never actually signs, but the executor reads the
-    key once at startup, so it has to load *something*.
+    fallback exists for non-macOS live deploys (VPS — paper today, but
+    leaves the door open if we ever go live elsewhere) and for the
+    paper / dry-run paths that load_config() reads ETH_PRIVATE_KEY off
+    .env directly.
+
+    ``src.main`` calls this *unconditionally* in live mode and assigns
+    the result to ``config.eth_private_key``, overriding whatever
+    load_config() pulled from .env.  This means a stale ETH_PRIVATE_KEY
+    in .env can never silently sign on a Mac that has Keychain set up
+    correctly — the Keychain entry is the single source of truth.
     """
     key = load_key_from_keychain()
     if key:
