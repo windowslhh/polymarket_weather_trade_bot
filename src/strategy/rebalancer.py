@@ -40,7 +40,7 @@ from src.weather.forecast import (
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.metar import DailyMaxTracker, get_today_metar_history
 from src.weather.models import Observation
-from src.settlement.settler import check_settlements
+from src.settlement.settler import check_settlements, check_stuck_positions
 from src.weather.settlement import fetch_settlement_temp, validate_station_config
 
 logger = logging.getLogger(__name__)
@@ -465,6 +465,14 @@ class Rebalancer:
                 )
         except Exception:
             logger.exception("Settlement check failed")
+        # BUG-2: stuck-position watchdog runs alongside settlement so a
+        # genuinely-stuck row gets noticed within 15 min of crossing the
+        # 48h threshold.  Wrapped in its own try so a watchdog failure
+        # cannot suppress future settlement checks.
+        try:
+            await check_stuck_positions(self._portfolio.store, self._alerter)
+        except Exception:
+            logger.exception("Stuck-position watchdog failed")
 
     async def run_position_check(self) -> list[TradeSignal]:
         """Lightweight position check — runs alongside settlement every 15 min.

@@ -368,6 +368,74 @@ def _compute_position_pnl(
             return -entry_price * shares  # YES loses
 
 
+async def check_stuck_positions(
+    store: Store,
+    alerter,
+    *,
+    max_age_hours: int = 48,
+) -> list[dict]:
+    """BUG-2: alert on positions still open well past their settle window.
+
+    The settler is silent (BUG-1 heartbeat aside) when Gamma simply
+    hasn't closed an event yet, which is normal.  But a position open
+    for 48h+ is **not** normal — Polymarket weather events resolve
+    within 24-36h of creation in steady state.  A stuck row at this
+    age means one of:
+
+      - Gamma forgot to close the event (vendor issue)
+      - The event_id we hold no longer exists upstream (deprecation
+        / wrong id)
+      - The settler is throwing on this row consistently (now visible
+        thanks to BUG-1, but the watchdog still wants to alert)
+      - Operator forgot to manually mark a paper-only or test-only row
+
+    We use ``created_at`` (always populated, indexed) as the proxy for
+    "should have settled by now".  Strictly speaking the right anchor
+    is ``market_date``, but that field doesn't exist in the positions
+    table — slot_label encodes it as text, and parsing dates out of
+    free-form labels at query time is brittle.  ``created_at +
+    max_age_hours`` is a strict over-estimate (positions are typically
+    opened a few hours before market_date), so the watchdog can never
+    fire prematurely; the cost is a slight delay in catching genuinely
+    stuck rows.
+
+    Returns the list of stuck position rows so callers can log /
+    correlate.  Sends a warning alert when the list is non-empty.
+    """
+    rows = []
+    async with store.db.execute(
+        """SELECT id, event_id, strategy, city, slot_label, created_at, size_usd
+           FROM positions
+           WHERE status = 'open'
+             AND created_at < datetime('now', ?)
+           ORDER BY created_at""",
+        (f"-{max_age_hours} hours",),
+    ) as cur:
+        async for row in cur:
+            rows.append({
+                "id": row[0], "event_id": row[1], "strategy": row[2],
+                "city": row[3], "slot_label": row[4], "created_at": row[5],
+                "size_usd": row[6],
+            })
+
+    if not rows:
+        return []
+
+    # One alert with a compact summary; per-row detail in the log line so
+    # the webhook doesn't get spammed with 30 messages on a bad day.
+    summary = ", ".join(
+        f"id={r['id']}({r['strategy']}/{r['city']}, {r['created_at'][:16]})"
+        for r in rows[:10]
+    )
+    suffix = f" (+{len(rows) - 10} more)" if len(rows) > 10 else ""
+    await alerter.send(
+        "warning",
+        f"Stuck position alert: {len(rows)} positions open >{max_age_hours}h "
+        f"past creation: {summary}{suffix}",
+    )
+    return rows
+
+
 async def _update_realized_pnl(store: Store, date_str: str, pnl: float) -> None:
     """Atomically increment realized P&L for the given date.
 
