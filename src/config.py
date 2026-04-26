@@ -120,62 +120,34 @@ class StrategyConfig:
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Three strategy variants after the FIX-17 overhaul (2026-04-24).
+    """Strategy B (Locked Aggressor) — sole live variant from 2026-04-26.
 
-    All strategies share:
+    Shared across the bot:
     - Auto-calibrated distance threshold (per-city)
     - Locked-win signals enabled
     - Hybrid exit mode (EV + distance + pre-settlement force)
     - Exit cooldown to prevent BUY→EXIT→BUY churn
     - NO-only signals (no YES, no LADDER)
 
-    B  = Locked Aggressor: half-Kelly forecast entries, full-Kelly on locked
-         wins.  Tightened exposure cap from 30 → 20 to stay under the new
-         total-exposure ceiling with D' running alongside.
-    C  = Close Range: tighter distance (0.75 max price), higher EV bar
-         (0.06).  calibration_confidence field removed — it was display-only
-         in config.html and never plumbed into the calibrator.
-    D' = Quick Exit, whitelisted: aggressive risk management with a
-         narrowed footprint.  Raised EV gate (0.05 → 0.08) and dropped
-         city exposure cap (25 → 10) so D' only fires in cities whose
-         forecast error is small enough that a 0.08 EV threshold isn't
-         noise; the city_whitelist makes that explicit.
+    B = Locked Aggressor: half-Kelly forecast entries, full-Kelly on locked
+        wins.  $20/city exposure cap, max 4 open positions per event.
 
-    FIX-17 (2026-04-24): A dropped — redundant with B once B's
-    kelly_fraction and city cap were tuned down.
+    Historical context: A/C/D' were retired (2026-04-26) when the bot moved
+    to local live trading with $200 capital — running a single, well-tuned
+    variant simplifies sizing math and concentrates capital where it works.
+    DB schema retains the `strategy` column (Y6 trigger still allows
+    A/B/C/D) so historical rows remain queryable for audit.
     """
     return {
         "B": {
-            # Locked aggressor: full-Kelly on locked wins, tight exposure cap.
             "max_no_price": 0.70,
-            "kelly_fraction": 0.5,              # FIX-17: was 0.6
-            "max_positions_per_event": 6,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 20.0,  # FIX-17: was 30.0
-            "locked_win_kelly_fraction": 1.0,
-            "max_locked_win_per_slot_usd": 10.0,
-        },
-        "C": {
-            # Close range: enters closer slots, demands higher EV.
-            "max_no_price": 0.75,
-            "kelly_fraction": 0.3,
-            "max_positions_per_event": 4,
-            "min_no_ev": 0.06,
-            "max_position_per_slot_usd": 3.0,
-            "max_exposure_per_city_usd": 25.0,
-        },
-        "D": {
-            # FIX-17: D' — whitelisted, narrower, higher EV gate.
-            "max_no_price": 0.65,
             "kelly_fraction": 0.5,
             "max_positions_per_event": 4,
-            "min_no_ev": 0.08,                  # FIX-17: was 0.05
+            "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 10.0,  # FIX-17: was 25.0 (and previously 30)
-            "force_exit_hours": 2.0,
-            "exit_cooldown_hours": 2.0,
-            "city_whitelist": frozenset({"Los Angeles", "Seattle", "Denver"}),
+            "max_exposure_per_city_usd": 20.0,
+            "locked_win_kelly_fraction": 1.0,
+            "max_locked_win_per_slot_usd": 10.0,
         },
     }
 

@@ -748,8 +748,13 @@ class Store:
             return [dict(row) for row in rows]
 
     async def get_strategy_realized_pnl(self) -> dict[str, float]:
-        """Get realized P&L per strategy as a simple dict."""
-        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        """Get realized P&L per strategy as a simple dict.
+
+        B is the only live variant; legacy A/C/D rows in the settlements
+        table are kept as audit trail and surfaced under their original
+        strategy key so callers can still query history if needed.
+        """
+        result: dict[str, float] = {"B": 0.0}
         async with self.db.execute("""
             SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
             FROM settlements
@@ -757,8 +762,7 @@ class Store:
         """) as cursor:
             async for row in cursor:
                 s = row[0]
-                if s in result:
-                    result[s] = float(row[1])
+                result[s] = float(row[1])
         return result
 
     async def get_closed_positions(self, limit: int = 20) -> list[dict]:

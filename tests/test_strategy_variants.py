@@ -1,22 +1,20 @@
-"""Tests for the 3 strategy variants (B / C / D') after FIX-17 (2026-04-24).
+"""Tests for strategy B — the sole live variant from 2026-04-26.
 
-A was dropped; D became D' with a narrower footprint (whitelisted cities,
-higher EV gate).  B was retuned to kelly=0.5 / per-city cap 20.
+A / C / D' were retired when the bot moved to local live trading with $200
+capital — running a single, well-tuned variant simplifies sizing math and
+concentrates capital where it works.  DB schema retains the strategy column
+(Y6 trigger still allows A/B/C/D) so historical rows remain queryable for
+audit; this file just covers the *active* strategy surface.
 """
 from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from src.config import (
-    AppConfig, CityConfig, SchedulingConfig, StrategyConfig,
-    get_strategy_variants,
-)
-from src.markets.models import Side, TempSlot, WeatherMarketEvent
+from src.config import StrategyConfig, get_strategy_variants
+from src.markets.models import TempSlot, WeatherMarketEvent
 from src.strategy.evaluator import (
     evaluate_exit_signals,
     evaluate_locked_win_signals,
@@ -53,106 +51,53 @@ def _build_strat_cfg(variant_name: str) -> StrategyConfig:
     return replace(StrategyConfig(), **variants[variant_name])
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Structure
-# ──────────────────────────────────────────────────────────────────────
-
 class TestVariantStructure:
 
-    def test_exactly_three_variants(self):
+    def test_only_b_variant_active(self):
         variants = get_strategy_variants()
-        assert set(variants.keys()) == {"B", "C", "D"}, (
-            "FIX-17: A dropped; only B / C / D' remain"
+        assert set(variants.keys()) == {"B"}, (
+            "B is the only live variant from 2026-04-26"
         )
 
-    def test_a_variant_dropped(self):
-        assert "A" not in get_strategy_variants()
+    def test_a_c_d_dropped(self):
+        variants = get_strategy_variants()
+        assert "A" not in variants
+        assert "C" not in variants
+        assert "D" not in variants
 
     def test_all_overrides_are_valid_fields(self):
-        variants = get_strategy_variants()
         valid_fields = set(StrategyConfig.__dataclass_fields__.keys())
-        for name, overrides in variants.items():
+        for name, overrides in get_strategy_variants().items():
             for key in overrides:
                 assert key in valid_fields, f"Strategy {name}: invalid field '{key}'"
 
-    def test_calibration_confidence_not_in_overrides(self):
-        """FIX-17: the field was display-only; removing it from overrides
-        prevents readers from thinking C's 0.75 affected trading logic."""
-        for name, overrides in get_strategy_variants().items():
-            assert "calibration_confidence" not in overrides, (
-                f"Strategy {name} still has a calibration_confidence override"
-            )
 
+class TestStrategyBParams:
 
-# ──────────────────────────────────────────────────────────────────────
-# B — Locked Aggressor (FIX-17 retuned)
-# ──────────────────────────────────────────────────────────────────────
-
-class TestStrategyBLockedAggressor:
-
-    def test_retuned_kelly_fraction(self):
-        """FIX-17: B's kelly_fraction dropped from 0.6 to 0.5."""
+    def test_kelly_fraction(self):
         assert _build_strat_cfg("B").kelly_fraction == 0.5
 
-    def test_retuned_city_cap(self):
-        """FIX-17: B's per-city cap dropped from 30 to 20."""
-        assert _build_strat_cfg("B").max_exposure_per_city_usd == 20.0
-
-    def test_full_kelly_on_locked_wins(self):
+    def test_locked_win_kelly_fraction(self):
         assert _build_strat_cfg("B").locked_win_kelly_fraction == 1.0
 
-    def test_locked_win_cap_preserved(self):
-        """B keeps the default 10.0 locked-win cap (matches base)."""
+    def test_max_no_price(self):
+        assert _build_strat_cfg("B").max_no_price == 0.70
+
+    def test_min_no_ev(self):
+        assert _build_strat_cfg("B").min_no_ev == 0.05
+
+    def test_max_exposure_per_city(self):
+        assert _build_strat_cfg("B").max_exposure_per_city_usd == 20.0
+
+    def test_max_positions_per_event(self):
+        assert _build_strat_cfg("B").max_positions_per_event == 4
+
+    def test_max_locked_win_per_slot(self):
         assert _build_strat_cfg("B").max_locked_win_per_slot_usd == 10.0
 
+    def test_max_position_per_slot(self):
+        assert _build_strat_cfg("B").max_position_per_slot_usd == 5.0
 
-# ──────────────────────────────────────────────────────────────────────
-# C — Close Range
-# ──────────────────────────────────────────────────────────────────────
-
-class TestStrategyCCloseRange:
-
-    def test_higher_ev_bar(self):
-        assert _build_strat_cfg("C").min_no_ev == 0.06
-
-    def test_moderate_price_cap(self):
-        assert _build_strat_cfg("C").max_no_price == 0.75
-
-    def test_lower_kelly_fraction(self):
-        assert _build_strat_cfg("C").kelly_fraction == 0.3
-
-
-# ──────────────────────────────────────────────────────────────────────
-# D' — Quick Exit, whitelisted (FIX-17)
-# ──────────────────────────────────────────────────────────────────────
-
-class TestStrategyDPrime:
-
-    def test_higher_ev_gate(self):
-        assert _build_strat_cfg("D").min_no_ev == 0.08
-
-    def test_narrow_city_cap(self):
-        assert _build_strat_cfg("D").max_exposure_per_city_usd == 10.0
-
-    def test_city_whitelist(self):
-        cfg = _build_strat_cfg("D")
-        assert cfg.city_whitelist == frozenset({"Los Angeles", "Seattle", "Denver"})
-
-    def test_earlier_force_exit(self):
-        assert _build_strat_cfg("D").force_exit_hours == 2.0
-
-    def test_shorter_exit_cooldown(self):
-        assert _build_strat_cfg("D").exit_cooldown_hours == 2.0
-
-    def test_lowest_price_cap_across_variants(self):
-        cfg_d = _build_strat_cfg("D")
-        for name in ("B", "C"):
-            assert cfg_d.max_no_price <= _build_strat_cfg(name).max_no_price
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Global defaults changed by FIX-17
-# ──────────────────────────────────────────────────────────────────────
 
 class TestGlobalDefaults:
 
@@ -162,15 +107,11 @@ class TestGlobalDefaults:
     def test_locked_win_max_price_090(self):
         assert StrategyConfig().locked_win_max_price == 0.90
 
-    def test_city_whitelist_default_empty(self):
-        assert StrategyConfig().city_whitelist == frozenset()
+    def test_exit_cooldown_4h(self):
+        assert StrategyConfig().exit_cooldown_hours == 4.0
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Cross-variant behaviour
-# ──────────────────────────────────────────────────────────────────────
-
-class TestCrossStrategySignals:
+class TestStrategyBBehaviour:
 
     def _make_market(self):
         event = _make_event()
@@ -182,46 +123,33 @@ class TestCrossStrategySignals:
             event.slots.append(_make_slot(lower, upper, round(price_no, 3), f"no_{i}"))
         return event
 
-    def test_all_strategies_produce_signals(self):
+    def test_b_produces_signals(self):
         event = self._make_market()
         forecast = _make_forecast(high=75.0)
-        for name in ("B", "C", "D"):
-            cfg = _build_strat_cfg(name)
-            sigs = evaluate_no_signals(event, forecast, cfg)
-            assert len(sigs) > 0, f"Strategy {name} should produce signals"
+        cfg = _build_strat_cfg("B")
+        sigs = evaluate_no_signals(event, forecast, cfg)
+        assert len(sigs) > 0
 
-    def test_d_filters_by_price_more_strictly_than_b(self):
-        """D's 0.65 max price rejects a slot that B's 0.70 accepts."""
+    def test_b_locked_win_full_kelly(self):
+        """B uses full Kelly on locked wins → larger size than half-Kelly base."""
         event = _make_event()
-        event.slots.append(_make_slot(60.0, 62.0, 0.68, "no_1"))
-        forecast = _make_forecast(high=75.0)
-        sigs_b = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
-        sigs_d = evaluate_no_signals(event, forecast, _build_strat_cfg("D"))
-        assert len(sigs_b) >= 1
-        assert len(sigs_d) == 0
+        event.slots = [_make_slot(55.0, 59.0, 0.50, "no_locked")]
 
-    def test_b_locked_win_sizes_larger_than_c(self):
-        """B (full Kelly on locked) sizes larger than C (half Kelly, tighter cap)."""
-        event = _make_event()
-        slot = _make_slot(55.0, 59.0, 0.50, "no_locked")
-        event.slots = [slot]
+        cfg_b = _build_strat_cfg("B")
+        cfg_half = replace(cfg_b, locked_win_kelly_fraction=0.5)
 
-        locked_b = evaluate_locked_win_signals(event, 80.0, _build_strat_cfg("B"), daily_max_final=True)
-        locked_c = evaluate_locked_win_signals(event, 80.0, _build_strat_cfg("C"), daily_max_final=True)
-        assert len(locked_b) == 1 and len(locked_c) == 1
+        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b, daily_max_final=True)
+        locked_half = evaluate_locked_win_signals(event, 80.0, cfg_half, daily_max_final=True)
+        assert len(locked_b) == 1 and len(locked_half) == 1
 
-        size_b = compute_size(locked_b[0], 0.0, 0.0, _build_strat_cfg("B"))
-        size_c = compute_size(locked_c[0], 0.0, 0.0, _build_strat_cfg("C"))
-        assert size_b >= size_c
+        size_b = compute_size(locked_b[0], 0.0, 0.0, cfg_b)
+        size_half = compute_size(locked_half[0], 0.0, 0.0, cfg_half)
+        assert size_b > size_half
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Boundary
-# ──────────────────────────────────────────────────────────────────────
 
 class TestVariantBoundary:
 
-    def test_price_at_exact_boundary_b(self):
+    def test_price_at_exact_boundary_passes(self):
         """Slot price exactly at B's max_no_price (0.70) passes (strict >)."""
         event = _make_event()
         event.slots = [_make_slot(60.0, 62.0, 0.70, "no_exact")]
@@ -229,30 +157,24 @@ class TestVariantBoundary:
         sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
         assert len(sigs) >= 1
 
-    def test_price_one_cent_above_boundary_b(self):
+    def test_price_one_cent_above_boundary_rejected(self):
         event = _make_event()
         event.slots = [_make_slot(60.0, 62.0, 0.71, "no_above")]
         forecast = _make_forecast(high=75.0)
         sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
         assert len(sigs) == 0
 
-    def test_all_strategies_share_common_base(self):
-        for name in ("B", "C", "D"):
-            cfg = _build_strat_cfg(name)
-            assert cfg.enable_locked_wins is True
-            assert cfg.auto_calibrate_distance is True
+    def test_b_inherits_common_base(self):
+        cfg = _build_strat_cfg("B")
+        assert cfg.enable_locked_wins is True
+        assert cfg.auto_calibrate_distance is True
 
     def test_empty_slots_generate_no_signals(self):
         event = _make_event()
         forecast = _make_forecast()
-        for name in ("B", "C", "D"):
-            sigs = evaluate_no_signals(event, forecast, _build_strat_cfg(name))
-            assert len(sigs) == 0
+        sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
+        assert len(sigs) == 0
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Failure branches
-# ──────────────────────────────────────────────────────────────────────
 
 class TestVariantFailure:
 
@@ -260,31 +182,24 @@ class TestVariantFailure:
         with pytest.raises(KeyError):
             _ = get_strategy_variants()["Z"]
 
-    def test_empty_overrides_produces_base_config(self):
-        base = StrategyConfig()
-        assert replace(base, **{}) == base
+    def test_a_c_d_lookups_raise(self):
+        variants = get_strategy_variants()
+        for retired in ("A", "C", "D"):
+            with pytest.raises(KeyError):
+                _ = variants[retired]
 
     def test_partial_override_preserves_defaults(self):
-        """Variant overrides should not leak into unrelated fields."""
         base = StrategyConfig()
         cfg_b = _build_strat_cfg("B")
         assert cfg_b.max_no_price == 0.70  # overridden
-        # Base-derived, NOT overridden by B's dict → inherits base value.
+        # Base-derived, NOT overridden → inherits base value.
         assert cfg_b.max_slot_spread == base.max_slot_spread
         assert cfg_b.min_market_volume == base.min_market_volume
 
-    def test_d_cooldown_shorter_than_base(self):
-        base = StrategyConfig()
-        assert _build_strat_cfg("D").exit_cooldown_hours < base.exit_cooldown_hours
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Performance
-# ──────────────────────────────────────────────────────────────────────
 
 class TestVariantPerformance:
 
-    def test_all_strategies_evaluate_fast(self):
+    def test_evaluate_fast(self):
         import time
 
         event = _make_event()
@@ -301,18 +216,17 @@ class TestVariantPerformance:
             observation_time=datetime.now(timezone.utc),
         )
 
+        cfg = _build_strat_cfg("B")
         t0 = time.monotonic()
         for _ in range(100):
-            for name in ("B", "C", "D"):
-                cfg = _build_strat_cfg(name)
-                _ = evaluate_no_signals(event, forecast, cfg)
-                _ = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
-                _ = evaluate_exit_signals(
-                    event, obs, 74.0, event.slots[:5], cfg,
-                    days_ahead=0, forecast=forecast,
-                )
+            _ = evaluate_no_signals(event, forecast, cfg)
+            _ = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
+            _ = evaluate_exit_signals(
+                event, obs, 74.0, event.slots[:5], cfg,
+                days_ahead=0, forecast=forecast,
+            )
         elapsed = time.monotonic() - t0
-        assert elapsed < 3.0, f"900 evaluations took {elapsed:.3f}s"
+        assert elapsed < 3.0, f"300 evaluations took {elapsed:.3f}s"
 
     def test_get_strategy_variants_is_cheap(self):
         import time

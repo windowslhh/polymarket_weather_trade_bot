@@ -236,15 +236,14 @@ def create_app(store, rebalancer, config) -> Flask:
         )
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
-        # Include realized P&L from closed/settled positions
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") == "B"]
+        strat_realized_raw = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {}
+        strat_realized = {"B": sum(strat_realized_raw.values()) if strat_realized_raw else 0.0}
+        # Include realized P&L from closed/settled positions (legacy A/C/D rolled into B for display)
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
-                s = p.get("strategy", "B")
-                if s in strat_realized:
-                    strat_realized[s] += rpnl
+                strat_realized["B"] += rpnl
 
         # W-03 fix: use positions table as single source of truth for realized P&L.
         # Previously this summed daily_pnl_val (which includes settlement P&L) PLUS
@@ -305,7 +304,7 @@ def create_app(store, rebalancer, config) -> Flask:
             daily_maxes=d["state"].get("daily_maxes", {}),
             realized=d["total_realized"],
             strategy_summary=d.get("strategy_summary", []),
-            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}),
+            strat_realized=d.get("strat_realized", {"B": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -322,15 +321,14 @@ def create_app(store, rebalancer, config) -> Flask:
         closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
-        # Include realized P&L from closed/settled positions (not just settlement table)
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") == "B"]
+        strat_realized_raw = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {}
+        strat_realized = {"B": sum(strat_realized_raw.values()) if strat_realized_raw else 0.0}
+        # Include realized P&L from closed/settled positions (legacy A/C/D rolled into B for display)
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
-                s = p.get("strategy", "B")
-                if s in strat_realized:
-                    strat_realized[s] += rpnl
+                strat_realized["B"] += rpnl
 
         # Get current prices for P&L calculation.
         # Use the shared prices_fresh cache (same 30s TTL as /api/prices).
@@ -362,28 +360,23 @@ def create_app(store, rebalancer, config) -> Flask:
             p["buy_reason"] = p.get("buy_reason", "")
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
-        # Enrich closed positions with parsed slot info + remap legacy strategies
+        # Enrich closed positions with parsed slot info + remap legacy strategies to B
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
             p["buy_reason"] = p.get("buy_reason", "")
             p["exit_reason"] = p.get("exit_reason", "")
-            s = p.get("strategy", "B")
-            if s not in {"A", "B", "C", "D"}:
-                p["strategy"] = "B"
+            p["strategy"] = "B"  # B-only live; legacy A/C/D rolled into B for display
 
-        # Group by strategy — only A-D valid; legacy E/F remapped to B
-        VALID_STRATS = ["A", "B", "C", "D"]
-        strategies = {s: [] for s in VALID_STRATS}
-        strat_pnl = {s: 0.0 for s in VALID_STRATS}  # unrealized
-        strat_exposure = {s: 0.0 for s in VALID_STRATS}
+        # Group by strategy — B-only live; everything in DB remapped to B for display
+        strategies = {"B": []}
+        strat_pnl = {"B": 0.0}  # unrealized
+        strat_exposure = {"B": 0.0}
         for p in open_pos:
-            s = p.get("strategy", "B")
-            if s not in strategies:
-                s = "B"  # remap legacy strategies (E/F) to B
-            strategies[s].append(p)
-            strat_exposure[s] += p["size_usd"]
+            p["strategy"] = "B"  # remap any legacy strategy to B
+            strategies["B"].append(p)
+            strat_exposure["B"] += p["size_usd"]
             if p["unrealized_pnl"] is not None:
-                strat_pnl[s] += p["unrealized_pnl"]
+                strat_pnl["B"] += p["unrealized_pnl"]
 
         # Group by city
         cities = {}
@@ -553,28 +546,21 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Per-strategy stats — only A-D valid; legacy E/F remapped to B
-        VALID_STRATS = ["A", "B", "C", "D"]
-        strat_pnl = {s: 0.0 for s in VALID_STRATS}
-        strat_exposure = {s: 0.0 for s in VALID_STRATS}
-        strat_counts = {s: {"open": 0, "settled": 0} for s in VALID_STRATS}
+        # Per-strategy stats — B-only live; legacy A/C/D rolled into B for display
+        strat_pnl = {"B": 0.0}
+        strat_exposure = {"B": 0.0}
+        strat_counts = {"B": {"open": 0, "settled": 0}}
         for p in open_pos:
-            s = p.get("strategy", "B")
-            if s not in strat_pnl:
-                s = "B"  # remap legacy
-            strat_exposure[s] += p["size_usd"]
-            strat_counts[s]["open"] += 1
+            strat_exposure["B"] += p["size_usd"]
+            strat_counts["B"]["open"] += 1
             current = gamma_prices.get(p["token_id"])
             if current:
-                strat_pnl[s] += (current - p["entry_price"]) * p["shares"]
+                strat_pnl["B"] += (current - p["entry_price"]) * p["shares"]
         for p in closed_pos:
-            s = p.get("strategy", "B")
-            if s not in strat_counts:
-                s = "B"
             if p.get("status") == "settled":
-                strat_counts[s]["settled"] += 1
+                strat_counts["B"]["settled"] += 1
             if p.get("realized_pnl") is not None:
-                strat_pnl[s] += p["realized_pnl"]
+                strat_pnl["B"] += p["realized_pnl"]
 
         # Limit bumped from 80 → 120 because every closed position now
         # emits an extra ``closed_entry`` row (hidden until toggled).
