@@ -690,6 +690,18 @@ class Rebalancer:
                     # Build held NO slots from positions, using cached Gamma prices
                     # when available so exit signals carry the current market price
                     # (not entry price) for accurate realized P&L computation.
+                    #
+                    # BUG-5: filter out tokens already settled on Polymarket.
+                    # Once a market resolves, Gamma reports the NO token at
+                    # exactly 0.0 (lost) or 1.0 (won).  Pre-fix the position
+                    # check would feed those into the strategy layer where
+                    # PriceStopGate explicitly guards `<= 0` (a holdover from
+                    # the same scenario), but other gates / EV computations
+                    # have no reason to treat a 0/1 price differently from
+                    # mid-market — leading to nonsense EV (e.g. -0.5 at p=1.0)
+                    # and spurious TRIM signals on positions the settler is
+                    # about to close anyway.  Skip them here so the strategy
+                    # only ever sees actively-tradeable tokens.
                     gamma = self._last_gamma_prices
                     held_no_slots: list[TempSlot] = []
                     held_token_ids_set: set[str] = set()
@@ -700,7 +712,20 @@ class Rebalancer:
                             except Exception:
                                 lower, upper = None, None
                             tid = pos["token_id"]
-                            price = gamma.get(tid, pos["entry_price"])
+                            cached_price = gamma.get(tid)
+                            # BUG-5: skip already-settled tokens.  Only filter
+                            # when the price came from Gamma (cached_price not
+                            # None); falling back to entry_price for an
+                            # unobserved token is a separate scenario the
+                            # downstream PriceStopGate handles defensively.
+                            if cached_price is not None and cached_price in (0.0, 1.0):
+                                logger.debug(
+                                    "Position-check: skipping settled token %s "
+                                    "(price=%.1f) — settler will close",
+                                    tid, cached_price,
+                                )
+                                continue
+                            price = cached_price if cached_price is not None else pos["entry_price"]
                             held_no_slots.append(TempSlot(
                                 token_id_yes="",
                                 token_id_no=tid,
