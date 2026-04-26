@@ -61,6 +61,30 @@ def test_setup_local_chmod_env():
     assert "chmod 600 .env" in text, ".env permissions must be locked to 600"
 
 
+def test_setup_local_uses_pyproject_not_requirements_txt():
+    """Repo's source-of-truth is pyproject.toml (PEP 621 + setuptools, no
+    lock file).  An earlier draft of this script tried
+    ``pip install -r requirements.txt`` which doesn't exist — caught
+    in the field on first user run.  Pin the working command so we
+    don't regress: install editable + [dev] extras for pytest."""
+    text = (ROOT / "scripts" / "setup_local.sh").read_text()
+    assert "requirements.txt" not in text, (
+        "setup_local.sh must not reference requirements.txt — "
+        "repo uses pyproject.toml"
+    )
+    assert 'pip install --quiet -e ".[dev]"' in text, (
+        "setup_local.sh must install via pyproject.toml with [dev] extras "
+        "(needed for pytest in the smoke step)"
+    )
+
+
+def test_pyproject_toml_present():
+    """Sanity guard: if someone deletes pyproject.toml, setup_local.sh
+    breaks silently.  Fail loudly here instead."""
+    p = ROOT / "pyproject.toml"
+    assert p.is_file(), "pyproject.toml is the dependency source-of-truth"
+
+
 def test_run_local_forwards_args():
     text = (ROOT / "scripts" / "run_local.sh").read_text()
     assert "src.main" in text

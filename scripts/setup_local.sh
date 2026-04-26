@@ -20,7 +20,11 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m pip install --upgrade pip --quiet
-pip install -r requirements.txt --quiet
+# Dependency source-of-truth is pyproject.toml (PEP 621 + setuptools, no lock).
+# Dockerfile runs `pip install .`; locally we want the [dev] extras so the
+# smoke step below can run pytest, and editable (-e) so worktree edits are
+# picked up without reinstall.
+pip install --quiet -e ".[dev]"
 
 # 2. Verify macOS Keychain → fingerprint of the private key.
 #    The first run pops a system dialog ("Allow access to 'polymarket-bot'?")
