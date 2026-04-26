@@ -205,6 +205,16 @@ class AppConfig:
     # Set TRIGGER_SECRET in .env; if empty the endpoint is unprotected (dev only).
     trigger_secret: str = ""
 
+    # G-4 (2026-04-26): Polygon RPC for wallet-balance + nonce monitor.
+    # Defaults to the public llamarpc gateway (no API key required) for
+    # paper / dev; production deploys can override with a higher-rate
+    # provider (Alchemy, Infura) via POLYGON_RPC_URL.
+    polygon_rpc_url: str = "https://polygon.llamarpc.com"
+    # Critical alert fires when the proxy wallet's USDC balance falls
+    # below this floor.  Default tuned for the Phase 2 $50 smoke window
+    # plus slippage + gas headroom.  Bumped via config.yaml for live.
+    min_wallet_balance_usd: float = 50.0
+
     # Sub-configs
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -236,6 +246,12 @@ def load_config(config_path: str | Path | None = None, env_path: str | Path | No
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
         trigger_secret=os.getenv("TRIGGER_SECRET", ""),
+        polygon_rpc_url=os.getenv(
+            "POLYGON_RPC_URL", "https://polygon.llamarpc.com",
+        ),
+        min_wallet_balance_usd=float(
+            os.getenv("MIN_WALLET_BALANCE_USD", "50"),
+        ),
         strategy=StrategyConfig(**strategy_raw),
         scheduling=SchedulingConfig(**scheduling_raw),
         cities=[CityConfig(**c) for c in cities_raw],

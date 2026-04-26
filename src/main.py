@@ -276,11 +276,14 @@ async def run(args: argparse.Namespace) -> None:
     # Setup scheduler — alerter wired in so FIX-06's job_error listener can page.
     # G-1': pass the same _probe callable used at startup so the periodic
     # reconciler can resolve any pending orders that orphaned mid-cycle.
+    # G-4: pass live_clob_for_probe (same singleton used by reconciler probe)
+    # so the wallet monitor can call get_balance_allowance + get_address.
     scheduler = setup_scheduler(
         config, rebalancer,
         alerter=alerter,
         query_clob_order=None if is_paper else _probe,
         is_paper=is_paper,
+        clob_client=live_clob_for_probe,
     )
 
     # Handle graceful shutdown

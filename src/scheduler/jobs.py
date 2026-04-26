@@ -10,6 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts import Alerter
 from src.config import AppConfig
+from src.monitoring.wallet import run_wallet_monitor
 from src.recovery.reconciler import reconcile_pending_orders
 from src.strategy.rebalancer import Rebalancer
 
@@ -61,6 +62,7 @@ def setup_scheduler(
     *,
     query_clob_order: Callable[[dict], Awaitable] | None = None,
     is_paper: bool = False,
+    clob_client=None,
 ) -> AsyncIOScheduler:
     """Configure and return the APScheduler with all jobs.
 
@@ -197,6 +199,47 @@ def setup_scheduler(
             id="reconciler_periodic",
             name="Periodic CLOB ↔ DB reconciler",
             max_instances=1,
+            coalesce=JOB_COALESCE,
+            misfire_grace_time=JOB_MISFIRE_GRACE_S,
+        )
+
+    # G-4 (2026-04-26): wallet balance + nonce monitor.  Hourly
+    # interval; only registered when we have a clob_client to call
+    # get_balance_allowance() against.  Paper/dry-run mode is handled
+    # *inside* run_wallet_monitor, so the job still gets registered —
+    # this lets a bot started in paper see the no-op log line and
+    # confirm the wiring works.
+    if clob_client is not None and alerter is not None:
+        async def wallet_monitor_periodic():
+            try:
+                await run_wallet_monitor(
+                    clob_client, alerter,
+                    rpc_url=config.polygon_rpc_url,
+                    min_balance_usd=config.min_wallet_balance_usd,
+                    is_paper=is_paper,
+                    is_dry_run=getattr(config, "dry_run", False),
+                )
+            except Exception:
+                logger.exception("Wallet monitor failed; continuing")
+
+        scheduler.add_job(
+            wallet_monitor_periodic,
+            "interval",
+            minutes=60,
+            id="wallet_monitor",
+            name="Wallet balance + nonce monitor",
+            max_instances=1,
+            coalesce=JOB_COALESCE,
+            misfire_grace_time=JOB_MISFIRE_GRACE_S,
+        )
+        # Also run once 10 s after startup so the first balance + nonce
+        # readings land in the operator log without waiting a full hour.
+        scheduler.add_job(
+            wallet_monitor_periodic,
+            "date",
+            run_date=datetime.now(timezone.utc) + timedelta(seconds=10),
+            id="wallet_monitor_startup",
+            name="Wallet monitor on startup",
             coalesce=JOB_COALESCE,
             misfire_grace_time=JOB_MISFIRE_GRACE_S,
         )
