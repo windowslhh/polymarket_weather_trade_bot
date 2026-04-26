@@ -34,7 +34,6 @@ from src.strategy.sizing import compute_size
 from src.strategy.trend import ForecastTrend
 from src.weather.forecast import (
     city_local_date,
-    get_forecasts_batch,
     get_forecasts_for_city_local_window,
 )
 from src.weather.historical import ForecastErrorDistribution
