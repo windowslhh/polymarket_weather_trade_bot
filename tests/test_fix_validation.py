@@ -198,13 +198,28 @@ class TestStrategyLabelLookup:
         assert positions[0]["buy_reason"] == "[A] NO: dist=3°F from position"
 
     async def test_legacy_strategy_remapped(self, store):
-        """Positions with non-ABCD strategy get remapped to B."""
-        await store.insert_position(
-            event_id="e1", token_id="t1", token_type="NO",
-            city="Miami", slot_label="76-80°F on Apr 13?",
-            side="BUY", entry_price=0.85, size_usd=5, shares=5.88,
-            strategy="E", buy_reason="legacy",
+        """Positions with non-ABCD strategy get remapped to B in the
+        frontend display layer.
+
+        Y6 (2026-04-26): the DB triggers now block bogus strategy
+        INSERTs at write time, so a runtime row with strategy='E'
+        cannot exist anymore.  But the legacy display-layer remap
+        is still defensive — older DBs (pre-Y6 deploy) might carry
+        such rows.  Test the remap logic directly without trying
+        to write through the trigger.
+        """
+        # Disable the Y6 trigger to simulate a pre-trigger row leaking
+        # into a newly-upgraded DB.
+        await store.db.execute("DROP TRIGGER IF EXISTS trg_positions_strategy_check")
+        await store.db.execute(
+            """INSERT INTO positions
+               (event_id, token_id, token_type, city, slot_label, side,
+                entry_price, size_usd, shares, strategy, buy_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("e1", "t1", "NO", "Miami", "76-80°F on Apr 13?", "BUY",
+             0.85, 5, 5.88, "E", "legacy"),
         )
+        await store.db.commit()
         positions = await store.get_open_positions()
         # The DB stores "E"; frontend code remaps it
         s = positions[0]["strategy"]

@@ -266,10 +266,19 @@ def create_app(store, rebalancer, config) -> Flask:
             if p.get("realized_pnl") is not None
             and p.get("strategy") in active_strats
         )
+        # Y6 defensive (2026-04-26): any strategy value outside
+        # {A, B, C, D} (NULL, empty string, lowercase, typo, etc.)
+        # also lands in the legacy bucket so the dashboard headline
+        # still reconciles with the sum of detail panels.  The Y6
+        # startup-invariant scan + DB triggers SHOULD prevent these
+        # from existing, but the dashboard stays self-consistent
+        # if the DB drifts anyway.
+        legacy_strats = {"A"}
         legacy_a_pnl = sum(
             p["realized_pnl"] for p in closed_pos
             if p.get("realized_pnl") is not None
-            and p.get("strategy") == "A"
+            and (p.get("strategy") in legacy_strats
+                 or p.get("strategy") not in active_strats | legacy_strats)
         )
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}

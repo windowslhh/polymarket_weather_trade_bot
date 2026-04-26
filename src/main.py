@@ -235,6 +235,17 @@ async def run(args: argparse.Namespace) -> None:
         is_paper=is_paper,
     )
 
+    # Y6 (2026-04-26): startup invariant — flag any persisted strategy
+    # value outside {A, B, C, D}.  Logs + critical-alert; does NOT exit
+    # so a single bad row from manual SQL doesn't ground the bot, but
+    # the alert hits the operator within seconds.
+    bad_strategies = await store.validate_strategy_invariant(alerter=alerter)
+    if bad_strategies:
+        logger.error(
+            "Y6 strategy invariant: %d unknown value(s) found — %s",
+            len(bad_strategies), bad_strategies,
+        )
+
     # Build empirical forecast error distributions (cached, ~7 day refresh)
     logger.info("Loading forecast error distributions...")
     error_dists = await build_all_distributions(config.cities)

@@ -36,7 +36,10 @@ def test_dashboard_total_realized_filters_by_active_strategy() -> None:
     )
     # The legacy_a_pnl variable should also be computed for transparency
     assert "legacy_a_pnl" in body
-    assert "p.get(\"strategy\") == \"A\"" in body
+    # Y6 (2026-04-26): the legacy bucket now matches anything in
+    # `legacy_strats` (currently {'A'}) OR an unknown value (defensive
+    # routing for DB drift).  Pin one of the load-bearing tokens.
+    assert 'legacy_strats = {"A"}' in body
 
 
 def test_dashboard_template_renders_legacy_a_when_nonzero() -> None:

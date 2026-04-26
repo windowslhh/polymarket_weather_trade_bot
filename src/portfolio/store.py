@@ -172,8 +172,95 @@ class Store:
         await self._migrate_columns()
         # Migrate missing indexes (best-effort; fails silently if duplicates exist)
         await self._migrate_indexes()
+        # Y6 (2026-04-26): install strategy-validation triggers.  SQLite's
+        # ALTER TABLE doesn't support ADD CHECK on existing columns
+        # (would need a full table rebuild), but BEFORE INSERT/UPDATE
+        # triggers give the same guarantee without touching prod data.
+        await self._migrate_strategy_triggers()
 
         logger.info("Database initialized at %s", self._db_path)
+
+    async def validate_strategy_invariant(
+        self, alerter=None,
+    ) -> list[tuple[str, str]]:
+        """Y6 (2026-04-26): startup invariant — every persisted ``strategy``
+        value across positions / orders / settlements must be in
+        {'A', 'B', 'C', 'D'}.  Returns a list of (table, bad_value) pairs.
+
+        Anything else is either:
+          - data corruption (manual SQL gone wrong, partial migration)
+          - a code regression silently writing the wrong column
+        Caller alerts critical so ops sees the drift before it
+        compounds.  Helper returns the list rather than raising so a
+        bad row doesn't gate startup — let the operator decide whether
+        to halt.
+        """
+        allowed = {"A", "B", "C", "D"}
+        offenders: list[tuple[str, str]] = []
+        for table in ("positions", "orders", "settlements"):
+            try:
+                async with self.db.execute(
+                    f"SELECT DISTINCT strategy FROM {table}"
+                ) as cur:
+                    rows = await cur.fetchall()
+            except Exception:
+                logger.exception("Y6: SELECT DISTINCT strategy from %s failed", table)
+                continue
+            for r in rows:
+                v = r[0]
+                if v is None or str(v) not in allowed:
+                    offenders.append((table, str(v) if v is not None else "<NULL>"))
+        if offenders and alerter is not None:
+            try:
+                await alerter.send(
+                    "critical",
+                    f"Y6 strategy invariant violated: {len(offenders)} "
+                    f"unknown value(s) — {offenders}",
+                )
+            except Exception:
+                logger.exception("Y6: alerter dispatch failed")
+        return offenders
+
+    async def _migrate_strategy_triggers(self) -> None:
+        """Y6: install BEFORE INSERT / UPDATE triggers that raise when
+        a strategy value isn't in {'A', 'B', 'C', 'D'}.
+
+        Triggers are idempotent (CREATE IF NOT EXISTS); safe to re-run
+        on every startup.  They DO NOT silently coerce — any bad
+        strategy write fails fast with `CHECK constraint failed`,
+        which is exactly the symptom an operator can grep for.
+        """
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS trg_positions_strategy_check
+          BEFORE INSERT ON positions
+          FOR EACH ROW WHEN NEW.strategy NOT IN ('A','B','C','D')
+        BEGIN
+          SELECT RAISE(ABORT, 'Y6: positions.strategy must be A|B|C|D');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_positions_strategy_check_upd
+          BEFORE UPDATE OF strategy ON positions
+          FOR EACH ROW WHEN NEW.strategy NOT IN ('A','B','C','D')
+        BEGIN
+          SELECT RAISE(ABORT, 'Y6: positions.strategy must be A|B|C|D');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_orders_strategy_check
+          BEFORE INSERT ON orders
+          FOR EACH ROW WHEN NEW.strategy NOT IN ('A','B','C','D')
+        BEGIN
+          SELECT RAISE(ABORT, 'Y6: orders.strategy must be A|B|C|D');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_settlements_strategy_check
+          BEFORE INSERT ON settlements
+          FOR EACH ROW WHEN NEW.strategy NOT IN ('A','B','C','D')
+        BEGIN
+          SELECT RAISE(ABORT, 'Y6: settlements.strategy must be A|B|C|D');
+        END;
+        """
+        try:
+            await self.db.executescript(sql)
+            await self.db.commit()
+        except Exception:
+            logger.exception("Y6: failed to install strategy-validation triggers")
 
     async def _migrate_columns(self) -> None:
         """Add columns to existing tables if they don't exist yet."""
