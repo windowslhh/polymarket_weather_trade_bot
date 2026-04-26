@@ -271,7 +271,33 @@ async def _fetch_settlement_outcome(
         return None
 
     if winning_slot is None:
-        # All resolved to 0 but none to 1 — unusual, treat as no winner
+        # BUG-3: closed=True but no slot ≥ 0.99 happens during the small
+        # window where Polymarket has flipped the closed flag but its
+        # resolution oracle hasn't finished propagating outcomePrices
+        # for every child market.  In that window every child market
+        # still reads its mid-price (e.g. 0.62, 0.31), not 0/1.  Pre-fix
+        # we'd label this `winning_slot="none"`, mark all our NO
+        # positions as winners(!) — every NO has yes_resolved < 0.01
+        # then by the path in _settlement_exit_price — and book a
+        # phantom +EV PnL.  Wait one more cycle (return None) so the
+        # next 15-min check sees the propagated 0/1 prices.
+        all_resolved = label_prices and all(
+            p in (0.0, 1.0) for p in label_prices.values()
+        )
+        if not all_resolved:
+            logger.warning(
+                "Event %s reports closed=True but no slot reached >= 0.99 "
+                "and not all outcomePrices are 0/1 (mid-prices still propagating). "
+                "Deferring to next cycle.  Snapshot: %s",
+                event_data.get("id", "?"),
+                {q[:30]: p for q, p in list(label_prices.items())[:5]},
+            )
+            return None
+        # All slots resolved to 0 (none to 1) AND all outcomePrices are
+        # exactly 0/1 — genuine "no winner" case (extremely rare; would
+        # mean weather hit none of the published bands).  Keep the
+        # legacy sentinel so downstream code that already handles it
+        # ("no winner" PnL = lose every NO entry) keeps working.
         winning_slot = "none"
 
     return SettlementOutcome(
