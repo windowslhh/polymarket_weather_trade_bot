@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
+from typing import Any
 
 from src.markets.clob_client import ClobClient
 from src.markets.models import Side, TradeSignal
@@ -15,13 +17,53 @@ logger = logging.getLogger(__name__)
 class Executor:
     """Execute trade signals by placing orders on Polymarket."""
 
-    def __init__(self, clob: ClobClient, portfolio: PortfolioTracker) -> None:
+    def __init__(
+        self,
+        clob: ClobClient,
+        portfolio: PortfolioTracker,
+        config: Any = None,
+    ) -> None:
+        """C-2 (2026-04-26): ``config`` (an ``AppConfig``) is now an
+        explicit constructor argument so the executor doesn't reach
+        into ``self._clob._config`` at runtime.  Pre-fix the executor
+        peeked at ``getattr(self._clob, "_config", None).strategy.
+        max_total_exposure_usd`` for the batch cap, and the same
+        attribute for ``.dry_run`` — a circular dependency that broke
+        any test harness mocking the CLOB and forced both classes to
+        share a hidden contract.
+
+        ``config=None`` is preserved for the legacy fallback path so
+        existing call sites (some test fixtures, dry_run_offline) keep
+        working without an immediate cascade of constructor changes.
+        New code should always pass config explicitly.
+        """
         self._clob = clob
         self._portfolio = portfolio
+        self._config = config  # C-2: explicit injection
         # FIX-09: tracks in-flight _execute_one calls so graceful shutdown
         # can await them before the process exits.  Tasks self-remove via
         # a done callback.
         self._in_flight: set[asyncio.Task] = set()
+
+    # ── C-2 helpers ───────────────────────────────────────────────────
+
+    def _resolve_max_total_exposure(self) -> float | None:
+        """Read max_total_exposure_usd from injected config (preferred)
+        or fall back to the legacy ``self._clob._config`` path.  Returns
+        None when neither source provides a numeric value (e.g. test
+        harness with MagicMock attributes)."""
+        for src in (self._config, getattr(self._clob, "_config", None)):
+            limit = getattr(getattr(src, "strategy", None), "max_total_exposure_usd", None)
+            if isinstance(limit, (int, float)):
+                return float(limit)
+        return None
+
+    def _resolve_is_dry_run(self) -> bool:
+        """Same dual-source resolution for the dry-run flag."""
+        for src in (self._config, getattr(self._clob, "_config", None)):
+            if getattr(src, "dry_run", False) is True:
+                return True
+        return False
 
     async def wait_until_idle(self, timeout: float = 30.0) -> bool:
         """Block until all in-flight executions finish, up to `timeout` sec.
@@ -61,23 +103,29 @@ class Executor:
         # stale exposure snapshot could still cross the cap if every
         # signal independently looked fine.  This belt-and-braces check
         # trims the tail of the batch rather than rejecting it outright.
+        #
+        # C-2 (2026-04-26): pre-fix the trim mechanism mutated input
+        # signals (`s.suggested_size_usd = 0.0`) AND read the cap by
+        # peeking at `self._clob._config` (reverse coupling).  Both
+        # changed: the cap is now read via _resolve_max_total_exposure
+        # (constructor injection preferred), and trimmed signals are
+        # tracked in a `skipped_ids` set passed to _execute_one — the
+        # caller's TradeSignal objects are never mutated, so they remain
+        # auditable and replay-safe.  Each trimmed signal also gets a
+        # decision_log REJECT entry with reason=BATCH_CAP_EXCEEDED so
+        # the dashboard can show "why didn't this trade fire?".
         total_buy_cost = sum(
             s.suggested_size_usd for s in signals
             if s.side == Side.BUY and s.suggested_size_usd > 0
         )
+        skipped_ids: set[int] = set()
         if total_buy_cost > 0:
             try:
                 existing = await self._portfolio.get_total_exposure()
             except Exception:
                 existing = 0.0  # fail-open; per-signal check still applies
-            max_total = getattr(
-                getattr(self._clob, "_config", None), "strategy", None,
-            )
-            limit = getattr(max_total, "max_total_exposure_usd", None) if max_total else None
-            # isinstance guard so a test harness using MagicMock (where the
-            # attribute resolves to a truthy MagicMock instance) doesn't
-            # trip the real comparison with a bogus numeric value.
-            if isinstance(limit, (int, float)) and existing + total_buy_cost > limit:
+            limit = self._resolve_max_total_exposure()
+            if limit is not None and existing + total_buy_cost > limit:
                 trim_target = max(limit - existing, 0.0)
                 logger.warning(
                     "Executor: batch total_buy_cost=$%.2f would push exposure "
@@ -85,18 +133,23 @@ class Executor:
                     total_buy_cost, existing + total_buy_cost, limit, trim_target,
                 )
                 # Walk BUYs in order, keeping each whole signal while
-                # budget remains; mark the rest suggested_size_usd=0 so
-                # _execute_one short-circuits.
+                # budget remains; collect the rest in skipped_ids so
+                # _execute_one short-circuits without mutating the input.
                 running = 0.0
                 for s in signals:
                     if s.side != Side.BUY or s.suggested_size_usd <= 0:
                         continue
                     if running + s.suggested_size_usd > trim_target:
-                        s.suggested_size_usd = 0.0
+                        skipped_ids.add(id(s))
+                        await self._log_batch_cap_reject(
+                            s, existing, trim_target, limit,
+                        )
                     else:
                         running += s.suggested_size_usd
 
         for signal in signals:
+            if id(signal) in skipped_ids:
+                continue  # C-2: skipped above with decision_log entry
             # FIX-09: register each _execute_one as a tracked Task so
             # wait_until_idle() can join it during graceful shutdown.
             # Awaiting the task inline preserves the previous sequential
@@ -111,6 +164,43 @@ class Executor:
                     "Failed to execute signal: %s %s %s",
                     signal.side.value, signal.token_type.value, signal.slot.outcome_label,
                 )
+
+    async def _log_batch_cap_reject(
+        self, signal: TradeSignal,
+        existing_exposure: float, trim_target: float, cap: float,
+    ) -> None:
+        """C-2: emit a decision_log REJECT entry for a batch-cap-trimmed
+        signal so the dashboard can answer 'why didn't this trade fire?'.
+        Wrapped in try/except: a logging failure must never block the
+        rest of the batch."""
+        try:
+            cycle_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            await self._portfolio.store.insert_decision_log(
+                cycle_at=cycle_at,
+                city=signal.event.city,
+                event_id=signal.event.event_id,
+                signal_type="REJECT",
+                slot_label=signal.slot.outcome_label,
+                forecast_high_f=None,
+                daily_max_f=None,
+                trend_state="",
+                win_prob=signal.estimated_win_prob,
+                expected_value=signal.expected_value,
+                price=signal.price,
+                size_usd=signal.suggested_size_usd,
+                action="SKIP",
+                reason=(
+                    f"[{signal.strategy}] REJECT: BATCH_CAP_EXCEEDED "
+                    f"(existing=${existing_exposure:.2f}, "
+                    f"trim_target=${trim_target:.2f}, cap=${cap:.2f})"
+                ),
+                strategy=signal.strategy,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to log BATCH_CAP_EXCEEDED REJECT for %s",
+                signal.slot.outcome_label,
+            )
 
     async def _execute_one(self, signal: TradeSignal) -> None:
         price = signal.price
@@ -155,10 +245,11 @@ class Executor:
         # pollutes the table and breaks the reconciler's "pending =
         # orphan" invariant.
         store = self._portfolio.store
-        # Use `is True` so a MagicMock auto-attribute (truthy by default)
-        # doesn't accidentally flip test harnesses into the dry-run path.
-        clob_config = getattr(self._clob, "_config", None)
-        is_dry_run = getattr(clob_config, "dry_run", False) is True
+        # C-2: prefer the injected config; fall back to legacy
+        # ``self._clob._config`` for callers that haven't migrated.  The
+        # `is True` check (rather than truthy) keeps a MagicMock auto-attr
+        # from accidentally flipping the test harness into dry-run.
+        is_dry_run = self._resolve_is_dry_run()
 
         if is_dry_run:
             # Just send the signal to CLOB (which logs [DRY RUN]) and return.

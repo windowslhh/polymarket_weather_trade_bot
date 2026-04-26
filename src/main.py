@@ -247,7 +247,9 @@ async def run(args: argparse.Namespace) -> None:
 
     clob = ClobClient(config)
     portfolio = PortfolioTracker(store)
-    executor = Executor(clob, portfolio)
+    # C-2: explicit config injection so the executor doesn't reach
+    # into self._clob._config at runtime.
+    executor = Executor(clob, portfolio, config=config)
     max_tracker = DailyMaxTracker()
     rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
 

@@ -111,3 +111,118 @@ async def test_batch_under_cap_all_fire():
         (cnt,) = await cur.fetchone()
     assert cnt == 2
     await store.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# C-2: no input mutation + decision_log REJECT + explicit config injection
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_batch_cap_does_not_mutate_input_signals():
+    """C-2: pre-fix the executor zeroed `s.suggested_size_usd` on the
+    caller's signal objects.  That broke audit / replay (you couldn't
+    re-feed the same signals to retry a batch).  Post-fix the signals
+    are untouched; trimming happens via a parallel skip set."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+
+    config = SimpleNamespace(
+        dry_run=False, paper=True,
+        strategy=SimpleNamespace(max_total_exposure_usd=100.0),
+    )
+    clob = MagicMock()
+    clob._config = None  # C-2: executor must use injected config, not _clob._config
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok", success=True),
+    )
+
+    sigs = [_mk_signal(50.0, "a"), _mk_signal(60.0, "b"), _mk_signal(50.0, "c")]
+    original_sizes = [s.suggested_size_usd for s in sigs]
+
+    executor = Executor(clob, tracker, config=config)
+    await executor.execute_signals(sigs)
+
+    # All three signals' suggested_size_usd retained their ORIGINAL values
+    # — no mutation happened during trimming.
+    for sig, orig in zip(sigs, original_sizes):
+        assert sig.suggested_size_usd == orig, (
+            f"C-2: input signal mutated! suggested_size_usd "
+            f"{orig} → {sig.suggested_size_usd}"
+        )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_cap_writes_BATCH_CAP_EXCEEDED_decision_log():
+    """C-2: every trimmed signal must produce a decision_log row with
+    reason starting BATCH_CAP_EXCEEDED so the dashboard can show
+    'why didn't this trade fire?'."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+
+    config = SimpleNamespace(
+        dry_run=False, paper=True,
+        strategy=SimpleNamespace(max_total_exposure_usd=100.0),
+    )
+    clob = MagicMock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok", success=True),
+    )
+
+    # trim_target = 100; a=50 keeps, b=60 trims (50+60>100), c=50 keeps (50+50<=100).
+    sigs = [_mk_signal(50.0, "a"), _mk_signal(60.0, "b"), _mk_signal(50.0, "c")]
+    executor = Executor(clob, tracker, config=config)
+    await executor.execute_signals(sigs)
+
+    async with store.db.execute(
+        "SELECT reason, signal_type, action FROM decision_log "
+        "WHERE reason LIKE '%BATCH_CAP_EXCEEDED%'"
+    ) as cur:
+        rows = await cur.fetchall()
+    # Exactly one trimmed signal (b) → exactly one decision_log row
+    assert len(rows) == 1
+    assert rows[0][0].startswith("[B] REJECT: BATCH_CAP_EXCEEDED")
+    assert rows[0][1] == "REJECT"
+    assert rows[0][2] == "SKIP"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_executor_uses_injected_config_not_clob_internal():
+    """C-2: when an explicit config is injected, the executor must NOT
+    fall back to self._clob._config.  Pin by attaching a *different*
+    cap to clob._config and verifying the injected one wins."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+
+    injected_config = SimpleNamespace(
+        dry_run=False, paper=True,
+        strategy=SimpleNamespace(max_total_exposure_usd=100.0),  # tight cap
+    )
+    clob = MagicMock()
+    # If executor reads the WRONG source, it'd see this huge cap and
+    # let everything through.
+    clob._config = SimpleNamespace(
+        dry_run=False, paper=True,
+        strategy=SimpleNamespace(max_total_exposure_usd=1_000_000.0),
+    )
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok", success=True),
+    )
+
+    sigs = [_mk_signal(80.0, "a"), _mk_signal(80.0, "b")]
+    executor = Executor(clob, tracker, config=injected_config)
+    await executor.execute_signals(sigs)
+
+    # If executor used injected $100 cap correctly, only one signal lands.
+    # If it leaked to clob._config's $1M cap, both would land.
+    async with store.db.execute(
+        "SELECT COUNT(*) FROM positions WHERE buy_reason = 'batch test'"
+    ) as cur:
+        (cnt,) = await cur.fetchone()
+    assert cnt == 1, (
+        "C-2: executor must prefer injected config over clob._config; "
+        f"got {cnt} positions (expected 1 under $100 cap)"
+    )
+    await store.close()
