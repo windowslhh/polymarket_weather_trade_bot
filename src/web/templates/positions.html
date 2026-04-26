@@ -34,15 +34,16 @@
 </div>
 
 <!-- Positions by Strategy -->
-{# FIX-17: A kept as legacy label for historical positions; D relabeled D'. #}
-{% set strat_labels = {'A':'Conservative Far (legacy)', 'B':'Locked Aggressor', 'C':'Close Range', 'D':"Quick Exit D' (whitelisted)"} %}
+{# FIX-17: A dropped from active variants.  Per-row tag still renders 'A' #}
+{# defensively if a historical row leaks into a closed list elsewhere.    #}
+{% set strat_labels = {'B':'Locked Aggressor', 'C':'Close Range', 'D':"Quick Exit D' (whitelisted)"} %}
 {% for strat_name in strategies.keys()|sort %}
 {% set strat_label = strat_labels.get(strat_name, strat_name) %}
 {% set strat_positions = strategies[strat_name] %}
 <div class="panel" style="margin-bottom:16px;">
     <div class="panel-header">
         <h3>
-            <span class="tag {% if strat_name == 'A' %}tag-settling{% elif strat_name == 'B' %}tag-stable{% elif strat_name == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            <span class="tag {% if strat_name == 'B' %}tag-stable{% elif strat_name == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
             {{ strat_label }}
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">
@@ -132,7 +133,7 @@
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
-            <td><span class="tag {% if p.strategy == 'A' %}tag-settling{% elif p.strategy == 'B' %}tag-stable{% elif p.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ p.strategy if p.strategy else 'B' }}</span></td>
+            <td><span class="tag {% if p.strategy == 'B' %}tag-stable{% elif p.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ p.strategy if p.strategy else 'B' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono" style="{% if p.exit_price is not none %}color:{{ 'var(--green-text)' if p.exit_price > p.entry_price else 'var(--red-text)' if p.exit_price < p.entry_price else 'var(--text)' }}{% endif %}">
                 {{ "%.3f"|format(p.exit_price) if p.exit_price is not none else '-' }}

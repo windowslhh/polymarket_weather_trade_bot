@@ -236,8 +236,11 @@ def create_app(store, rebalancer, config) -> Flask:
         )
         decision_log = _run_async(st.get_decision_log(limit=8))
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        # FIX-2P-5 (2026-04-26): A dropped per FIX-17.  Active dashboards
+        # surface only B/C/D; legacy A rows still live in DB (audit trail)
+        # but are filtered out of summary aggregates and per-strategy buckets.
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"B", "C", "D"}]
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"B": 0.0, "C": 0.0, "D": 0.0}
         # Include realized P&L from closed/settled positions
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
@@ -305,7 +308,7 @@ def create_app(store, rebalancer, config) -> Flask:
             daily_maxes=d["state"].get("daily_maxes", {}),
             realized=d["total_realized"],
             strategy_summary=d.get("strategy_summary", []),
-            strat_realized=d.get("strat_realized", {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}),
+            strat_realized=d.get("strat_realized", {"B": 0.0, "C": 0.0, "D": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -322,8 +325,9 @@ def create_app(store, rebalancer, config) -> Flask:
         closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"A", "B", "C", "D"}]
-        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        # FIX-2P-5: see dashboard route for rationale.
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in {"B", "C", "D"}]
+        strat_realized = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {"B": 0.0, "C": 0.0, "D": 0.0}
         # Include realized P&L from closed/settled positions (not just settlement table)
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
@@ -362,7 +366,10 @@ def create_app(store, rebalancer, config) -> Flask:
             p["buy_reason"] = p.get("buy_reason", "")
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
-        # Enrich closed positions with parsed slot info + remap legacy strategies
+        # Enrich closed positions with parsed slot info.  Historical 'A'
+        # rows are preserved verbatim — they show in the raw closed-positions
+        # list for audit, but FIX-2P-5 stops them from contributing to the
+        # per-strategy aggregates below.
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
             p["buy_reason"] = p.get("buy_reason", "")
@@ -371,15 +378,18 @@ def create_app(store, rebalancer, config) -> Flask:
             if s not in {"A", "B", "C", "D"}:
                 p["strategy"] = "B"
 
-        # Group by strategy — only A-D valid; legacy E/F remapped to B
-        VALID_STRATS = ["A", "B", "C", "D"]
+        # FIX-2P-5: A dropped from active variants (FIX-17 deprecation).
+        # Skip 'A' and unknown strategies in per-bucket aggregates instead
+        # of silently rebucketing them into B (which would corrupt B's
+        # displayed PnL).
+        VALID_STRATS = ["B", "C", "D"]
         strategies = {s: [] for s in VALID_STRATS}
         strat_pnl = {s: 0.0 for s in VALID_STRATS}  # unrealized
         strat_exposure = {s: 0.0 for s in VALID_STRATS}
         for p in open_pos:
             s = p.get("strategy", "B")
             if s not in strategies:
-                s = "B"  # remap legacy strategies (E/F) to B
+                continue  # skip legacy A / unknown — preserved in raw list, not in aggregates
             strategies[s].append(p)
             strat_exposure[s] += p["size_usd"]
             if p["unrealized_pnl"] is not None:
@@ -553,15 +563,17 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Per-strategy stats — only A-D valid; legacy E/F remapped to B
-        VALID_STRATS = ["A", "B", "C", "D"]
+        # FIX-2P-5: A dropped (FIX-17 deprecation).  Legacy A and unknown
+        # strategies skip per-bucket aggregates rather than silently
+        # rebucketing into B.
+        VALID_STRATS = ["B", "C", "D"]
         strat_pnl = {s: 0.0 for s in VALID_STRATS}
         strat_exposure = {s: 0.0 for s in VALID_STRATS}
         strat_counts = {s: {"open": 0, "settled": 0} for s in VALID_STRATS}
         for p in open_pos:
             s = p.get("strategy", "B")
             if s not in strat_pnl:
-                s = "B"  # remap legacy
+                continue
             strat_exposure[s] += p["size_usd"]
             strat_counts[s]["open"] += 1
             current = gamma_prices.get(p["token_id"])
@@ -570,7 +582,7 @@ def create_app(store, rebalancer, config) -> Flask:
         for p in closed_pos:
             s = p.get("strategy", "B")
             if s not in strat_counts:
-                s = "B"
+                continue
             if p.get("status") == "settled":
                 strat_counts[s]["settled"] += 1
             if p.get("realized_pnl") is not None:

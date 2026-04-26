@@ -98,9 +98,9 @@ async def main():
         logger.info("✓ All %d BUY signals have reason attached", len(buy_signals))
         checks_passed += 1
 
-    # Check 3: All signals have strategy A-D
+    # Check 3: All signals have strategy B/C/D (FIX-2P-5: A dropped per FIX-17)
     checks_total += 1
-    valid_strats = {"A", "B", "C", "D"}
+    valid_strats = {"B", "C", "D"}
     bad_strats = [s for s in signals if s.strategy not in valid_strats]
     if bad_strats:
         logger.error("FAIL: %d signals with invalid strategy", len(bad_strats))

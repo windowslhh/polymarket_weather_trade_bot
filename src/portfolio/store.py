@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS positions (
     size_usd REAL NOT NULL,
     shares REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',  -- 'open', 'closed', 'settled'
-    strategy TEXT NOT NULL DEFAULT 'B',   -- 'A', 'B', 'C' strategy group
+    strategy TEXT NOT NULL DEFAULT 'B',   -- active variants: B/C/D (A dropped, FIX-2P-5)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     closed_at TEXT
 );
@@ -748,8 +748,12 @@ class Store:
             return [dict(row) for row in rows]
 
     async def get_strategy_realized_pnl(self) -> dict[str, float]:
-        """Get realized P&L per strategy as a simple dict."""
-        result = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        """Get realized P&L per strategy as a simple dict.
+
+        FIX-2P-5: A dropped from active variants — historical 'A' settlement
+        rows still exist in the DB (audit trail) but are not surfaced here.
+        """
+        result = {"B": 0.0, "C": 0.0, "D": 0.0}
         async with self.db.execute("""
             SELECT strategy, ROUND(SUM(pnl), 4) as total_pnl
             FROM settlements

@@ -588,19 +588,22 @@ class TestDashboardRealizedPnl:
     realized_pnl into strategy P&L totals."""
 
     async def test_closed_position_pnl_aggregated(self, store):
-        """Realized P&L from closed (SELL) positions is included in strat totals."""
-        # Insert a closed position with realized_pnl
+        """Realized P&L from closed (SELL) positions is included in strat totals.
+
+        FIX-2P-5: A dropped from active variants — test rewritten to use C
+        (still active) so the aggregation logic stays verified.
+        """
         pid = await store.insert_position(
             event_id="e1", token_id="t1", token_type="NO",
             city="Miami", slot_label="76-80°F",
             side="BUY", entry_price=0.85, size_usd=5.0, shares=5.882,
-            strategy="A", buy_reason="test",
+            strategy="C", buy_reason="test",
         )
         await store.close_position(pid, exit_reason="TRIM", exit_price=0.92,
                                    realized_pnl=0.412)
 
         # Simulate dashboard logic: aggregate closed positions' realized_pnl
-        strat_realized = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        strat_realized = {"B": 0.0, "C": 0.0, "D": 0.0}
         for p in await store.get_closed_positions(limit=200):
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
@@ -608,20 +611,22 @@ class TestDashboardRealizedPnl:
                 if s in strat_realized:
                     strat_realized[s] += rpnl
 
-        assert strat_realized["A"] == pytest.approx(0.412, abs=0.001)
+        assert strat_realized["C"] == pytest.approx(0.412, abs=0.001)
         assert strat_realized["B"] == 0.0
 
     async def test_mixed_settled_and_closed_pnl(self, store):
-        """Settlement P&L (from settlements table) + SELL P&L (from positions) combine."""
-        # Settlement P&L
-        await store.insert_settlement("e1", "Miami", "76-80°F", 0.882, strategy="A")
+        """Settlement P&L (from settlements table) + SELL P&L (from positions) combine.
 
-        # Closed position P&L (from a SELL/TRIM)
+        FIX-2P-5: rewritten on D (active) — historical 'A' rows still live in
+        the DB but are filtered out of get_strategy_realized_pnl.
+        """
+        await store.insert_settlement("e1", "Miami", "76-80°F", 0.882, strategy="D")
+
         pid = await store.insert_position(
             event_id="e2", token_id="t2", token_type="NO",
             city="Seattle", slot_label="50-55°F",
             side="BUY", entry_price=0.80, size_usd=5.0, shares=6.25,
-            strategy="A",
+            strategy="D",
         )
         await store.close_position(pid, exit_reason="TRIM", exit_price=0.90,
                                    realized_pnl=0.625)
@@ -636,7 +641,7 @@ class TestDashboardRealizedPnl:
                 if s in settlement_pnl:
                     settlement_pnl[s] += rpnl
 
-        assert settlement_pnl["A"] == pytest.approx(0.882 + 0.625, abs=0.01)
+        assert settlement_pnl["D"] == pytest.approx(0.882 + 0.625, abs=0.01)
 
     async def test_null_pnl_positions_not_counted(self, store):
         """Positions with realized_pnl=None are excluded from aggregation."""
@@ -644,12 +649,12 @@ class TestDashboardRealizedPnl:
             event_id="e1", token_id="t1", token_type="NO",
             city="Miami", slot_label="76-80°F",
             side="BUY", entry_price=0.85, size_usd=5.0, shares=5.882,
-            strategy="A",
+            strategy="C",
         )
         await store.close_position(pid, exit_reason="manual close")
         # realized_pnl is None
 
-        strat_realized = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        strat_realized = {"B": 0.0, "C": 0.0, "D": 0.0}
         for p in await store.get_closed_positions(limit=200):
             rpnl = p.get("realized_pnl")
             if rpnl is not None:
@@ -657,7 +662,7 @@ class TestDashboardRealizedPnl:
                 if s in strat_realized:
                     strat_realized[s] += rpnl
 
-        assert strat_realized["A"] == 0.0, "None pnl must not affect total"
+        assert strat_realized["C"] == 0.0, "None pnl must not affect total"
 
     async def test_trades_page_sell_row_shows_exit_price(self, store):
         """SELL rows in /trades timeline show exit_price and realized_pnl."""

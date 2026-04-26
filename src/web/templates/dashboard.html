@@ -48,14 +48,14 @@
 <div class="grid-2">
     {% if strategy_summary %}
     <div class="panel">
-        <div class="panel-header"><h3>Strategy A/B/C/D</h3></div>
+        <div class="panel-header"><h3>Strategy B/C/D</h3></div>
         <table>
             <thead><tr><th>Strat</th><th>Style</th><th>Open</th><th>Settled</th><th>Exposure</th><th>Realized</th></tr></thead>
             <tbody>
             {% for s in strategy_summary %}
             <tr>
-                <td><span class="tag {% if s.strategy == 'A' %}tag-settling{% elif s.strategy == 'B' %}tag-stable{% elif s.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ s.strategy }}</span></td>
-                <td style="font-size:11px;color:var(--text-muted);">{% if s.strategy == 'A' %}Conservative Far (legacy){% elif s.strategy == 'B' %}Locked Aggressor{% elif s.strategy == 'C' %}Close Range{% elif s.strategy == 'D' %}Quick Exit D' (whitelisted){% else %}{{ s.strategy }}{% endif %}</td>
+                <td><span class="tag {% if s.strategy == 'B' %}tag-stable{% elif s.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ s.strategy }}</span></td>
+                <td style="font-size:11px;color:var(--text-muted);">{% if s.strategy == 'B' %}Locked Aggressor{% elif s.strategy == 'C' %}Close Range{% elif s.strategy == 'D' %}Quick Exit D' (whitelisted){% else %}{{ s.strategy }}{% endif %}</td>
                 <td class="td-mono">{{ s.open_positions }}</td>
                 <td class="td-mono">{{ s.settled_positions }}</td>
                 <td class="td-mono">${{ "%.1f"|format(s.exposure) }}</td>

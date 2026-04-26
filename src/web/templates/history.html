@@ -96,7 +96,7 @@ document.addEventListener('DOMContentLoaded', function() {
         {% for s in settlements %}
         <tr>
             <td style="font-weight:500;">{{ s.city }}</td>
-            <td><span class="tag {% if s.strategy == 'A' %}tag-settling{% elif s.strategy == 'B' %}tag-stable{% elif s.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:10px;">{{ s.strategy or 'B' }}</span></td>
+            <td><span class="tag {% if s.strategy == 'B' %}tag-stable{% elif s.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:10px;">{{ s.strategy or 'B' }}</span></td>
             <td>{{ s.winning_outcome or '-' }}</td>
             <td class="td-mono" style="color:{{ 'var(--green-text)' if s.pnl >= 0 else 'var(--red-text)' }}">
                 {{ '+' if s.pnl > 0 else '' }}${{ "%.2f"|format(s.pnl) }}
