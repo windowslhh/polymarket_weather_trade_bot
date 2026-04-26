@@ -129,6 +129,17 @@ def evaluate_no_signals(
     ``GateContext`` for gates to read; each gate caches derived values
     (``distance``, ``win_prob``, ``ev``) so later gates reuse them.
     """
+    # FIX-22: event and forecast dates must match — Bug #1 (Houston 2026-04-17)
+    # was caused by routing today's forecast into D+1/D+2 evaluators.  Every
+    # evaluator enforces the invariant so a regression fails fast instead of
+    # shipping wrong trades.  Uses `if … raise` (not assert) so the guard
+    # still fires under `python -O`.
+    if forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
+
     if hours_to_settlement is not None and hours_to_settlement < config.force_exit_hours:
         logger.debug("Blocking new NO entries for %s: %.1fh to settlement (< %.1fh gate)",
                      event.city, hours_to_settlement, config.force_exit_hours)
@@ -186,6 +197,13 @@ def evaluate_locked_win_signals(
 
     ``LockedWinDetectionGate`` sets ``ctx.lock_reason`` / ``is_below_lock``
     mid-chain so the wrapper can build the signal once all gates pass.
+
+    FIX-22 note: this evaluator takes no Forecast so there is no
+    forecast_date/market_date mismatch to assert.  The equivalent
+    invariant — "daily_max is for today's event only" — is enforced by
+    the days_ahead early-return below and by the caller slicing
+    daily_max by city-local date before it ever reaches us.  See
+    rebalancer._route_forecasts for the caller contract.
     """
     if daily_max_f is None or days_ahead > 0 or not config.enable_locked_wins:
         return []
@@ -228,6 +246,14 @@ def evaluate_trim_signals(
     each represent one OR-branch of the trim rule — any firing
     produces a SELL signal.
     """
+    # FIX-22: forecast date must match event date (see evaluate_no_signals).
+    # `if … raise` so the guard survives `python -O`.
+    if forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
+
     signals: list[TradeSignal] = []
     ep = dict(entry_prices or {})
     ev_map = dict(entry_ev_map or {})
@@ -251,7 +277,18 @@ def evaluate_trim_signals(
 
         win_prob = _estimate_no_win_prob(slot, forecast, error_dist)
         price_for_ev = ep.get(slot.token_id_no, slot.price_no)
-        ev = win_prob * (1.0 - price_for_ev) - (1.0 - win_prob) * price_for_ev
+        # FIX-14: the entry-side gates bake in the taker fee (see
+        # gates.py::entry_fee_per_dollar); TRIM's own EV calculation did
+        # not, so a held position would look slightly more attractive
+        # post-entry than it did at entry — enough to keep a bleeding
+        # position alive past the relative-decay gate.  Subtract the same
+        # per-dollar fee so TRIM's EV is comparable to the entry_ev we
+        # stored on the position row.
+        ev = (
+            win_prob * (1.0 - price_for_ev)
+            - (1.0 - win_prob) * price_for_ev
+            - entry_fee_per_dollar(price_for_ev)
+        )
         ctx.win_prob = win_prob
         ctx.ev = ev
 
@@ -366,6 +403,16 @@ def evaluate_exit_signals(
     and Layer 3 (pre-settlement force exit) stay inline because they
     interleave — see ``CLAUDE.md`` 'Hybrid exit' entry.
     """
+    # FIX-22: when a forecast is supplied it must be for the event's date.
+    # `forecast` is optional here because exits can be driven by observation
+    # alone; only enforce the match when it's actually provided.  Use
+    # `if … raise` so `python -O` does not strip the guard.
+    if forecast is not None and forecast.forecast_date != event.market_date:
+        raise AssertionError(
+            f"forecast.forecast_date={forecast.forecast_date} != "
+            f"event.market_date={event.market_date} (city={event.city})"
+        )
+
     if observation is None or daily_max_f is None or days_ahead > 0:
         return []
 

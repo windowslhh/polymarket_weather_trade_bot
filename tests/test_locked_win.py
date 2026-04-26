@@ -217,27 +217,28 @@ class TestLockedWinPriceCap:
     See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
     """
 
-    def test_below_lock_at_0_94_accepted(self):
-        """Below-slot lock at price=0.94 → accepted (under cap, EV ≈ 0.06)."""
+    def test_below_lock_at_0_89_accepted(self):
+        """FIX-17: cap dropped 0.95→0.90.  Below-slot lock at 0.89 still
+        accepts (under the tighter cap; EV ≈ 0.10)."""
         from src.strategy.evaluator import TAKER_FEE_RATE
-        slot = _slot(70, 74, price_no=0.94)
+        slot = _slot(70, 74, price_no=0.89)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
-        assert len(sigs) == 1, "Below-slot lock at 0.94 must pass (under 0.95 cap)"
-        p = 0.94
+        assert len(sigs) == 1, "Below-slot lock at 0.89 must pass (under 0.90 cap)"
+        p = 0.89
         fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
         expected_ev = 0.999 * (1.0 - p) - 0.001 * p - fee
         assert abs(sigs[0].expected_value - expected_ev) < 1e-9
         assert sigs[0].expected_value > 0
-        # Sanity: EV is in the ~0.05-0.06 band, well above noise/slippage.
-        assert sigs[0].expected_value > 0.04
+        # EV has more slack vs old 0.94-case since the cap is lower.
+        assert sigs[0].expected_value > 0.08
 
-    def test_below_lock_at_0_95_accepted_boundary(self):
-        """price=0.95 is at the cap (gate uses `>`, not `>=`) → accepted."""
-        slot = _slot(70, 74, price_no=0.95)
+    def test_below_lock_at_0_90_accepted_boundary(self):
+        """FIX-17: 0.90 is exactly at the cap; gate uses ``>`` → accepted."""
+        slot = _slot(70, 74, price_no=0.90)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
-        assert len(sigs) == 1, "price=0.95 sits exactly on the cap; gate is `>`, accept"
+        assert len(sigs) == 1, "price=0.90 sits exactly on the cap; gate is `>`, accept"
 
     def test_below_lock_at_0_96_rejected_by_cap(self):
         """Below-slot lock at price=0.96 → rejected by hard price cap (not EV)."""
@@ -251,17 +252,19 @@ class TestLockedWinPriceCap:
 
         Pre-rollback: passed Fix 2's removed cap, then `ev > 0` accepted
         because EV ≈ +$0.0008/share (theoretically positive).
-        Post-rollback: rejected by the 0.95 cap *before* the EV check,
-        so the razor-thin entries that triggered this rollback never fire.
+        Post-rollback (2026-04-17): rejected by 0.95 cap before EV check.
+        FIX-17 (2026-04-24): cap further tightened to 0.90 — rejected even
+        more decisively.
         """
         slot = _slot(70, 74, price_no=0.999)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 0
 
-    def test_above_lock_at_0_94_accepted(self):
-        """Above-slot lock at price=0.94 → accepted; win_prob retains 0.99."""
-        slot = _slot(80, 84, price_no=0.94)
+    def test_above_lock_at_0_89_accepted(self):
+        """FIX-17: above-slot lock at 0.89 → accepted under 0.90 cap; win_prob
+        retains 0.99 (above-lock branch, per Fix 2 split)."""
+        slot = _slot(80, 84, price_no=0.89)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1
@@ -276,21 +279,26 @@ class TestLockedWinPriceCap:
         assert len(sigs) == 0
 
     def test_default_config_value(self):
-        """StrategyConfig.locked_win_max_price defaults to 0.95 (regression guard)."""
-        assert StrategyConfig().locked_win_max_price == 0.95
+        """FIX-17 (2026-04-24): locked_win_max_price defaults tightened to 0.90.
+
+        Reasoning: production with 0.95 still clustered entries at 0.93+
+        where EV ≈ 0; the 0.90 cap leaves ~3¢ of slippage slack before a
+        single-tick adverse fill drives EV negative.
+        """
+        assert StrategyConfig().locked_win_max_price == 0.90
         # And the zero-margin _CFG used throughout this module inherits the default.
-        assert _CFG.locked_win_max_price == 0.95
+        assert _CFG.locked_win_max_price == 0.90
 
     def test_config_override_actually_takes_effect(self):
         """Override locked_win_max_price=0.85 → entries between 0.85 and the
-        former default 0.95 are now rejected, proving the gate reads config
-        rather than the prior hardcoded constant."""
+        FIX-17 default 0.90 are rejected by the tighter override, proving
+        the gate reads config rather than the prior hardcoded constant."""
         cfg = StrategyConfig(locked_win_margin_f=0, locked_win_max_price=0.85)
-        # Default cap (0.95) would accept this; tighter override must reject.
-        slot = _slot(70, 74, price_no=0.90)
+        # Default cap (0.90 post-FIX-17) would accept this; tighter override rejects.
+        slot = _slot(70, 74, price_no=0.88)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 76.0, cfg, daily_max_final=True)
-        assert len(sigs) == 0, "price=0.90 above tighter cap 0.85 must be rejected"
+        assert len(sigs) == 0, "price=0.88 above tighter cap 0.85 must be rejected"
 
         # Below the tighter cap → accepted.
         slot2 = _slot(70, 74, price_no=0.80)
@@ -299,8 +307,9 @@ class TestLockedWinPriceCap:
         assert len(sigs2) == 1, "price=0.80 under tighter cap 0.85 must be accepted"
 
     def test_config_override_can_relax_cap(self):
-        """Override locked_win_max_price=0.99 → entries that the default 0.95
-        would reject can be accepted (still subject to the `ev > 0` floor)."""
+        """Override locked_win_max_price=0.99 → entries that the FIX-17
+        default 0.90 would reject can be accepted (still subject to the
+        `ev > 0` floor)."""
         cfg = StrategyConfig(locked_win_margin_f=0, locked_win_max_price=0.99)
         slot = _slot(70, 74, price_no=0.97)
         event = _event([slot])
@@ -692,8 +701,9 @@ class TestLockedWinDivergenceGuard:
         assert len(sigs) == 0
 
     def test_allows_when_market_agrees(self):
-        # Same lock, but market NO at 0.92 → gap = 0.079, well within threshold.
-        slot = _slot(70, 74, price_no=0.92)
+        # Same lock, but market NO at 0.88 → under FIX-17's 0.90 cap and
+        # gap = 0.999 - 0.88 = 0.119, well within divergence threshold.
+        slot = _slot(70, 74, price_no=0.88)
         event = _event([slot])
         sigs = evaluate_locked_win_signals(event, 85.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1

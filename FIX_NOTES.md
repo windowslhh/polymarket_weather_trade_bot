@@ -1,0 +1,64 @@
+# FIX Notes — Long-term Items (not in go-live plan)
+
+Active plan: `fix/go-live-plan` covers Blockers + High + Medium fixes. This file tracks
+the "Long-term" items that were explicitly out of scope but worth preserving for a later
+sprint.
+
+## Long-term (post go-live)
+
+- **Dashboard auth**: web/app.py exposes `/api/admin/*` protected only by `TRIGGER_SECRET`
+  in headers. For multi-operator use, move to OIDC/SSO.
+- **Horizontal scale**: single-node SQLite. If we ever need >1 bot instance sharing
+  state, migrate to Postgres with row-level locks on `positions`/`orders`.
+- **Forecast pipeline observability**: we log ensemble spread but don't expose per-model
+  health. Add a per-cycle dashboard panel: which models responded, which were fallbacks.
+- **EV calibration loop**: we use static win_prob curves from calibrator.py. A nightly
+  job that refits the curves against actual settlement outcomes would tighten edges.
+- **Order book depth sizing**: we take midpoint and hope. Larger size (>$50/slot) should
+  walk the book and cap at e.g. 2× best-ask.
+- **Backtest integration with live db**: current backtest pipeline is offline; stitching
+  it to the live edge_history would let us paper-grade variants without redeploying.
+
+## Runbook — Operator manual actions
+
+**When the reconciler `sys.exit(3)`s on a CLOB/DB mismatch (FIX-05)**:
+
+The container is set to `restart: unless-stopped` by default, which means
+docker-compose will loop on sys.exit until the operator intervenes.  That's
+intentional — we'd rather the bot stay down than start trading on an
+untrusted state.  To recover:
+
+1. Pull the critical alert from your webhook — it names the idempotency_key
+   and the DB vs CLOB numbers.
+2. Log into the Polymarket frontend, look up the order history for the
+   affected token, and confirm manually what actually happened.
+3. On the VPS:
+   ```
+   docker compose exec -T weather-bot python -c \
+       "import asyncio; from pathlib import Path; from src.portfolio.store import Store; \
+        async def main(): \
+            s = Store(Path('data/bot.db')); await s.initialize(); \
+            await s.mark_order_failed('<idempotency_key>', 'operator override: <reason>'); \
+            await s.close(); \
+        asyncio.run(main())"
+   ```
+   or manually close the CLOB position and set the DB row to `'failed'`.
+4. `docker compose stop && docker compose up -d` — reconciler re-runs
+   against a clean state.
+
+Never `--skip-reconciler` (not a flag we've added on purpose — it would
+re-create the "pending → orphan" ambiguity that FIX-05 was designed to fix).
+
+Alternative: if you want the container to halt instead of loop on the
+restart policy, change docker-compose.yml's `restart:` to `no` for the
+weather-bot service.  We keep the default `unless-stopped` because
+transient errors (network blips during the probe) are more common than
+genuine DB/CLOB divergence — a loop self-heals those; a halt doesn't.
+
+## Known regressions tolerated until after go-live
+
+- VPS deploy path remains `/opt/weather-bot-new` (not `/opt/weather-bot`). Legacy dir
+  still exists; clean up after one week of stable `-new` operation.
+- `get_strategy_realized_pnl()` in store.py still returns a dict keyed `{A,B,C,D}`.
+  FIX-17 drops A and renames D→D'; we leave the dict keys alone for dashboard
+  back-compat. Track removing 'A' key in a later PR once no dashboard references it.

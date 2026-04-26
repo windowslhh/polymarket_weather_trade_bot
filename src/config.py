@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent.parent
 
 
-@dataclass
+# FIX-M8: freeze leaf configs so no code path can mutate them at runtime.
+# AppConfig stays mutable because main.py flips dry_run / paper on it
+# right after load based on CLI args; migrating that to `replace()` is
+# a heavier refactor deferred post go-live.
+@dataclass(frozen=True)
 class CityConfig:
     name: str
     icao: str
@@ -19,14 +23,24 @@ class CityConfig:
     tz: str = "America/New_York"  # IANA timezone for local date grouping
 
 
-@dataclass
+@dataclass(frozen=True)
 class StrategyConfig:
     no_distance_threshold_f: int = 8
     min_no_ev: float = 0.03
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
     max_total_exposure_usd: float = 1000.0
-    daily_loss_limit_usd: float = 50.0
+    # Phase A (2026-04-26): B-only after C / D' retired.  Held at 75
+    # rather than rolled back to 50: B alone runs kelly=0.5 forecast
+    # entries plus full-Kelly locked wins across 30 cities, and an
+    # adverse weather streak (multiple cities flipping against held NO
+    # positions in the same UTC day) can plausibly accumulate ~$50 of
+    # MTM/realized drawdown.  A tighter cap risks halting trading
+    # prematurely on noise — the $75 ceiling is 37.5% of the $200 live
+    # capital, deep enough that hitting it actually means something is
+    # wrong.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md
+    # for fee-floor reasoning.
+    daily_loss_limit_usd: float = 75.0
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
@@ -47,7 +61,11 @@ class StrategyConfig:
     # letting the position bleed to near-zero before the EV gates finally
     # fire.  Chicago 80-81 TRIMs at 95% loss on 2026-04-15 were this pattern.
     # Set to a value > 1.0 to disable.
-    trim_price_stop_ratio: float = 0.25
+    # FIX-02 (2026-04-24): tightened from 0.25 → 0.20 now that TRIM runs
+    # every 15 min (not just 60).  Entry=0.645→exit=0.180 (Chicago 04-15,
+    # 72% loss) could have been caught an hour earlier with 0.20 at a
+    # 15-min cadence; keeping 0.25 wastes the latency gain.
+    trim_price_stop_ratio: float = 0.20
     # Bug #1 fix (2026-04-18): reject entries where the model's win_prob
     # disagrees with the market-implied NO price by more than this many
     # points.  Applies to both standard-NO and locked-win branches via
@@ -78,7 +96,10 @@ class StrategyConfig:
     # Default 0.95 chosen empirically (production data 2026-04-17 — see
     # docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md).  Tuneable via
     # config without redeploy if future market microstructure shifts.
-    locked_win_max_price: float = 0.95
+    # FIX-17 (2026-04-24): dropped 0.95 → 0.90.  Post-rollback production
+    # data still showed EV ≈ 0 at 0.93+; the 0.90 cap gives ~3¢ of slippage
+    # slack before a 1-tick adverse fill turns the entry negative.
+    locked_win_max_price: float = 0.90
     # Hour (local) after which peak temperature window is considered over
     post_peak_hour: int = 17
     # Minutes without a new high (after post_peak_hour) to confirm daily max is final
@@ -98,78 +119,47 @@ class StrategyConfig:
         "Miami", "San Francisco", "Tampa", "Orlando",
     }))
     thin_liquidity_exposure_ratio: float = 0.5
+    # FIX-17 (2026-04-24): per-variant city filter.  Empty = all cities
+    # allowed (default for B/C).  D' uses this to restrict its narrow
+    # high-EV profile to cities whose historical forecast error is small
+    # enough for the 0.08 EV threshold to actually fire.
+    city_whitelist: frozenset[str] = field(default_factory=frozenset)
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Four strategy variants testing different dimensions.
+    """Strategy B (Locked Aggressor) — sole live variant from 2026-04-26.
 
-    All strategies share:
+    Shared across the bot:
     - Auto-calibrated distance threshold (per-city)
     - Locked-win signals enabled
     - Hybrid exit mode (EV + distance + pre-settlement force)
     - Exit cooldown to prevent BUY→EXIT→BUY churn
     - NO-only signals (no YES, no LADDER)
 
-    A = Conservative Far:  only distant NO, strict price cap, half Kelly
-    B = Locked Aggressor:  same entry as A, but full Kelly on locked wins
-    C = Close Range:       tighter distance (75% confidence), higher EV bar
-    D = Quick Exit:        aggressive risk management, earlier force exit
+    B = Locked Aggressor: half-Kelly forecast entries, full-Kelly on locked
+        wins.  $20/city exposure cap, max 4 open positions per event.
+
+    Historical context: A/C/D' were retired (2026-04-26) when the bot moved
+    to local live trading with $200 capital — running a single, well-tuned
+    variant simplifies sizing math and concentrates capital where it works.
+    DB schema retains the `strategy` column (Y6 trigger still allows
+    A/B/C/D) so historical rows remain queryable for audit.
     """
     return {
-        "A": {
-            # Conservative far-distance: fewest trades, highest safety margin
-            # Uses half-Kelly even on locked wins (vs B's full Kelly)
+        "B": {
             "max_no_price": 0.70,
             "kelly_fraction": 0.5,
-            "locked_win_kelly_fraction": 0.5,
-            "max_locked_win_per_slot_usd": 5.0,
-            "max_positions_per_event": 3,
-            "calibration_confidence": 0.90,
+            "max_positions_per_event": 4,
             "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
-        },
-        "B": {
-            # Locked aggressor: same entry slots as A (same max_no_price / min_no_ev),
-            # but 20% larger forecast-based sizing (kelly 0.6 vs A's 0.5) AND
-            # full-Kelly on locked wins.  This ensures B ≠ A even when zero
-            # locked-win signals fire in a window.  See docs/fixes/2026-04-16-strategy-p0-fixes.md#fix-1.
-            "max_no_price": 0.70,
-            "kelly_fraction": 0.6,
-            "max_positions_per_event": 6,
-            "calibration_confidence": 0.90,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
+            "max_exposure_per_city_usd": 20.0,
             "locked_win_kelly_fraction": 1.0,
             "max_locked_win_per_slot_usd": 10.0,
-        },
-        "C": {
-            # Close range: enters closer slots (75% confidence), demands higher EV
-            "max_no_price": 0.75,
-            "kelly_fraction": 0.3,
-            "max_positions_per_event": 4,
-            "calibration_confidence": 0.75,
-            "min_no_ev": 0.06,
-            "max_position_per_slot_usd": 3.0,
-            "max_exposure_per_city_usd": 25.0,
-        },
-        "D": {
-            # Quick exit: most aggressive risk management
-            "max_no_price": 0.65,
-            "kelly_fraction": 0.5,
-            "max_positions_per_event": 4,
-            "calibration_confidence": 0.90,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 30.0,
-            "force_exit_hours": 2.0,
-            "exit_cooldown_hours": 2.0,
         },
     }
 
 
-@dataclass
+@dataclass(frozen=True)
 class SchedulingConfig:
     discovery_interval_minutes: int = 15
     rebalance_interval_minutes: int = 60

@@ -36,7 +36,12 @@ class PortfolioTracker:
         entry_ev: float | None = None,
         entry_win_prob: float | None = None,
     ) -> int:
-        """Record a filled order as a new position."""
+        """Record a filled order as a new position.
+
+        This path is kept for non-atomic callers (e.g. paper mode migrations).
+        The executor uses `record_fill_atomic` to keep the orders/positions
+        linkage consistent with the pending-order row. See FIX-03.
+        """
         shares = size_usd / price if price > 0 else 0
         position_id = await self._store.insert_position(
             event_id=event_id,
@@ -56,6 +61,52 @@ class PortfolioTracker:
         logger.info(
             "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d]",
             strategy, side, token_type.value, slot_label, price, size_usd, shares, position_id,
+        )
+        return position_id
+
+    async def record_fill_atomic(
+        self,
+        idempotency_key: str,
+        order_id: str,
+        event_id: str,
+        token_id: str,
+        token_type: TokenType,
+        city: str,
+        slot_label: str,
+        side: str,
+        price: float,
+        size_usd: float,
+        strategy: str = "B",
+        buy_reason: str = "",
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
+    ) -> int:
+        """Atomically promote a pending order to filled + insert the position.
+
+        Raises if no pending order matches the idempotency_key.
+        """
+        shares = size_usd / price if price > 0 else 0
+        position_id = await self._store.finalize_buy_order(
+            idempotency_key=idempotency_key,
+            order_id=order_id,
+            event_id=event_id,
+            token_id=token_id,
+            token_type=token_type.value,
+            city=city,
+            slot_label=slot_label,
+            side=side,
+            entry_price=price,
+            size_usd=size_usd,
+            shares=shares,
+            strategy=strategy,
+            buy_reason=buy_reason,
+            entry_ev=entry_ev,
+            entry_win_prob=entry_win_prob,
+        )
+        logger.info(
+            "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d src=%s]",
+            strategy, side, token_type.value, slot_label, price, size_usd, shares,
+            position_id, order_id,
         )
         return position_id
 
@@ -178,9 +229,34 @@ class PortfolioTracker:
         """Delegate to store.insert_decision_log()."""
         await self._store.insert_decision_log(**kwargs)
 
+    # ── FIX-08: persistent exit-cooldown API ──────────────────────────
+
+    async def record_exit_cooldown(
+        self, token_id: str, exit_time: date | None = None,
+        cooldown_hours: float = 4.0,
+    ) -> None:
+        """Record a BUY-after-exit cooldown for a token.  Both the DB
+        and any caller-maintained RAM cache should be updated in lockstep.
+        """
+        from datetime import datetime, timezone
+        t = exit_time or datetime.now(timezone.utc)
+        await self._store.record_exit_cooldown(token_id, t, cooldown_hours)
+
+    async def load_active_exit_cooldowns(self) -> dict[str, date]:
+        """Return a dict of {token_id: exit_time} for all cooldowns whose
+        window hasn't yet elapsed.  Expired rows are deleted as a side
+        effect so the DB doesn't balloon forever."""
+        rows = await self._store.get_active_exit_cooldowns()
+        return {r["token_id"]: r["exit_time"] for r in rows}
+
     async def get_daily_pnl(self, day: date | None = None) -> float | None:
-        """Get the realized P&L for a given day."""
-        d = (day or date.today()).isoformat()
+        """Get the realized P&L for a given day.
+
+        FIX-M1: UTC default so server-local clock drift doesn't cross the
+        circuit-breaker into a new bucket one hour early.
+        """
+        from datetime import datetime, timezone
+        d = (day or datetime.now(timezone.utc).date()).isoformat()
         return await self._store.get_daily_pnl(d)
 
     async def compute_unrealized_pnl(
@@ -227,7 +303,10 @@ class PortfolioTracker:
         gamma_prices: dict[str, float] | None = None,
     ) -> None:
         """Take a daily P&L snapshot with unrealized PnL."""
-        today = date.today().isoformat()
+        # FIX-M1: UTC snapshot day matches the daily_pnl PK the rest of
+        # the system keys off of.
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
         exposure = await self._store.get_total_exposure()
         unrealized = await self.compute_unrealized_pnl(clob_client, gamma_prices)
 

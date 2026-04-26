@@ -339,26 +339,35 @@ class TestExecutorReasonThreading:
         from src.execution.executor import Executor
         mock_clob = MagicMock()
         mock_portfolio = MagicMock()
-        mock_portfolio.record_fill = AsyncMock(return_value=1)
+        # FIX-03: BUY now goes through record_fill_atomic; the executor also
+        # pokes portfolio.store for the pending-order bookkeeping.
+        mock_portfolio.record_fill_atomic = AsyncMock(return_value=1)
+        mock_portfolio.record_fill = AsyncMock(return_value=1)  # legacy path
         mock_portfolio.close_positions_for_token = AsyncMock(return_value=1)
         # Executor now looks up held shares for SELL orders (EX-01 fix)
         mock_portfolio.get_total_shares_for_token = AsyncMock(return_value=5.0)
+        mock_portfolio.store = MagicMock()
+        mock_portfolio.store.insert_pending_order = AsyncMock(return_value=1)
+        mock_portfolio.store.mark_order_failed = AsyncMock()
+        mock_portfolio.store.finalize_sell_order = AsyncMock()
         mock_clob.place_limit_order = AsyncMock(return_value=MagicMock(success=True, order_id="ord_1"))
         executor = Executor(mock_clob, mock_portfolio)
         return executor, mock_portfolio
 
     @pytest.mark.asyncio
     async def test_buy_passes_reason_to_record_fill(self):
-        """Executor passes signal.reason as buy_reason to record_fill."""
+        """Executor passes signal.reason as buy_reason to record_fill_atomic (FIX-03)."""
         executor, portfolio = self._make_executor()
         sig = _make_signal(side=Side.BUY, reason="[A] NO: dist=12°F, EV=0.100")
 
         await executor.execute_signals([sig])
 
-        portfolio.record_fill.assert_called_once()
-        call_kwargs = portfolio.record_fill.call_args
-        assert call_kwargs[1].get("buy_reason") == "[A] NO: dist=12°F, EV=0.100" or \
-               call_kwargs.kwargs.get("buy_reason") == "[A] NO: dist=12°F, EV=0.100"
+        portfolio.record_fill_atomic.assert_called_once()
+        call_kwargs = portfolio.record_fill_atomic.call_args
+        assert call_kwargs.kwargs.get("buy_reason") == "[A] NO: dist=12°F, EV=0.100"
+        # FIX-03: the atomic path is keyed off an idempotency_key + order_id.
+        assert call_kwargs.kwargs.get("idempotency_key")
+        assert call_kwargs.kwargs.get("order_id") == "ord_1"
 
     @pytest.mark.asyncio
     async def test_sell_passes_reason_to_close_positions(self):
@@ -381,10 +390,9 @@ class TestExecutorReasonThreading:
 
         await executor.execute_signals([sig])
 
-        portfolio.record_fill.assert_called_once()
-        call_kwargs = portfolio.record_fill.call_args
-        assert call_kwargs[1].get("buy_reason") == "" or \
-               call_kwargs.kwargs.get("buy_reason") == ""
+        portfolio.record_fill_atomic.assert_called_once()
+        call_kwargs = portfolio.record_fill_atomic.call_args
+        assert call_kwargs.kwargs.get("buy_reason") == ""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -539,7 +547,10 @@ class TestReasonFailureBranches:
         from src.execution.executor import Executor
         mock_clob = MagicMock()
         mock_portfolio = MagicMock()
-        mock_portfolio.record_fill = AsyncMock(return_value=1)
+        mock_portfolio.record_fill_atomic = AsyncMock(return_value=1)
+        mock_portfolio.store = MagicMock()
+        mock_portfolio.store.insert_pending_order = AsyncMock(return_value=1)
+        mock_portfolio.store.mark_order_failed = AsyncMock()
         mock_clob.place_limit_order = AsyncMock(return_value=MagicMock(success=True, order_id="ord_1"))
         executor = Executor(mock_clob, mock_portfolio)
 
@@ -550,7 +561,7 @@ class TestReasonFailureBranches:
 
         await executor.execute_signals([sig])
         # getattr fallback should produce ''
-        mock_portfolio.record_fill.assert_called_once()
+        mock_portfolio.record_fill_atomic.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sell_signal_with_no_matching_positions(self):
@@ -577,7 +588,10 @@ class TestReasonFailureBranches:
         from src.execution.executor import Executor
         mock_clob = MagicMock()
         mock_portfolio = MagicMock()
-        mock_portfolio.record_fill = AsyncMock(return_value=1)
+        mock_portfolio.record_fill_atomic = AsyncMock(return_value=1)
+        mock_portfolio.store = MagicMock()
+        mock_portfolio.store.insert_pending_order = AsyncMock(return_value=1)
+        mock_portfolio.store.mark_order_failed = AsyncMock()
         mock_clob.place_limit_order = AsyncMock(
             return_value=MagicMock(success=False, message="Insufficient balance")
         )
@@ -587,7 +601,9 @@ class TestReasonFailureBranches:
         await executor.execute_signals([sig])
 
         # record_fill should NOT be called when order fails
-        mock_portfolio.record_fill.assert_not_called()
+        mock_portfolio.record_fill_atomic.assert_not_called()
+        # But the failure path must have marked the pending order failed.
+        mock_portfolio.store.mark_order_failed.assert_called_once()
 
 
 # ──────────────────────────────────────────────────────────────────────

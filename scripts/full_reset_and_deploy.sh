@@ -9,9 +9,22 @@
 
 set -e
 
-BOT_DIR="/opt/weather-bot"
+# FIX-07: default to the active deploy path but allow override. The old
+# /opt/weather-bot dir still exists on the VPS as a staging area — accidentally
+# blasting it would be catastrophic, so require the compose file to be present.
+BOT_DIR="${BOT_DIR:-/opt/weather-bot-new}"
 DB_PATH="$BOT_DIR/data/bot.db"
 BACKUP_DIR="$BOT_DIR/data/backups"
+
+[ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
+
+# FIX-15: lock down .env to rw------- so the private key and API creds
+# aren't world-readable.  Noop when .env doesn't exist (fresh install
+# will place it later).
+if [ -f "$BOT_DIR/.env" ]; then
+    chmod 600 "$BOT_DIR/.env"
+    echo "  chmod 600 applied to $BOT_DIR/.env"
+fi
 
 cd "$BOT_DIR"
 

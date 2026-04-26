@@ -5,20 +5,18 @@ strategy:
   min_no_ev: 0.03
   # Maximum USD per single slot position
   max_position_per_slot_usd: 5.0
-  # Maximum USD exposure per city — enforced independently per strategy variant.
-  # With 4 active strategies (A/B/C/D) each capped at this value, the real
-  # cross-strategy total per city can reach up to 4× this number.
-  # Each strategy variant overrides this with a tighter per-strategy value
-  # (A/B/D: $30, C: $25) — see get_strategy_variants() in src/config.py.
+  # Maximum USD exposure per city — used as the StrategyConfig default.
+  # Strategy B overrides this with $20 per get_strategy_variants() in
+  # src/config.py.  Thin-liquidity cities (Miami / SF / Tampa / Orlando)
+  # get the cap × thin_liquidity_exposure_ratio (default 0.5).
   max_exposure_per_city_usd: 50.0
-  # Maximum total USD exposure across all cities — enforced PER STRATEGY,
-  # not across all strategies combined.  Four strategies can each hold up to
-  # this amount, so real-world total exposure is up to 4× this figure.
-  # In practice Kelly sizing keeps per-position sizes to $1–5, so actual
-  # combined exposure stays well below 4× even with many open positions.
+  # Maximum total USD exposure across all cities — single live variant
+  # (B) so this is the literal portfolio ceiling.  Kelly sizing keeps
+  # per-position sizes to $1–5 so the real-world total trends well below.
   max_total_exposure_usd: 1000.0
-  # Daily loss circuit breaker (USD)
-  daily_loss_limit_usd: 50.0
+  # Daily loss circuit breaker (USD).  Sized for $200 live capital — a
+  # 37.5% drawdown trips the breaker and pauses entries until UTC rollover.
+  daily_loss_limit_usd: 75.0
   # Kelly fraction multiplier (0.5 = half Kelly)
   kelly_fraction: 0.5
   # Minimum market volume (USD) to consider
@@ -34,10 +32,10 @@ strategy:
   # Only trade markets settling within N days (远期预报不准)
   max_days_ahead: 2
   # Maximum number of open positions per event (across all slots).
-  # With k×std dynamic threshold, accurate cities (15 cities at 3°F floor) now see
-  # 3-4× more qualifying slots. The per-event cap remains the binding constraint and
-  # is kept at 4 — EV gate (min_no_ev 0.05-0.06 per strategy variant) provides the
-  # primary quality filter; per-event cap prevents over-concentration in one market.
+  # With k×std dynamic threshold, accurate cities (15 cities at 3°F floor) see
+  # 3-4× more qualifying slots; the per-event cap is the binding constraint.
+  # EV gate (min_no_ev 0.05) provides the primary quality filter; per-event
+  # cap prevents over-concentration in one market.
   max_positions_per_event: 4
   # Auto-calibrate distance threshold using k×std dynamic formula (calibrator.py).
   # Accurate cities (|mean_bias|<1.5°F AND std<2.5°F): threshold = 1.2 × std → floor 3°F
@@ -53,9 +51,10 @@ strategy:
   locked_win_kelly_fraction: 1.0
   max_locked_win_per_slot_usd: 10.0
   # Hard NO-price ceiling for locked-win entries (partial Fix 2 rollback,
-  # 2026-04-17).  Above this, paper→live slippage of one tick (0.001) wipes
-  # out the residual EV.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
-  locked_win_max_price: 0.95
+  # 2026-04-17; tightened 2026-04-24 in FIX-17).  Above this, paper→live
+  # slippage of one tick (0.001) wipes out the residual EV.  See
+  # docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md.
+  locked_win_max_price: 0.90
   # Hybrid exit: force-sell within N hours of settlement when distance is close
   force_exit_hours: 1.0
   # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
