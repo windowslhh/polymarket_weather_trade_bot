@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -281,3 +282,68 @@ async def get_forecasts_batch(
         else:
             forecasts[city.name] = result
     return forecasts
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FIX-2P-3: city-local forecast indexing
+# ──────────────────────────────────────────────────────────────────────
+
+
+def city_local_date(city: CityConfig, *, offset_days: int = 0) -> date:
+    """Return the city's local calendar date (today + offset_days).
+
+    Pre-fix the rebalancer indexed forecasts by UTC today; cities west of
+    UTC fell out of sync during the 00:00–08:00 UTC window because their
+    local "today" was still UTC-yesterday.  Anchoring per city closes
+    the race — discovery already builds ``event.market_date`` in
+    city-local time, so the lookup
+    ``_cached_forecasts_by_date[market_date][city]`` lines up cleanly.
+    """
+    try:
+        tz = ZoneInfo(city.tz) if city.tz else timezone.utc
+    except Exception:
+        tz = timezone.utc
+    return (datetime.now(tz) + timedelta(days=offset_days)).date()
+
+
+async def get_forecasts_for_city_local_window(
+    cities: list[CityConfig],
+    *,
+    days: int = 3,
+) -> dict[date, dict[str, Forecast]]:
+    """Fetch forecasts across each city's *own* local today/D+1/.../D+(days-1).
+
+    Returns a date → {city: Forecast} cache.  Cities in different time
+    zones contribute to different sets of date keys, which is exactly
+    what we want — the lookup site keys off ``event.market_date`` (which
+    is also city-local), so a NYC event with ``market_date=2026-04-25``
+    finds its forecast under ``cache[2026-04-25]["New York"]`` even when
+    the bot's UTC clock has already rolled to 2026-04-26.
+
+    Failures for individual (city, date) pairs are logged and skipped;
+    the returned dict simply omits them so callers can still trade for
+    the cities that succeeded.
+    """
+    import asyncio
+
+    if not cities or days <= 0:
+        return {}
+
+    plan: list[tuple[CityConfig, date]] = []
+    for city in cities:
+        for i in range(days):
+            plan.append((city, city_local_date(city, offset_days=i)))
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        tasks = [get_forecast(city, target, client) for city, target in plan]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    out: dict[date, dict[str, Forecast]] = {}
+    for (city, target), result in zip(plan, results):
+        if isinstance(result, Exception):
+            logger.warning(
+                "Forecast failed for %s on %s: %s", city.name, target, result,
+            )
+            continue
+        out.setdefault(target, {})[city.name] = result
+    return out
