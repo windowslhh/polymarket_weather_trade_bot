@@ -368,14 +368,19 @@ class TestPortfolioIntegration:
 
         rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker)
 
+        # Y1 + FIX-2P-3: get_forecasts_batch is no longer imported into
+        # rebalancer; the city-local window helper replaced it.  Patch the
+        # new name and adapt the return shape to dict[date, dict[city, Forecast]].
         with (
             patch("src.strategy.rebalancer.discover_weather_markets", new_callable=AsyncMock) as mock_discover,
-            patch("src.strategy.rebalancer.get_forecasts_batch", new_callable=AsyncMock) as mock_forecasts,
+            patch("src.strategy.rebalancer.get_forecasts_for_city_local_window", new_callable=AsyncMock) as mock_forecasts,
             patch("src.strategy.rebalancer.fetch_settlement_temp", new_callable=AsyncMock) as mock_settle,
             patch("src.strategy.rebalancer.validate_station_config", return_value=[]),
         ):
             mock_discover.return_value = events
-            mock_forecasts.return_value = forecasts
+            from datetime import datetime as _dt, timezone as _tz
+            today = _dt.now(_tz.utc).date()
+            mock_forecasts.return_value = {today: dict(forecasts)}
             mock_settle.return_value = None  # No observation data (just forecast-based trading)
 
             signals = await rebalancer.run()
