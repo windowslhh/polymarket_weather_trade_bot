@@ -192,6 +192,36 @@ class Rebalancer:
                 token_id, strategy,
             )
 
+    async def _check_circuit_breaker(self) -> tuple[bool, float | None]:
+        """C-6 (2026-04-26): shared daily-loss circuit-breaker check.
+
+        Returns ``(tripped, daily_pnl)``:
+          - ``tripped=True`` when ``daily_pnl < -daily_loss_limit_usd``
+          - ``daily_pnl`` is the current UTC-day realized PnL, or None
+            if the lookup raised (treated as not-tripped so the caller
+            can keep going — read failures must not silently halt the bot)
+
+        Pre-fix the same logic was inlined in two places (full rebalance
+        cycle line 1005-1012, position-check line 553-575) with subtly
+        different exception handling and slightly different log strings.
+        Centralising means the circuit-breaker semantics live in one
+        place; call sites decide what to DO on a trip (alerter call,
+        flag flip, early return) but the trip CONDITION is uniform.
+        """
+        try:
+            daily_pnl = await self._portfolio.get_daily_pnl(
+                datetime.now(timezone.utc).date(),
+            )
+        except Exception:
+            logger.exception(
+                "Circuit breaker: daily_pnl read failed; treating as not-tripped"
+            )
+            return False, None
+        limit = self._config.strategy.daily_loss_limit_usd
+        if daily_pnl is not None and daily_pnl < -limit:
+            return True, daily_pnl
+        return False, daily_pnl
+
     def _forecast_for_event(self, event: WeatherMarketEvent):
         """FIX-01: look up the forecast whose forecast_date matches the event's
         market_date.  Falls back to None (caller must skip the event) rather
@@ -553,26 +583,19 @@ class Rebalancer:
         # FIX-10: once the daily loss limit has fired, the full rebalance
         # stops generating BUYs — but the 15-min position_check used to
         # keep issuing locked-win BUYs because it never consulted daily_pnl.
-        # That could deepen a bad day's loss by 15 min at a time.  Now we
-        # check the limit up front and flip a flag; TRIM / EXIT / settlement
-        # still run, because closing out is ALWAYS allowed.
-        _cb_block_buys = False
-        try:
-            _daily_pnl = await self._portfolio.get_daily_pnl(
-                datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
+        # That could deepen a bad day's loss by 15 min at a time.
+        # C-6: shared `_check_circuit_breaker` helper centralises the
+        # trip-condition logic; here we just react: flip a flag so BUYs
+        # are suppressed below.  TRIM / EXIT / settlement still run,
+        # because closing out is ALWAYS allowed.
+        tripped, _daily_pnl = await self._check_circuit_breaker()
+        _cb_block_buys = tripped
+        if tripped:
+            logger.warning(
+                "Position check circuit breaker: daily P&L = $%.2f — blocking new BUYs "
+                "(TRIM/EXIT/settlement continue)",
+                _daily_pnl if _daily_pnl is not None else 0.0,
             )
-            if (
-                _daily_pnl is not None
-                and _daily_pnl < -self._config.strategy.daily_loss_limit_usd
-            ):
-                _cb_block_buys = True
-                logger.warning(
-                    "Position check circuit breaker: daily P&L = $%.2f — blocking new BUYs "
-                    "(TRIM/EXIT/settlement continue)",
-                    _daily_pnl,
-                )
-        except Exception:
-            logger.exception("Position check: circuit-breaker check failed; continuing")
 
         # FIX-11: kill switch also applies to the 15-min cycle — same rule
         # (no new BUYs, but TRIM/EXIT continue) so paused state is honoured
@@ -1002,11 +1025,11 @@ class Rebalancer:
         # 0. Settlement check (also runs independently every 15 min)
         await self.run_settlement_only()
 
-        # Check circuit breaker
-        daily_pnl = await self._portfolio.get_daily_pnl(
-            datetime.now(timezone.utc).date(),  # FIX-M1: UTC day
-        )
-        if daily_pnl is not None and daily_pnl < -self._config.strategy.daily_loss_limit_usd:
+        # C-6: shared circuit-breaker helper.  In the full-rebalance
+        # path we additionally fire the alerter and bail out for the
+        # whole cycle (vs position_check which only blocks BUYs).
+        tripped, daily_pnl = await self._check_circuit_breaker()
+        if tripped:
             logger.warning("Circuit breaker triggered: daily P&L = $%.2f", daily_pnl)
             await self._alerter.circuit_breaker(daily_pnl)
             return []
