@@ -114,42 +114,111 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             total_pnl = 0.0
             settled_count = 0
 
-            for pos in positions:
-                strat = pos.get("strategy", "B")
-                # Skip strategies already settled in a prior run — their P&L was
-                # counted then; including them again would double-count realized P&L.
-                if (event_id, strat) in settled_pairs:
-                    continue
-                pnl = _compute_position_pnl(pos, settled_prices, token_prices)
-                exit_price = _settlement_exit_price(pos, settled_prices, token_prices)
-                strategy_pnl[strat] += pnl
-                strategy_count[strat] += 1
-                total_pnl += pnl
-                settled_count += 1
-
-                await store.db.execute(
-                    """UPDATE positions SET status = 'settled', closed_at = datetime('now'),
-                       exit_price = ?, realized_pnl = ? WHERE id = ?""",
-                    (exit_price, pnl, pos["id"]),
-                )
-                logger.info(
-                    "  Position %d [%s]: %s %s %s → P&L=$%.2f",
-                    pos["id"], strat, pos["side"], pos["token_type"],
-                    pos["slot_label"][:30], pnl,
-                )
-
-            await store.db.commit()
-
-            # Insert one settlement record per strategy (for per-strategy P&L tracking)
-            for strat, pnl in strategy_pnl.items():
-                await store.insert_settlement(event_id, city, winning_slot, pnl, strategy=strat)
-                logger.info("  Strategy %s: %d positions, P&L=$%.2f", strat, strategy_count[strat], pnl)
-
-            # R-02 fix: use UTC date instead of server-local date.today()
-            # In Docker the server runs UTC; for US settlements this avoids
-            # recording P&L under tomorrow's date during UTC midnight crossover.
+            # BUG-4: all writes for one event resolution land in a single
+            # transaction.  Pre-fix the order was:
+            #   (1) UPDATE positions ... + commit
+            #   (2) INSERT settlements (per strategy, each with own commit)
+            #   (3) UPDATE daily_pnl + commit
+            # A crash between (1) and (2) left positions marked settled
+            # but no audit row in `settlements` and no roll-up entry in
+            # daily_pnl — and the next cycle would skip the now-settled
+            # rows so the gap was permanent.  By batching the writes and
+            # committing once at the end, a mid-flight crash rolls back
+            # cleanly and the next 15-min cycle can replay the full
+            # settlement.
+            #
+            # Implementation: drive every write through ``store.db.execute``
+            # (no nested commits) and call ``store.db.commit()`` once when
+            # all three writes for THIS event_id have queued successfully.
+            # Per-strategy settlement INSERT uses INSERT OR IGNORE on the
+            # idx_settlements_unique constraint so a partial replay is
+            # idempotent.  daily_pnl uses INSERT … ON CONFLICT DO UPDATE
+            # for the same reason.  ``utc_date_str`` and ``exposure`` are
+            # captured once outside the loop so the values are consistent
+            # across the writes.
             utc_date_str = datetime.now(timezone.utc).date().isoformat()
-            await _update_realized_pnl(store, utc_date_str, total_pnl)
+
+            try:
+                # get_total_exposure inside the try so a transient SELECT
+                # failure here doesn't crash the whole settlement scan.
+                exposure = await store.get_total_exposure()
+
+                for pos in positions:
+                    strat = pos.get("strategy", "B")
+                    # Skip strategies already settled in a prior run — their
+                    # P&L was counted then; including them again would
+                    # double-count realized P&L.
+                    if (event_id, strat) in settled_pairs:
+                        continue
+                    pnl = _compute_position_pnl(pos, settled_prices, token_prices)
+                    exit_price = _settlement_exit_price(
+                        pos, settled_prices, token_prices,
+                    )
+                    strategy_pnl[strat] += pnl
+                    strategy_count[strat] += 1
+                    total_pnl += pnl
+                    settled_count += 1
+
+                    await store.db.execute(
+                        """UPDATE positions SET status = 'settled',
+                                                 closed_at = datetime('now'),
+                                                 exit_price = ?,
+                                                 realized_pnl = ?
+                           WHERE id = ?""",
+                        (exit_price, pnl, pos["id"]),
+                    )
+                    logger.info(
+                        "  Position %d [%s]: %s %s %s → P&L=$%.2f",
+                        pos["id"], strat, pos["side"], pos["token_type"],
+                        pos["slot_label"][:30], pnl,
+                    )
+
+                # Insert one settlement record per strategy (per-strategy
+                # P&L tracking).  Inline INSERT OR IGNORE so we keep the
+                # transaction open — the existing store.insert_settlement
+                # would commit + end the transaction.
+                for strat, pnl in strategy_pnl.items():
+                    await store.db.execute(
+                        """INSERT OR IGNORE INTO settlements
+                              (event_id, city, strategy, winning_outcome, pnl)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (event_id, city, strat, winning_slot, pnl),
+                    )
+                    logger.info(
+                        "  Strategy %s: %d positions, P&L=$%.2f",
+                        strat, strategy_count[strat], pnl,
+                    )
+
+                # R-02 fix: use UTC date instead of server-local date.today().
+                # Inline daily_pnl write (BUG-4 atomicity); identical SQL
+                # to _update_realized_pnl but no nested commit so the
+                # whole event lands as a single transaction.
+                await store.db.execute(
+                    """INSERT INTO daily_pnl
+                          (date, realized_pnl, unrealized_pnl, total_exposure, updated_at)
+                       VALUES (?, ?, 0, ?, datetime('now'))
+                       ON CONFLICT(date) DO UPDATE SET
+                           realized_pnl  = realized_pnl + ?,
+                           total_exposure = ?,
+                           updated_at    = datetime('now')""",
+                    (utc_date_str, total_pnl, exposure, total_pnl, exposure),
+                )
+
+                await store.db.commit()
+            except Exception:
+                # Roll back the whole event on any write failure so we
+                # never leave positions/settlements/daily_pnl out of sync.
+                # The next 15-min cycle will retry.
+                try:
+                    await store.db.rollback()
+                except Exception:
+                    pass
+                logger.exception(
+                    "Settlement DB write failed for event %s — rolled back",
+                    event_id,
+                )
+                n_skipped_error += 1
+                continue
 
             results.append(SettlementResult(
                 event_id=event_id, city=city, winning_slot=winning_slot,
