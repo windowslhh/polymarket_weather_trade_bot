@@ -36,6 +36,11 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
     """
     open_positions = await store.get_open_positions()
     if not open_positions:
+        # BUG-1 heartbeat: log even when there's nothing to do so operators
+        # can confirm the settlement job is alive (Apr 26 audit found the
+        # job had been silently no-op for 25h+ because every internal
+        # exception was swallowed at debug level).
+        logger.info("Settlement check: scanned 0 events, settled 0, skipped 0 (no open positions)")
         return []
 
     # Group positions by event_id
@@ -49,6 +54,11 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
     settled_event_ids = {s["event_id"] for s in existing_settlements}
 
     results: list[SettlementResult] = []
+    # BUG-1 heartbeat counters
+    n_total = len(event_positions)
+    n_skipped_unclosed = 0  # Gamma reports closed=False (waiting next cycle)
+    n_skipped_already = 0   # already-settled idempotent skip
+    n_skipped_error = 0     # fetch error / invalid response
 
     async with httpx.AsyncClient(timeout=15) as client:
         for event_id, positions in event_positions.items():
@@ -65,11 +75,13 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
                 # Skip if ALL strategies for this event already settled
                 unsettled_strategies = {pos.get("strategy", "B") for pos in positions if pos["status"] == "open"} - {s for eid, s in settled_pairs if eid == event_id}
                 if not unsettled_strategies:
+                    n_skipped_already += 1
                     continue
 
             # Double-check: skip if no open positions left (already settled by another run)
             open_count = sum(1 for p in positions if p["status"] == "open")
             if open_count == 0:
+                n_skipped_already += 1
                 continue
 
             city = positions[0]["city"]
@@ -77,10 +89,18 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             try:
                 outcome = await _fetch_settlement_outcome(client, event_id)
             except Exception:
-                logger.debug("Could not fetch settlement for event %s", event_id)
+                # BUG-1: was logger.debug — invisible in normal log levels.
+                # Promote to logger.exception so the stack reaches operators.
+                logger.exception("Could not fetch settlement for event %s", event_id)
+                n_skipped_error += 1
                 continue
 
             if outcome is None:
+                # outcome is None for two distinct reasons (404, closed=False,
+                # JSON parse fail).  _fetch_settlement_outcome now logs the
+                # *cause* itself (BUG-1); the count here just tracks
+                # "couldn't settle this cycle for any reason".
+                n_skipped_unclosed += 1
                 continue
 
             winning_slot = outcome.winning_slot
@@ -143,6 +163,18 @@ async def check_settlements(store: Store) -> list[SettlementResult]:
             len(results), sum(r.positions_settled for r in results), total,
         )
 
+    # BUG-1 heartbeat: emit a one-line scan summary every cycle, even when
+    # nothing settled.  Pre-fix the only INFO-level signal was the conditional
+    # "Settled N events" above, which never fires when Gamma hasn't closed
+    # anything — operators couldn't distinguish "job runs, no work" from
+    # "job died silently".
+    logger.info(
+        "Settlement check: scanned %d events, settled %d, "
+        "skipped_unclosed=%d skipped_already=%d skipped_error=%d",
+        n_total, len(results),
+        n_skipped_unclosed, n_skipped_already, n_skipped_error,
+    )
+
     return results
 
 
@@ -165,11 +197,19 @@ async def _fetch_settlement_outcome(
     try:
         resp = await client.get(f"{GAMMA_API_URL}/events/{event_id}")
         if resp.status_code == 404:
+            # BUG-1: was silent.  A 404 on an event we still hold a
+            # position in usually means the event was archived /
+            # deprecated / wrong-id; surface it so the watchdog can
+            # eventually flag the stuck position.
+            logger.warning("Event %s returned 404 from Gamma", event_id)
             return None
         resp.raise_for_status()
         event_data = resp.json()
     except Exception:
-        logger.debug("Gamma API error for event %s", event_id)
+        # BUG-1: was logger.debug — invisible at default INFO level.
+        # Use exception() so the stack reaches the operator (network
+        # blip vs JSON parse fail vs malformed schema all matter).
+        logger.exception("Gamma fetch failed for event %s", event_id)
         return None
 
     # Market is settled if closed=true OR if all outcome prices are 0/1
