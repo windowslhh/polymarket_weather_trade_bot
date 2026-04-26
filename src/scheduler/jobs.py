@@ -24,11 +24,18 @@ logger = logging.getLogger(__name__)
 # window bounded without competing with the 60-min rebalance.
 RECONCILER_INTERVAL_MINUTES = 30
 
-# FIX-06: every job gets coalesce + a generous misfire_grace_time.  Without
-# these, if a job is late by any amount (scheduler paused, event loop backed
-# up), APScheduler silently drops it — we've lost rebalance cycles in prod
-# because of this.  Coalesce collapses queued late fires into one so we don't
-# play catch-up either.
+# FIX-06 / F-1 (verified 2026-04-26): every add_job() call below
+# explicitly threads coalesce + misfire_grace_time.  Without these,
+# if a job is late by any amount (scheduler paused, event loop backed
+# up), APScheduler silently drops it — we've lost rebalance cycles in
+# prod because of this.  Coalesce collapses queued late fires into one
+# so we don't play catch-up either.
+#
+# F-1 audit: confirmed all six jobs (rebalance, settlement_check,
+# metar_refresh, rebalance_startup, prune_job, reconciler_periodic)
+# carry both kwargs.  Pinned by tests/test_scheduler_health.py::
+# test_all_jobs_have_coalesce_and_grace which iterates every job
+# returned by `scheduler.get_jobs()`.
 JOB_COALESCE = True
 JOB_MISFIRE_GRACE_S = 300
 
