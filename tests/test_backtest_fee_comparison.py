@@ -43,8 +43,15 @@ def test_fee_comparison_script_emits_expected_sections(monkeypatch, tmp_path):
         "## Per-variant summary — post-fix fee",
         "## Delta (post − pre)",
         "## LOCKED_WIN — analytical fee impact (per share)",
+        "## Reality check vs 25h paper (Y5, 2026-04-26)",
         "## What to do next",
         "FIX-2P-12",
+        # Y5 explicit warning against tuning from this report
+        "Do NOT use these",
+        # Y5 reality-check rows (sample one each)
+        "Miami",
+        "Chicago",
+        "Denver",
     ]:
         assert anchor in body, f"missing anchor: {anchor}"
 

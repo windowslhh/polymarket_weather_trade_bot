@@ -173,6 +173,52 @@ def _run_variant_under_fee(
     return out
 
 
+# Y5 reality-check snapshot.  Captured 2026-04-26 from VPS bot.db
+# during the read-only investigation (id, strategy, city, entry, size_usd).
+# Hard-coded so report regeneration preserves the section without
+# needing live DB access from this script.
+_PAPER_REALITY_25H_SNAPSHOT = [
+    # (id, strategy, city, entry_price, size_usd)
+    (3,  "B", "Miami",   0.660, 2.04),
+    (5,  "B", "Chicago", 0.595, 2.44),
+    (10, "B", "Chicago", 0.495, 2.45),
+    (12, "B", "Miami",   0.655, 2.22),
+    (14, "B", "Chicago", 0.515, 2.45),
+    (4,  "C", "Miami",   0.660, 0.73),
+    (6,  "C", "Chicago", 0.595, 0.88),
+    (7,  "C", "Miami",   0.740, 0.87),
+    (11, "C", "Chicago", 0.495, 0.88),
+    (13, "C", "Miami",   0.655, 0.80),
+    (15, "C", "Chicago", 0.515, 0.88),
+    (16, "C", "Denver",  0.715, 0.76),
+]
+
+
+def _reality_check_table() -> str:
+    """Y5: per-position fee recomputation table for the 25h paper snapshot."""
+    rows = [
+        "| Pos | Var | City    | Entry  | Size$ | Old fee$ | New fee$ | Δ$    |",
+        "|----:|:----|:--------|-------:|------:|---------:|---------:|------:|",
+    ]
+    sum_size = sum_old = sum_new = 0.0
+    for pid, strat, city, p, size in _PAPER_REALITY_25H_SNAPSHOT:
+        old = 0.025 * p * (1 - p) * size
+        new = 0.05 * p * (1 - p) * size
+        sum_size += size
+        sum_old += old
+        sum_new += new
+        rows.append(
+            f"| {pid:3} | {strat}   | {city:<7} | {p:.3f}  | {size:.2f}  | "
+            f"{old:.4f}   | {new:.4f}   | {new - old:+.4f} |"
+        )
+    rows.append(
+        f"| **Σ** | — | **{len(_PAPER_REALITY_25H_SNAPSHOT)} open** | — | "
+        f"**{sum_size:.2f}** | **{sum_old:.3f}** | **{sum_new:.3f}** | "
+        f"**{sum_new - sum_old:+.3f}** |"
+    )
+    return "\n".join(rows)
+
+
 def _locked_win_fee_table(prices: list[float]) -> str:
     """Analytical table of per-share LOCKED_WIN EV under both fee curves."""
     rows = ["| price_no | win_prob | old fee/$ | old EV/$ | new fee/$ | new EV/$ | Δ EV/$ |",
@@ -314,13 +360,44 @@ def main() -> int:
         "right on the gate, so in live trading the new-fee curve will trim "
         "marginally earlier (already covered by FIX-2P-2's test_trim_ev unit).",
         "",
+        "## Reality check vs 25h paper (Y5, 2026-04-26)",
+        "",
+        "The paper bot ran for ~25h on the OLD (incorrect) fee.  Recomputing "
+        "entry fees on the 12 currently-open positions under the corrected 5% "
+        "rate gives a tangible sense of \"how wrong was paper PnL\":",
+        "",
+        _reality_check_table(),
+        "",
+        "Per-cycle entry-fee swing on the active book: **about $0.10**, which "
+        "is invisible inside a $17 exposure.  The paper PnL \"error\" from the "
+        "fee bug on entry side alone is roughly $0.10 per 25h — well below noise.",
+        "",
+        "**However** the recomputation does NOT include:",
+        "- Settlement-side fees on closed positions (settler doesn't surface them in this DB; would need recompute from labels).",
+        "- LOCKED_WIN entries (none in the current open book — this paper run never crossed a slot upper bound by the locked_win margin).",
+        "- Slippage delta when paper assumes mid-market fills but live takes a tick of slippage.",
+        "",
+        "So the 25h paper data tells us:",
+        "- The fee bug, in isolation, did not produce a misleading PnL trend (delta is $0.10 over 25h on a $17 exposure — well below daily noise).",
+        "- BUT if/when LOCKED_WIN starts firing (which the analytical table above shows is where fee bites hardest at high prices), the underestimate would grow disproportionately.  Don't infer anything about LOCKED_WIN sizing from this 25h sample.",
+        "",
         "## What to do next",
         "",
-        "Decision needed (FIX-2P-12, awaiting user):",
+        "⚠️ **This report's per-variant ROI numbers come from synthetic Monte "
+        "Carlo, not from live trading** (10 cities × 365 synthetic days, "
+        "99.5%+ win rates that don't reflect reality).  **Do NOT use these "
+        "tables to tune `min_no_ev` or `locked_win_max_price`.**  The right "
+        "next step:",
         "",
-        "- Whether to lower `locked_win_max_price` further than 0.90 given the new fee surface.",
-        "- Whether to bump `min_no_ev` for any variant whose net ROI flipped negative under the corrected fee.",
-        "- Whether D' (whitelist of LA/Seattle/Denver) is still the right scope or should be re-tuned now that fee headroom is half what we thought.",
+        "1. Redeploy with the post-FIX-2P-2 fee, run paper for 24h (Phase 2 redeploy runbook Part C).",
+        "2. Pull the *real* settled-position PnL distribution from `bot.db` after that window.",
+        "3. Then — and only then — write a config tuning proposal (FIX-2P-12) based on real data.",
+        "",
+        "Decision items deferred to FIX-2P-12 (after real 24h data lands):",
+        "",
+        "- Whether to lower `locked_win_max_price` below 0.90.  The synthetic + analytical evidence here says **0.90 is fine** — LOCKED_WIN per-$ EV is +9.5¢ at the cap.  Real data may disagree.",
+        "- Whether to bump `min_no_ev` for any variant.  Synthetic ROI is positive for all three (B 7.40%, C 8.08%, D 9.62%).  Real win rates are typically much lower than 99.5%, so the corrected fee may pinch more in production than this report suggests.",
+        "- Whether D' (whitelist of LA/Seattle/Denver) is still the right scope.  This report can't answer that — real-trade observation in those three cities is the only signal.",
         "",
         "_The script intentionally outputs raw numbers and stops short of a "
         "recommendation; the operator chooses the next move._",
