@@ -253,8 +253,23 @@ def create_app(store, rebalancer, config) -> Flask:
         # Previously this summed daily_pnl_val (which includes settlement P&L) PLUS
         # closed positions' realized_pnl (which also includes settlement P&L),
         # double-counting settlement gains/losses.
+        #
+        # Y6 (2026-04-26): filter by active variant set so this matches the
+        # per-strategy bucket sum.  Pre-fix `total_realized` summed legacy
+        # strategy='A' rows too, while `strat_realized` (B/C/D only) didn't —
+        # the dashboard headline drifted from the per-strategy detail and
+        # operators couldn't reconcile the numbers.  Legacy A is still
+        # surfaced as a separate `legacy_a_pnl` so audit history isn't lost.
+        active_strats = {"B", "C", "D"}
         total_realized = sum(
-            p["realized_pnl"] for p in closed_pos if p.get("realized_pnl") is not None
+            p["realized_pnl"] for p in closed_pos
+            if p.get("realized_pnl") is not None
+            and p.get("strategy") in active_strats
+        )
+        legacy_a_pnl = sum(
+            p["realized_pnl"] for p in closed_pos
+            if p.get("realized_pnl") is not None
+            and p.get("strategy") == "A"
         )
 
         state = reb.get_dashboard_state() if hasattr(reb, "get_dashboard_state") else {}
@@ -277,6 +292,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "exposure": exposure,
             "daily_pnl_val": daily_pnl_val,
             "total_realized": total_realized,
+            "legacy_a_pnl": legacy_a_pnl,
             "decision_log": decision_log,
             "state": state,
             "signals": signals,
@@ -307,6 +323,7 @@ def create_app(store, rebalancer, config) -> Flask:
             forecasts=d["state"].get("forecasts", {}),
             daily_maxes=d["state"].get("daily_maxes", {}),
             realized=d["total_realized"],
+            legacy_a_pnl=d.get("legacy_a_pnl", 0.0),
             strategy_summary=d.get("strategy_summary", []),
             strat_realized=d.get("strat_realized", {"B": 0.0, "C": 0.0, "D": 0.0}),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),

@@ -11,7 +11,7 @@
     <div class="metric-card">
         <div class="metric-label">Realized P&L</div>
         <div class="metric-value {{ 'positive' if realized >= 0 else 'negative' }}">${{ "%.2f"|format(realized) }}</div>
-        <div class="metric-sub">settled markets</div>
+        <div class="metric-sub">settled B/C/D{% if legacy_a_pnl is defined and legacy_a_pnl != 0 %}; legacy A: ${{ "%+.2f"|format(legacy_a_pnl) }}{% endif %}</div>
     </div>
     <div class="metric-card">
         <div class="metric-label">Unrealized P&L</div>
