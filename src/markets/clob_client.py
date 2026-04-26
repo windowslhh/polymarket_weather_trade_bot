@@ -376,35 +376,57 @@ class ClobClient:
             return True
 
         try:
-            # Probe trades (confirmed fills) first.
-            trade_params = TradeParams(
-                asset_id=token_id, after=created_at_epoch,
-            )
-            trades_resp = await asyncio.to_thread(client.get_trades, trade_params)
-            trades_list = _extract_list(trades_resp)
-            for t in trades_list:
-                if _match_trade(t):
-                    return ProbeResult(
-                        state="filled",
-                        order_id=str(t.get("id") or t.get("order_id") or ""),
-                        price=float(t.get("price", 0)),
-                        size=float(t.get("size", 0)),
-                        message="matched via get_trades",
-                    )
+            # G-1' Phase 1 (2026-04-26): wrap the entire trades+orders
+            # probe in asyncio.timeout(15).  Pre-fix a stuck CLOB request
+            # could hold rebalancer._cycle_lock indefinitely (the periodic
+            # reconciler holds the lock while iterating pending orders),
+            # blocking rebalance + position-check from acquiring it for
+            # an entire cycle's worth of probes.  15s budget per probe
+            # is generous (typical 200-500ms) but lets the next pending
+            # row try its luck rather than wedging the whole cycle.
+            #
+            # On TimeoutError we return state="unreachable" — the same
+            # outcome as a network failure — so the reconciler will
+            # leave the row pending and try again next cycle.
+            async with asyncio.timeout(15):
+                # Probe trades (confirmed fills) first.
+                trade_params = TradeParams(
+                    asset_id=token_id, after=created_at_epoch,
+                )
+                trades_resp = await asyncio.to_thread(client.get_trades, trade_params)
+                trades_list = _extract_list(trades_resp)
+                for t in trades_list:
+                    if _match_trade(t):
+                        return ProbeResult(
+                            state="filled",
+                            order_id=str(t.get("id") or t.get("order_id") or ""),
+                            price=float(t.get("price", 0)),
+                            size=float(t.get("size", 0)),
+                            message="matched via get_trades",
+                        )
 
-            # Probe open orders (still resting).
-            oparams = OpenOrderParams(asset_id=token_id)
-            orders_resp = await asyncio.to_thread(client.get_orders, oparams)
-            orders_list = _extract_list(orders_resp)
-            for o in orders_list:
-                if _match_order(o):
-                    return ProbeResult(
-                        state="open",
-                        order_id=str(o.get("id") or o.get("order_id") or ""),
-                        price=float(o.get("price", 0)),
-                        size=float(o.get("original_size", o.get("size", 0))),
-                        message="matched via get_orders",
-                    )
+                # Probe open orders (still resting).
+                oparams = OpenOrderParams(asset_id=token_id)
+                orders_resp = await asyncio.to_thread(client.get_orders, oparams)
+                orders_list = _extract_list(orders_resp)
+                for o in orders_list:
+                    if _match_order(o):
+                        return ProbeResult(
+                            state="open",
+                            order_id=str(o.get("id") or o.get("order_id") or ""),
+                            price=float(o.get("price", 0)),
+                            size=float(o.get("original_size", o.get("size", 0))),
+                            message="matched via get_orders",
+                        )
+        except TimeoutError:
+            logger.warning(
+                "probe_order_status timed out after 15s for token=%s side=%s",
+                token_id[:12], side,
+            )
+            return ProbeResult(
+                state="unreachable",
+                message="probe timed out after 15s — reconciler retries next cycle",
+            )
         except Exception as exc:
             logger.exception("probe_order_status raised")
             return ProbeResult(state="unreachable", message=str(exc))

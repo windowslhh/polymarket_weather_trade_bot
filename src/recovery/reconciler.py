@@ -24,6 +24,7 @@ returns a `ClobOrderStatus`.  Tests stub this directly.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from dataclasses import dataclass
@@ -31,6 +32,22 @@ from typing import Any, Awaitable, Callable
 
 from src.alerts import Alerter
 from src.portfolio.store import Store
+
+# G-1' Phase 1 (2026-04-26): caps for the periodic reconciler.
+#
+# RECONCILER_BATCH_CAP — process at most this many pending orders per
+# call.  Prevents a flood of pending rows (e.g. after a sustained CLOB
+# outage where every BUY went to `pending`) from holding rebalancer's
+# cycle_lock for minutes while the reconciler probes each one.  Cycles
+# missed by the cap come back to the next 30-min reconciler run.
+#
+# RECONCILER_TOTAL_TIMEOUT_S — outer wall-clock budget for the whole
+# reconcile_pending_orders call.  Defence-in-depth: even if every
+# probe respects its 15s timeout, a pathological 50-row backlog could
+# burn 12+ minutes; this caps the total.  TimeoutError leaves the
+# remaining rows pending (logged) and the next cycle picks them up.
+RECONCILER_BATCH_CAP = 20
+RECONCILER_TOTAL_TIMEOUT_S = 120
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +97,45 @@ async def reconcile_pending_orders(
         substantive DB/CLOB disagreements.  Tests set False to assert
         the alert path without terminating the test process.
     """
+    # G-1' Phase 1: wrap the entire reconciler in an outer asyncio.timeout
+    # so a pathological run (e.g. 30 pending rows × per-probe slowness)
+    # can't hold the cycle lock past RECONCILER_TOTAL_TIMEOUT_S.  Rows
+    # not reached this cycle stay in `pending` and the next 30-min
+    # invocation picks them up.  Wrapping the SELL hybrid-state path
+    # too because it also performs DB writes that benefit from a hard
+    # ceiling.
+    try:
+        async with asyncio.timeout(RECONCILER_TOTAL_TIMEOUT_S):
+            await _reconcile_inner(
+                store=store, alerter=alerter,
+                query_clob_order=query_clob_order,
+                is_paper=is_paper,
+                exit_on_mismatch=exit_on_mismatch,
+            )
+    except TimeoutError:
+        logger.error(
+            "Reconciler: total timeout %ds reached — remaining pending rows "
+            "left for next cycle",
+            RECONCILER_TOTAL_TIMEOUT_S,
+        )
+        try:
+            await alerter.send(
+                "warning",
+                f"Reconciler: hit {RECONCILER_TOTAL_TIMEOUT_S}s total timeout. "
+                f"Remaining pending orders deferred to next cycle.",
+            )
+        except Exception:
+            logger.exception("Reconciler: alerter dispatch failed on timeout")
+
+
+async def _reconcile_inner(
+    *,
+    store: Store,
+    alerter: Alerter,
+    query_clob_order: QueryFn | None,
+    is_paper: bool,
+    exit_on_mismatch: bool,
+) -> None:
     # Review 🟡 #6: resolve the SELL hybrid-state window BEFORE touching
     # pending BUYs.  A SELL order that finalized but crashed before
     # close_positions_for_token leaves the position open; fix that first
@@ -91,7 +147,30 @@ async def reconcile_pending_orders(
         logger.info("Reconciler: no pending orders to reconcile")
         return
 
-    logger.info("Reconciler: found %d pending order(s), resolving...", len(pending))
+    # G-1' Phase 1: cap per-cycle work.  A backlog beyond the cap is
+    # logged so ops see how deep the queue is; remaining rows fall to
+    # the next 30-min cycle.
+    total_pending = len(pending)
+    if total_pending > RECONCILER_BATCH_CAP:
+        deferred = total_pending - RECONCILER_BATCH_CAP
+        logger.warning(
+            "Reconciler: %d pending order(s) found — processing first %d, "
+            "deferring %d to next cycle",
+            total_pending, RECONCILER_BATCH_CAP, deferred,
+        )
+        try:
+            await alerter.send(
+                "warning",
+                f"Reconciler backlog: {total_pending} pending, "
+                f"processing {RECONCILER_BATCH_CAP}, {deferred} deferred",
+            )
+        except Exception:
+            logger.exception("Reconciler: alerter dispatch failed on backlog")
+        pending = pending[:RECONCILER_BATCH_CAP]
+    else:
+        logger.info(
+            "Reconciler: found %d pending order(s), resolving...", total_pending,
+        )
 
     for row in pending:
         key = row.get("idempotency_key")
