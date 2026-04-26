@@ -298,11 +298,35 @@ def city_local_date(city: CityConfig, *, offset_days: int = 0) -> date:
     the race — discovery already builds ``event.market_date`` in
     city-local time, so the lookup
     ``_cached_forecasts_by_date[market_date][city]`` lines up cleanly.
+
+    Y2 (2026-04-26): when ``city.tz`` is missing or invalid we fall back
+    to UTC, but log a warning each time it happens.  Pre-fix the
+    fallback was silent — a typo'd tz string would cause one city's
+    forecast cache to permanently disagree with discovery's
+    ``event.market_date`` (also derived from city tz, also fallback to
+    UTC), producing a *consistent* cache miss that's hard to spot
+    because no exception fires.  Surfacing the fallback in logs lets
+    the operator catch a misconfigured city before the divergence
+    silently kills its positions.  ``logger.warning`` (not exception)
+    because the fallback is recoverable and we don't want to spam
+    stack traces every 15 minutes.
     """
+    if not city.tz:
+        logger.warning(
+            "City %s has no tz configured; falling back to UTC for "
+            "city_local_date.  Set city.tz in src/config.py to silence.",
+            city.name,
+        )
+        return (datetime.now(timezone.utc) + timedelta(days=offset_days)).date()
     try:
-        tz = ZoneInfo(city.tz) if city.tz else timezone.utc
+        tz = ZoneInfo(city.tz)
     except Exception:
-        tz = timezone.utc
+        logger.warning(
+            "City %s has invalid tz=%r; falling back to UTC for "
+            "city_local_date.  ZoneInfo lookup failed — check IANA name.",
+            city.name, city.tz,
+        )
+        return (datetime.now(timezone.utc) + timedelta(days=offset_days)).date()
     return (datetime.now(tz) + timedelta(days=offset_days)).date()
 
 

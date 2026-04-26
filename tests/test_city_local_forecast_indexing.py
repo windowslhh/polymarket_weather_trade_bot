@@ -108,6 +108,38 @@ async def test_city_local_window_keys_cache_by_city_local_today() -> None:
     assert cache[nyc_local_today]["NYC"].forecast_date == nyc_local_today
 
 
+def test_city_local_date_warns_on_missing_tz(caplog) -> None:
+    """Y2: a city with empty tz falls back to UTC AND logs a warning so
+    a misconfigured city is visible in logs.  Pre-fix the fallback was
+    silent and a typo'd / blank tz silently desynced the cache from
+    discovery's event.market_date for that city."""
+    import logging
+    no_tz_city = CityConfig(name="NoTZ", icao="X", lat=0, lon=0, tz="")
+    caplog.set_level(logging.WARNING, logger="src.weather.forecast")
+    out = city_local_date(no_tz_city)
+    assert isinstance(out, date)
+    msgs = [r.message for r in caplog.records]
+    assert any("NoTZ" in m and "no tz" in m for m in msgs), (
+        "Y2: missing tz must emit a warning naming the city"
+    )
+
+
+def test_city_local_date_warns_on_invalid_tz(caplog) -> None:
+    """Y2: an unparseable tz string falls back to UTC AND logs a warning
+    that names the bad string so the operator can fix the typo."""
+    import logging
+    bad_tz_city = CityConfig(
+        name="BadTZ", icao="X", lat=0, lon=0, tz="Not_A_Real/Zone",
+    )
+    caplog.set_level(logging.WARNING, logger="src.weather.forecast")
+    out = city_local_date(bad_tz_city)
+    assert isinstance(out, date)
+    msgs = [r.message for r in caplog.records]
+    assert any("BadTZ" in m and "Not_A_Real/Zone" in m for m in msgs), (
+        "Y2: invalid tz must emit a warning naming both city and bad string"
+    )
+
+
 @pytest.mark.asyncio
 async def test_city_local_window_satisfies_fix22_invariant_for_market_date() -> None:
     """End-to-end pin: a NYC event whose market_date is its city-local today
