@@ -17,6 +17,7 @@ from src.portfolio.tracker import PortfolioTracker
 from src.preflight import run_preflight
 from src.recovery.reconciler import reconcile_pending_orders
 from src.scheduler.jobs import setup_scheduler
+from src.security import load_eth_private_key
 from src.strategy.rebalancer import Rebalancer
 from src.weather.historical import build_all_distributions
 from src.weather.metar import DailyMaxTracker
@@ -53,9 +54,16 @@ async def run(args: argparse.Namespace) -> None:
     elif config.paper:
         logger.info("*** PAPER TRADING MODE — simulated fills, positions tracked ***")
 
-    if not config.dry_run and not config.paper and not config.eth_private_key:
-        logger.error("ETH_PRIVATE_KEY not set. Use --paper for simulated trading or --dry-run for signal preview.")
-        sys.exit(1)
+    # Live mode: resolve the signing key lazily (Keychain on macOS, env
+    # fallback elsewhere).  Skipped in paper / dry-run so a missing key
+    # — or a Mac without Keychain access — doesn't block simulation runs.
+    if not config.dry_run and not config.paper:
+        if not config.eth_private_key:
+            try:
+                config.eth_private_key = load_eth_private_key()
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                sys.exit(1)
 
     logger.info("Loaded %d cities from config", len(config.cities))
 
