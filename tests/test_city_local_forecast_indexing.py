@@ -41,6 +41,7 @@ from src.weather.models import Forecast
 
 _NYC = CityConfig(name="NYC", icao="KNYC", lat=40.71, lon=-74.0, tz="America/New_York")
 _LA = CityConfig(name="LA", icao="KLAX", lat=34.05, lon=-118.24, tz="America/Los_Angeles")
+_HNL = CityConfig(name="Honolulu", icao="PHNL", lat=21.32, lon=-157.92, tz="Pacific/Honolulu")
 
 
 # 2026-04-26 03:00 UTC == 2026-04-25 23:00 EDT == 2026-04-25 20:00 PDT
@@ -106,6 +107,104 @@ async def test_city_local_window_keys_cache_by_city_local_today() -> None:
     assert date(2026, 4, 28) not in cache
     assert "NYC" in cache[nyc_local_today]
     assert cache[nyc_local_today]["NYC"].forecast_date == nyc_local_today
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Y3: DST + multi-city + tz fallback edge cases
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _frozen_at(utc_iso: str):
+    """Build a datetime subclass whose .now(tz) returns the frozen UTC
+    instant, optionally converted to the requested tz.  Used to pin
+    DST behaviour without monkey-patching the system clock."""
+    instant = datetime.fromisoformat(utc_iso).replace(tzinfo=timezone.utc)
+
+    class _Fz(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return instant.astimezone().replace(tzinfo=None)
+            return instant.astimezone(tz)
+
+    return _Fz
+
+
+def test_city_local_date_handles_la_dst_fall_back() -> None:
+    """Y3: 2026-11-01 09:30 UTC = 2026-11-01 01:30 PST (after fallback
+    from PDT at 02:00 PDT → 01:00 PST).  LA's local date is still
+    2026-11-01 — the DST transition shouldn't fool us into reporting
+    the previous or next calendar day."""
+    fz = _frozen_at("2026-11-01T09:30:00")
+    with patch.object(forecast_mod, "datetime", fz):
+        d = city_local_date(_LA)
+    assert d == date(2026, 11, 1), f"expected 2026-11-01, got {d}"
+    # And offset_days=1 must follow the wall clock, not the UTC clock
+    with patch.object(forecast_mod, "datetime", fz):
+        d_plus_1 = city_local_date(_LA, offset_days=1)
+    assert d_plus_1 == date(2026, 11, 2)
+
+
+def test_city_local_date_handles_la_dst_spring_forward() -> None:
+    """Y3: 2026-03-08 10:30 UTC = 2026-03-08 03:30 PDT (after spring-
+    forward at 02:00 PST → 03:00 PDT).  Local date stays 2026-03-08."""
+    fz = _frozen_at("2026-03-08T10:30:00")
+    with patch.object(forecast_mod, "datetime", fz):
+        d = city_local_date(_LA)
+    assert d == date(2026, 3, 8), f"expected 2026-03-08, got {d}"
+
+
+def test_city_local_date_multi_city_cross_day_at_same_instant() -> None:
+    """Y3: at one specific UTC instant, NYC and Honolulu can sit on
+    different calendar dates.  city_local_date must return each
+    city's OWN local date, not a shared anchor.
+
+    2026-04-26 08:00 UTC =
+      NYC (UTC-4 EDT)   → 2026-04-26 04:00  → 2026-04-26
+      Honolulu (UTC-10) → 2026-04-25 22:00  → 2026-04-25
+    """
+    fz = _frozen_at("2026-04-26T08:00:00")
+    with patch.object(forecast_mod, "datetime", fz):
+        nyc_d = city_local_date(_NYC)
+        hnl_d = city_local_date(_HNL)
+    assert nyc_d == date(2026, 4, 26)
+    assert hnl_d == date(2026, 4, 25)
+    assert nyc_d != hnl_d, (
+        "Y3: different cities can disagree on calendar date at the "
+        "same instant — that's exactly why FIX-2P-3 keys the cache "
+        "per city, not per UTC clock"
+    )
+
+
+@pytest.mark.asyncio
+async def test_city_local_window_yields_per_city_date_keys_simultaneously() -> None:
+    """Y3 integration: the per-city window correctly produces date keys
+    that match each city's local today, EVEN when that means two cities
+    contribute to *different* date keys for the same call."""
+    fz = _frozen_at("2026-04-26T08:00:00")
+
+    async def _stub(city, target, client):
+        return Forecast(
+            city=city.name, forecast_date=target,
+            predicted_high_f=70.0, predicted_low_f=55.0,
+            confidence_interval_f=3.0, source="stub",
+            fetched_at=datetime.now(timezone.utc),
+        )
+
+    with patch.object(forecast_mod, "datetime", fz), \
+         patch.object(forecast_mod, "get_forecast", _stub):
+        cache = await get_forecasts_for_city_local_window([_NYC, _HNL], days=2)
+
+    # With days=2 each city contributes [today, today+1] under its OWN
+    # local anchor.  The cache structure should be:
+    #   NYC contributes to date keys {2026-04-26, 2026-04-27}
+    #   HNL contributes to date keys {2026-04-25, 2026-04-26}
+    # → key 2026-04-25 has only Honolulu
+    # → key 2026-04-26 has BOTH (NYC's today + HNL's tomorrow)
+    # → key 2026-04-27 has only NYC
+    assert set(cache.get(date(2026, 4, 25), {}).keys()) == {"Honolulu"}
+    assert set(cache.get(date(2026, 4, 26), {}).keys()) == {"NYC", "Honolulu"}
+    assert set(cache.get(date(2026, 4, 27), {}).keys()) == {"NYC"}
 
 
 def test_city_local_date_warns_on_missing_tz(caplog) -> None:
