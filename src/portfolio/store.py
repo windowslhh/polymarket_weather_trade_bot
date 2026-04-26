@@ -155,8 +155,15 @@ class Store:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
 
-    async def initialize(self) -> None:
-        """Create database and tables, applying migrations for missing columns."""
+    async def initialize(self, alerter=None) -> None:
+        """Create database and tables, applying migrations for missing columns.
+
+        Y6 Phase 1 (2026-04-26): ``alerter`` (optional) is threaded into
+        ``_migrate_strategy_triggers`` so a trigger-install failure (rare,
+        but a silent failure here removes the strategy-validation
+        invariant the bot relies on) fires a critical alert AND re-raises,
+        which the caller in main.py converts to a 60s-back-off sys.exit(2).
+        """
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path), timeout=30.0)
         self._db.row_factory = aiosqlite.Row
@@ -176,7 +183,7 @@ class Store:
         # ALTER TABLE doesn't support ADD CHECK on existing columns
         # (would need a full table rebuild), but BEFORE INSERT/UPDATE
         # triggers give the same guarantee without touching prod data.
-        await self._migrate_strategy_triggers()
+        await self._migrate_strategy_triggers(alerter=alerter)
 
         logger.info("Database initialized at %s", self._db_path)
 
@@ -221,7 +228,7 @@ class Store:
                 logger.exception("Y6: alerter dispatch failed")
         return offenders
 
-    async def _migrate_strategy_triggers(self) -> None:
+    async def _migrate_strategy_triggers(self, alerter=None) -> None:
         """Y6: install BEFORE INSERT / UPDATE triggers that raise when
         a strategy value isn't in {'A', 'B', 'C', 'D'}.
 
@@ -229,6 +236,15 @@ class Store:
         on every startup.  They DO NOT silently coerce — any bad
         strategy write fails fast with `CHECK constraint failed`,
         which is exactly the symptom an operator can grep for.
+
+        Y6 Phase 1 (2026-04-26): if the trigger install itself fails
+        (DB malformed, SQLite quirk, etc.), we used to swallow with
+        ``logger.exception`` and continue — silently removing the
+        strategy-validation invariant the rest of the system depends
+        on.  Now we ALSO send a critical alert AND re-raise, which
+        the caller (main.py) converts to a back-off sys.exit(2).
+        Far better to fail loud at startup than have bad strategy
+        rows quietly accumulate during live trading.
         """
         sql = """
         CREATE TRIGGER IF NOT EXISTS trg_positions_strategy_check
@@ -259,8 +275,23 @@ class Store:
         try:
             await self.db.executescript(sql)
             await self.db.commit()
-        except Exception:
+        except Exception as exc:
             logger.exception("Y6: failed to install strategy-validation triggers")
+            if alerter is not None:
+                try:
+                    await alerter.send(
+                        "critical",
+                        f"Y6 trigger install failed: {exc}. "
+                        f"Strategy-validation invariant is NOT in place; "
+                        f"refusing to start.",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Y6: alerter dispatch failed during trigger install"
+                    )
+            # Re-raise so initialize() propagates upward; main.py turns
+            # this into a back-off sys.exit(2).
+            raise
 
     async def _migrate_columns(self) -> None:
         """Add columns to existing tables if they don't exist yet."""

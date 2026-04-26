@@ -173,3 +173,77 @@ def test_dashboard_routes_unknown_strategy_to_legacy_bucket():
     assert "active_strats | legacy_strats" in body, (
         "Y6 defensive: dashboard must catch values outside {A,B,C,D}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Y6 Phase 1: trigger-install failure fires critical alert AND raises
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_trigger_install_failure_alerts_and_raises():
+    """Y6 Phase 1 (2026-04-26): if `_migrate_strategy_triggers` fails,
+    we MUST (a) send a critical alert via the supplied alerter and
+    (b) re-raise so the caller can refuse to start.  Pre-fix the
+    method swallowed exceptions at debug level — silently removing
+    the strategy-validation invariant the rest of the system relies on.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    store = await _mk_store()
+    alerter = AsyncMock()
+
+    # Patch executescript to blow up
+    async def _broken_executescript(_sql):
+        raise RuntimeError("simulated SQLite malformation")
+
+    with patch.object(store.db, "executescript", _broken_executescript), \
+         pytest.raises(RuntimeError):
+        await store._migrate_strategy_triggers(alerter=alerter)
+
+    # Critical alert was sent BEFORE the raise
+    alerter.send.assert_called_once()
+    args = alerter.send.call_args.args
+    assert args[0] == "critical"
+    assert "Y6 trigger install failed" in args[1]
+    assert "refusing to start" in args[1]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_trigger_install_no_alerter_still_raises():
+    """When no alerter is supplied (e.g. tests / older callers), the
+    raise still happens — the alert is best-effort, the raise is mandatory."""
+    from unittest.mock import patch
+
+    store = await _mk_store()
+
+    async def _broken_executescript(_sql):
+        raise RuntimeError("SQLite oops")
+
+    with patch.object(store.db, "executescript", _broken_executescript), \
+         pytest.raises(RuntimeError):
+        await store._migrate_strategy_triggers(alerter=None)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_trigger_install_alerter_failure_does_not_swallow_raise():
+    """Y6 Phase 1: if the alerter itself throws (webhook dead etc.),
+    we still re-raise the ORIGINAL trigger-install exception."""
+    from unittest.mock import AsyncMock, patch
+
+    store = await _mk_store()
+    alerter = AsyncMock()
+    alerter.send.side_effect = RuntimeError("webhook offline")
+
+    async def _broken_executescript(_sql):
+        raise RuntimeError("trigger install failed for real reason")
+
+    with patch.object(store.db, "executescript", _broken_executescript), \
+         pytest.raises(RuntimeError) as excinfo:
+        await store._migrate_strategy_triggers(alerter=alerter)
+    # The raised exception is the ORIGINAL trigger-install error,
+    # NOT the alerter's webhook error
+    assert "trigger install failed for real reason" in str(excinfo.value)
+    await store.close()

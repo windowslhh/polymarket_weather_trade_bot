@@ -146,7 +146,19 @@ async def run(args: argparse.Namespace) -> None:
 
     # Initialize components
     store = Store(config.db_path)
-    await store.initialize()
+    # Y6 Phase 1 (2026-04-26): pass the alerter so a failed trigger
+    # install fires a critical alert AND raises; we catch the raise,
+    # log loud, and route through preflight._fatal_exit for the same
+    # 60s back-off behaviour as DB-not-writable / CLOB-unreachable.
+    try:
+        await store.initialize(alerter=alerter)
+    except Exception:
+        logger.exception(
+            "Y6: store.initialize raised — refusing to start without "
+            "strategy-validation triggers in place"
+        )
+        from src.preflight import _fatal_exit
+        await _fatal_exit("y6_trigger_install_failed", code=2)
 
     # FIX-05 + Review Blocker #2: resolve orphaned pending orders before
     # generating any new signals.  In live mode we probe the CLOB via
