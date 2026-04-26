@@ -213,6 +213,7 @@ def test_city_local_date_warns_on_missing_tz(caplog) -> None:
     silent and a typo'd / blank tz silently desynced the cache from
     discovery's event.market_date for that city."""
     import logging
+    forecast_mod._reset_tz_fallback_warnings()  # Y2 update: clear de-dup cache
     no_tz_city = CityConfig(name="NoTZ", icao="X", lat=0, lon=0, tz="")
     caplog.set_level(logging.WARNING, logger="src.weather.forecast")
     out = city_local_date(no_tz_city)
@@ -227,6 +228,7 @@ def test_city_local_date_warns_on_invalid_tz(caplog) -> None:
     """Y2: an unparseable tz string falls back to UTC AND logs a warning
     that names the bad string so the operator can fix the typo."""
     import logging
+    forecast_mod._reset_tz_fallback_warnings()
     bad_tz_city = CityConfig(
         name="BadTZ", icao="X", lat=0, lon=0, tz="Not_A_Real/Zone",
     )
@@ -236,6 +238,49 @@ def test_city_local_date_warns_on_invalid_tz(caplog) -> None:
     msgs = [r.message for r in caplog.records]
     assert any("BadTZ" in m and "Not_A_Real/Zone" in m for m in msgs), (
         "Y2: invalid tz must emit a warning naming both city and bad string"
+    )
+
+
+def test_city_local_date_warns_only_once_per_city(caplog) -> None:
+    """Y2 (de-dup, 2026-04-26): pre-fix the warning fired on every call.
+    At 15-min cadence × 7 cities × 24h × 7d = ~30k log lines / week of
+    noise.  De-dup via a module-level set so the misconfig surfaces
+    once at startup and stays silent thereafter."""
+    import logging
+    forecast_mod._reset_tz_fallback_warnings()
+    no_tz_city = CityConfig(name="UniqueNoTZ", icao="X", lat=0, lon=0, tz="")
+    caplog.set_level(logging.WARNING, logger="src.weather.forecast")
+    for _ in range(100):
+        city_local_date(no_tz_city)
+    matches = [
+        r for r in caplog.records
+        if "UniqueNoTZ" in r.message and "no tz" in r.message
+    ]
+    assert len(matches) == 1, (
+        f"Y2 de-dup: 100 calls must produce exactly 1 warning, got {len(matches)}"
+    )
+
+
+def test_city_local_date_warns_per_unique_invalid_tz(caplog) -> None:
+    """Different bad tz values for the SAME city should warn once each
+    (the operator might fix one typo only to introduce another)."""
+    import logging
+    forecast_mod._reset_tz_fallback_warnings()
+    caplog.set_level(logging.WARNING, logger="src.weather.forecast")
+    city_a = CityConfig(name="MultiTzCity", icao="X", lat=0, lon=0, tz="Bad/One")
+    city_b = CityConfig(name="MultiTzCity", icao="X", lat=0, lon=0, tz="Bad/Two")
+    # Same name, different bad tz → two unique warnings
+    for _ in range(10):
+        city_local_date(city_a)
+    for _ in range(10):
+        city_local_date(city_b)
+    matches = [
+        r for r in caplog.records
+        if "MultiTzCity" in r.message
+    ]
+    assert len(matches) == 2, (
+        f"Y2: same city with two different bad tz strings should warn "
+        f"once per (city, tz) pair, got {len(matches)}"
     )
 
 
