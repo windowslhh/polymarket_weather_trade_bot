@@ -1240,7 +1240,7 @@ class Rebalancer:
                             win_prob=0.0, expected_value=0.0,
                             price=0.0, size_usd=0.0,
                             action="SKIP",
-                            reason=f"[{strat_name}] REJECT: city_not_in_whitelist",
+                            reason=f"[{strat_name}] REJECT: CITY_NOT_IN_WHITELIST",
                             strategy=strat_name,
                         )
                     except Exception:

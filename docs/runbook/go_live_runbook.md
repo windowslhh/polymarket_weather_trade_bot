@@ -307,7 +307,7 @@ strategy:
          GROUP BY reason ORDER BY 2 DESC"
       ```
       Expect: known reason codes only (PRICE_DIVERGENCE / DAILY_MAX_*
-      / DIST_TOO_CLOSE / city_not_in_whitelist / etc.)
+      / DIST_TOO_CLOSE / CITY_NOT_IN_WHITELIST / etc.)
 - [ ] **orders ↔ positions 1:1** (FIX-03 + FIX-05 invariant):
       ```
       docker compose exec weather-bot sqlite3 /app/data/bot.db \
