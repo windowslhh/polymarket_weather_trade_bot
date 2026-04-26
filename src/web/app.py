@@ -266,6 +266,29 @@ def create_app(store, rebalancer, config) -> Flask:
             if p.get("realized_pnl") is not None
             and p.get("strategy") in active_strats
         )
+        # G-7 (2026-04-26): the daily-loss-remaining gauge must use
+        # ONLY today's realized PnL.  Pre-fix it summed every closed
+        # position in the result set (limit=200 ≈ days of history) and
+        # subtracted from the daily limit, so a deep losing week made
+        # the dashboard show "$-X" remaining capacity even on a
+        # winning today.  The settler writes daily_pnl bucketed in UTC
+        # (FIX-M1 / R-02), so we filter closed_pos the same way.
+        from datetime import datetime as _dt2, timezone as _tz2
+        utc_today_iso = _dt2.now(_tz2.utc).date().isoformat()
+
+        def _is_today(p: dict) -> bool:
+            ca = p.get("closed_at") or ""
+            # closed_at is "YYYY-MM-DD HH:MM:SS" (UTC, written by SQLite
+            # `datetime('now')`); anything starting with today's date
+            # belongs to today's UTC bucket.
+            return isinstance(ca, str) and ca[:10] == utc_today_iso
+
+        total_realized_today = sum(
+            p["realized_pnl"] for p in closed_pos
+            if p.get("realized_pnl") is not None
+            and p.get("strategy") in active_strats
+            and _is_today(p)
+        )
         # Y6 defensive (2026-04-26): any strategy value outside
         # {A, B, C, D} (NULL, empty string, lowercase, typo, etc.)
         # also lands in the legacy bucket so the dashboard headline
@@ -301,6 +324,7 @@ def create_app(store, rebalancer, config) -> Flask:
             "exposure": exposure,
             "daily_pnl_val": daily_pnl_val,
             "total_realized": total_realized,
+            "total_realized_today": total_realized_today,  # G-7
             "legacy_a_pnl": legacy_a_pnl,
             "decision_log": decision_log,
             "state": state,
@@ -335,7 +359,12 @@ def create_app(store, rebalancer, config) -> Flask:
             legacy_a_pnl=d.get("legacy_a_pnl", 0.0),
             strategy_summary=d.get("strategy_summary", []),
             strat_realized=d.get("strat_realized", {"B": 0.0, "C": 0.0, "D": 0.0}),
-            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),
+            # G-7 (2026-04-26): daily-loss gauge uses TODAY-only realized PnL,
+            # not the full closed_pos history.  `abs()` keeps the bar sensible
+            # whether today's net is positive or negative; the limit is one-sided.
+            daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(
+                d.get("total_realized_today", 0.0)
+            ),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
             price_source=d["state"].get("price_source", "gamma"),
