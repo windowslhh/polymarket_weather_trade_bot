@@ -509,11 +509,34 @@ class Rebalancer:
                     fc = window.get(city_local_date(c), {}).get(c.name)
                     if fc:
                         today_forecasts[c.name] = fc
-                self._cached_forecasts.update(today_forecasts)
-                # Replace each city's today entry outright (fresher is strictly
-                # better) and merge-update D+1/D+2 so a transient per-(city,
-                # day) failure can't blow away still-valid cached data for
-                # other cities on the same date key.
+                # Y4 (2026-04-26): REPLACE per-city instead of update().
+                # The bare update() call left stale by-name entries for
+                # cities the previous 60-min cycle had cached but the
+                # current 15-min refresh skipped (no open positions, or
+                # event no longer in active markets).  A by-date cache
+                # miss falling back to `_cached_forecasts.get(city)`
+                # would then read up to 60-min-old forecast data.  Now:
+                # 1. Cities currently being refreshed: REPLACE entry.
+                # 2. Cities with positions but whose fetch failed in
+                #    this window: leave their previous entry alone
+                #    (better than empty — soft 15-min staleness).
+                # 3. Cities with no current open position: evict from
+                #    by-name cache.  They have no event under
+                #    evaluation, so the stale entry was unreachable
+                #    anyway, but evicting keeps the cache focused.
+                cities_with_positions_set = {c.name for c in city_configs}
+                for name, fc in today_forecasts.items():
+                    self._cached_forecasts[name] = fc
+                stale_cities = [
+                    name for name in list(self._cached_forecasts)
+                    if name not in cities_with_positions_set
+                ]
+                for name in stale_cities:
+                    del self._cached_forecasts[name]
+                # By-date cache: per (date, city) replace.  Keep
+                # setdefault({}).update so a transient per-(city, day)
+                # failure doesn't blow away still-valid entries for
+                # OTHER cities on the same date key.
                 for d, by_city in window.items():
                     self._cached_forecasts_by_date.setdefault(d, {}).update(by_city)
                 logger.info(
