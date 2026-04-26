@@ -30,9 +30,16 @@ class StrategyConfig:
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
     max_total_exposure_usd: float = 1000.0
-    # FIX-17: loss limit bumped 50→75 to account for B + D running together
-    # with the new stricter variants; the 50 ceiling was calibrated for
-    # A+B+C+D and would halt trading prematurely with fewer variants.
+    # Phase A (2026-04-26): B-only after C / D' retired.  Held at 75
+    # rather than rolled back to 50: B alone runs kelly=0.5 forecast
+    # entries plus full-Kelly locked wins across 30 cities, and an
+    # adverse weather streak (multiple cities flipping against held NO
+    # positions in the same UTC day) can plausibly accumulate ~$50 of
+    # MTM/realized drawdown.  A tighter cap risks halting trading
+    # prematurely on noise — the $75 ceiling is 37.5% of the $200 live
+    # capital, deep enough that hitting it actually means something is
+    # wrong.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md
+    # for fee-floor reasoning.
     daily_loss_limit_usd: float = 75.0
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
