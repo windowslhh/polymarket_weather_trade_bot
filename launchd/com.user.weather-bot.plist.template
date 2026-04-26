@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the weather bot (macOS).
+
+  Substitute __BOT_DIR__ with the absolute path to the repo root, then drop
+  the result into ~/Library/LaunchAgents/ and load it:
+
+    sed "s|__BOT_DIR__|$HOME/polymarket_weather_trade_bot|g" \
+      launchd/com.user.weather-bot.plist.template \
+      > ~/Library/LaunchAgents/com.user.weather-bot.plist
+    launchctl load -w ~/Library/LaunchAgents/com.user.weather-bot.plist
+
+  Stop:    launchctl unload ~/Library/LaunchAgents/com.user.weather-bot.plist
+  Logs:    tail -f __BOT_DIR__/logs/launchd.{out,err}
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.weather-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BOT_DIR__/scripts/run_local.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__BOT_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__BOT_DIR__/logs/launchd.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__BOT_DIR__/logs/launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>UTC</string>
+    </dict>
+</dict>
+</plist>
