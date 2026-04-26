@@ -109,6 +109,21 @@ echo ""
 echo "=== Step 5: Pulling latest code ==="
 git pull
 
+# Y7 (2026-04-26): re-chown right before container start so any
+# temp files left over from the root-driven VACUUM in step 3 (or the
+# > monitor_log truncate in step 4) end up owned by UID 1000.  Pre-fix
+# the chown ran ONCE at the top of the script; subsequent root-owned
+# writes (sqlite-journal, monitor_log re-creation) would surface as
+# permission errors when the container starts as appuser.
+if [ -f "$BOT_DIR/.env" ]; then
+    chmod 600 "$BOT_DIR/.env"
+    chown 1000:1000 "$BOT_DIR/.env"
+fi
+if [ -d "$BOT_DIR/data" ]; then
+    chown -R 1000:1000 "$BOT_DIR/data"
+    echo "  Pre-start chown: data/ + .env owned by 1000:1000"
+fi
+
 # 6. Rebuild and start
 echo ""
 echo "=== Step 6: Rebuilding and starting bot ==="

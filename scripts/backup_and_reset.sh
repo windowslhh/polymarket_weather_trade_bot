@@ -71,6 +71,18 @@ print('Database reset OK')
 
 echo "Database reset complete. Old strategy summary saved in old_strategy_summary table."
 
+# Y7 (2026-04-26): re-chown right before container start so any
+# root-owned temp files written by the python3 reset block above
+# (sqlite-journal-X) get fixed before appuser tries to open them.
+if [ -f "$BOT_DIR/.env" ]; then
+    chmod 600 "$BOT_DIR/.env"
+    chown 1000:1000 "$BOT_DIR/.env"
+fi
+if [ -d "$BOT_DIR/data" ]; then
+    chown -R 1000:1000 "$BOT_DIR/data"
+    echo "  Pre-start chown: data/ + .env owned by 1000:1000"
+fi
+
 # 5. Restart bot with new strategy
 docker compose up -d --build
 echo "Bot restarted with new strategy."
