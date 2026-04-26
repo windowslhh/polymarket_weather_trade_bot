@@ -57,20 +57,30 @@ def _parse_temp_bounds(label: str) -> tuple[float | None, float | None]:
     return None, None
 
 
-def _parse_date(date_str: str) -> date | None:
+def _parse_date(date_str: str, *, city_tz: str | None = None) -> date | None:
     """Try to parse a date string like 'April 5' or '2026-04-05'.
 
-    FIX-2P-10: year fallback uses UTC date — `date.today()` reads the
-    server-local clock and would silently roll over the year on Dec 31
-    UTC vs Jan 1 server-local (or vice versa) when the bot is hosted
-    in a non-UTC tz.  All schedule + DB rows live in UTC, so anchor
-    here too.
+    FIX-2P-10: year fallback no longer reads ``date.today()`` (server
+    local).  Y9 (2026-04-26): when the caller supplies the city's tz,
+    use that to derive the year so a Dec-31-UTC / Jan-1-city-local
+    boundary doesn't tag a "January" event with the wrong year.  Falls
+    back to UTC when no tz is supplied — safe default that still avoids
+    the server-clock drift.
     """
+    if city_tz:
+        try:
+            tz = ZoneInfo(city_tz)
+        except Exception:
+            tz = timezone.utc
+    else:
+        tz = timezone.utc
+    fallback_year = datetime.now(tz).year
+
     for fmt in ("%B %d", "%B %d, %Y", "%Y-%m-%d", "%m/%d/%Y", "%b %d"):
         try:
             dt = datetime.strptime(date_str.strip(), fmt)
             if dt.year == 1900:
-                dt = dt.replace(year=datetime.now(timezone.utc).year)
+                dt = dt.replace(year=fallback_year)
             return dt.date()
         except ValueError:
             continue
@@ -223,7 +233,9 @@ async def discover_weather_markets(
                 if not city_cfg:
                     continue
 
-                market_date = _parse_date(date_str)
+                # Y9: thread city tz so the Jan 1 / Dec 31 year-fallback
+                # uses the city's local clock, not UTC.
+                market_date = _parse_date(date_str, city_tz=city_cfg.tz)
                 if not market_date:
                     continue
 

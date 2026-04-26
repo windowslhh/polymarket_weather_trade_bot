@@ -24,8 +24,11 @@ def test_discovery_parse_date_uses_utc_year_fallback() -> None:
         f"FIX-2P-10: discovery._parse_date must not call date.today(); "
         f"offending lines: {code_lines}"
     )
-    assert "datetime.now(timezone.utc).year" in src, (
-        "FIX-2P-10: discovery._parse_date year fallback must anchor on UTC."
+    # Y9: the year fallback should now compute via `datetime.now(tz).year`
+    # where tz is either the city's tz (when supplied) or UTC.
+    assert "datetime.now(tz).year" in src, (
+        "FIX-2P-10 + Y9: discovery._parse_date year fallback must anchor "
+        "on the resolved tz (city-local when supplied, UTC otherwise)."
     )
 
 
