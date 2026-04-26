@@ -180,6 +180,28 @@ do not skip steps.  All commands assume:
       ```
       Expect: `bot.db` owned by uid `1000` (or named `bot`)
 
+### 1.11b Wallet address fingerprint (FIX-2P-8)
+
+- [ ] Print the EOA address the bot has loaded from `ETH_PRIVATE_KEY`
+      so the operator can compare it against the funded Polymarket
+      proxy wallet *before* any live trade fires:
+      ```
+      docker compose exec weather-bot python -c \
+        "from src.config import load_config; from py_clob_client.client import ClobClient as C; \
+         from py_clob_client.clob_types import ApiCreds; \
+         cfg = load_config(); \
+         c = C('https://clob.polymarket.com', \
+               key=cfg.eth_private_key, chain_id=137, \
+               creds=ApiCreds(api_key=cfg.polymarket_api_key, \
+                              api_secret=cfg.polymarket_secret, \
+                              api_passphrase=cfg.polymarket_passphrase)); \
+         print('signer EOA:', c.get_address())"
+      ```
+      Expect: a `0x…` address.  Operator MUST eyeball-match this against
+      the wallet shown on Polymarket frontend / Polygonscan before
+      Part 3 cutover.  A mismatch = wrong key in `.env` → STOP, do
+      NOT flip live; restore the correct key and re-run from 1.6.
+
 ### 1.12 Graceful-shutdown smoke test
 
 - [ ] ```
@@ -458,7 +480,11 @@ Run this list at the moment of cutover from $50 smoke to $200 live.
       reverse proxy with auth must front it
 - [ ] Wallet USDC balance ≥ $250:
       verify on Polymarket frontend; the $50 buffer absorbs slippage +
-      gas without ever risking a failed signed-tx queue
+      gas without ever risking a failed signed-tx queue.
+      **Reconciliation step** (FIX-2P-8): the address you check on the
+      frontend MUST equal the `signer EOA` printed by step 1.11b.  A
+      mismatch means USDC is sitting in a different wallet than the
+      bot will sign from — pause and resolve before cutover.
 
 ### 3.3 Operator readiness
 
