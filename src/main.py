@@ -263,7 +263,14 @@ async def run(args: argparse.Namespace) -> None:
     await rebalancer.backfill_today_observations()
 
     # Setup scheduler — alerter wired in so FIX-06's job_error listener can page.
-    scheduler = setup_scheduler(config, rebalancer, alerter=alerter)
+    # G-1': pass the same _probe callable used at startup so the periodic
+    # reconciler can resolve any pending orders that orphaned mid-cycle.
+    scheduler = setup_scheduler(
+        config, rebalancer,
+        alerter=alerter,
+        query_clob_order=None if is_paper else _probe,
+        is_paper=is_paper,
+    )
 
     # Handle graceful shutdown
     loop = asyncio.get_event_loop()

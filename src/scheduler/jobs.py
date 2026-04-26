@@ -3,15 +3,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Awaitable, Callable
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.alerts import Alerter
 from src.config import AppConfig
+from src.recovery.reconciler import reconcile_pending_orders
 from src.strategy.rebalancer import Rebalancer
 
 logger = logging.getLogger(__name__)
+
+# G-1' (2026-04-26): how often to re-run the reconciler post-startup.
+# Pre-fix it ran only on boot, so a CLOB write that timed out mid-cycle
+# (Python-side asyncio.timeout cancels the await but the underlying
+# HTTP POST may still have reached Polymarket and created an order)
+# stayed orphaned in `pending` until the next restart.  Worst case:
+# exposure mis-reported until ops noticed.  30 min cadence keeps that
+# window bounded without competing with the 60-min rebalance.
+RECONCILER_INTERVAL_MINUTES = 30
 
 # FIX-06: every job gets coalesce + a generous misfire_grace_time.  Without
 # these, if a job is late by any amount (scheduler paused, event loop backed
@@ -40,8 +51,18 @@ def setup_scheduler(
     config: AppConfig,
     rebalancer: Rebalancer,
     alerter: Alerter | None = None,
+    *,
+    query_clob_order: Callable[[dict], Awaitable] | None = None,
+    is_paper: bool = False,
 ) -> AsyncIOScheduler:
-    """Configure and return the APScheduler with all jobs."""
+    """Configure and return the APScheduler with all jobs.
+
+    G-1' (2026-04-26): ``query_clob_order`` + ``is_paper`` plumb the
+    reconciler into a periodic 30-min job so timed-out CLOB writes get
+    detected within half an hour rather than waiting for the next
+    bot restart.  Both default to ``None``/``False`` so older callers
+    (and tests that don't exercise the reconciler path) still work.
+    """
     scheduler = AsyncIOScheduler()
 
     # Main rebalance job (full cycle)
@@ -132,6 +153,47 @@ def setup_scheduler(
         misfire_grace_time=JOB_MISFIRE_GRACE_S,
     )
 
+    # G-1' (2026-04-26): periodic reconciler.  Skip wiring if the caller
+    # didn't provide a query callable AND we're not in paper (the paper
+    # path inside reconcile_pending_orders marks every pending row failed
+    # without needing a CLOB probe — useful for clearing dry-run residue).
+    if query_clob_order is not None or is_paper:
+        async def reconcile_periodic():
+            """Wrap the startup reconciler with two extra guarantees:
+
+            1. Acquire the rebalancer's cycle lock so the reconciler's
+               DB writes don't interleave with a rebalance / position
+               check write — both touch positions + orders.
+            2. ``exit_on_mismatch=False`` because the runtime must NOT
+               sys.exit on a mismatch (that's only safe at startup
+               before the scheduler is live).  A runtime mismatch
+               sends a critical alert via the reconciler's own path
+               and the bot keeps going; ops decides whether to pause.
+            """
+            try:
+                async with rebalancer._cycle_lock:
+                    store = rebalancer._portfolio.store
+                    await reconcile_pending_orders(
+                        store=store,
+                        alerter=alerter or Alerter(),
+                        query_clob_order=query_clob_order,
+                        is_paper=is_paper,
+                        exit_on_mismatch=False,
+                    )
+            except Exception:
+                logger.exception("Periodic reconciler failed; continuing")
+
+        scheduler.add_job(
+            reconcile_periodic,
+            "interval",
+            minutes=RECONCILER_INTERVAL_MINUTES,
+            id="reconciler_periodic",
+            name="Periodic CLOB ↔ DB reconciler",
+            max_instances=1,
+            coalesce=JOB_COALESCE,
+            misfire_grace_time=JOB_MISFIRE_GRACE_S,
+        )
+
     if alerter is not None:
         def _on_job_error(event):  # APScheduler fires this synchronously
             job_id = getattr(event, "job_id", "<unknown>")
@@ -152,10 +214,15 @@ def setup_scheduler(
 
         scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR | EVENT_JOB_MISSED)
 
+    reconciler_msg = (
+        f", reconciler every {RECONCILER_INTERVAL_MINUTES} min"
+        if (query_clob_order is not None or is_paper) else ""
+    )
     logger.info(
         "Scheduler configured: rebalance every %d min, settlement+forecast check every 15 min, "
-        "METAR sync at :57/:03 (coalesce=%s, grace=%ds)",
+        "METAR sync at :57/:03%s (coalesce=%s, grace=%ds)",
         config.scheduling.rebalance_interval_minutes,
+        reconciler_msg,
         JOB_COALESCE,
         JOB_MISFIRE_GRACE_S,
     )
