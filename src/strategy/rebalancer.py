@@ -1060,7 +1060,15 @@ class Rebalancer:
             ).get(c.name)
             if fc:
                 forecasts[c.name] = fc
-        self._cached_forecasts.update(forecasts)
+        # Y4: REPLACE (not update) so a city dropped from active_events
+        # this cycle doesn't keep its old by-name forecast around.  Pre-fix
+        # `update()` left stale entries — a city that briefly disappeared
+        # from discovery (low volume / spread filter) and reappeared a
+        # cycle later would silently get stale-by-N-cycles forecast on
+        # the old by-name cache fallback path.  The by-date cache is
+        # already rebuilt per cycle (line above); this keeps the by-name
+        # cache aligned with the same active-cities set.
+        self._cached_forecasts = dict(forecasts)
         logger.info(
             "Fetched forecasts for %d cities (city-local today + D1/D2)",
             len(forecasts),
