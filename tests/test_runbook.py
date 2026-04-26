@@ -35,3 +35,23 @@ def test_runbook_usdc_balance_step_references_signer_eoa() -> None:
         "FIX-2P-8: USDC balance step must reference the signer EOA "
         "printed in step 1.11b so a wallet mismatch is caught."
     )
+
+
+def test_runbook_distinguishes_signer_eoa_from_proxy_wallet() -> None:
+    """Y8: the runbook must explicitly explain that the signer EOA and
+    the USDC-holding proxy wallet are DIFFERENT addresses, and that
+    comparing USDC balance directly against the EOA is wrong."""
+    body = RUNBOOK.read_text()
+    assert "proxy wallet" in body, (
+        "Y8: runbook must name the proxy wallet concept"
+    )
+    assert "Login wallet" in body, (
+        "Y8: runbook must reference the Login wallet UI element so "
+        "operators know which Polymarket UI element to compare"
+    )
+    # Sanity: the Y8 explanation that "EOA balance reads 0 — that's expected"
+    # exists so an operator doesn't flag it as a problem.
+    assert "always read 0" in body or "always reads 0" in body, (
+        "Y8: must call out that the EOA's USDC balance is always 0 and "
+        "that's expected (USDC lives in the proxy wallet)"
+    )

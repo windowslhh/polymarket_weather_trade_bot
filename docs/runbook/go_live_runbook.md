@@ -182,9 +182,18 @@ do not skip steps.  All commands assume:
 
 ### 1.11b Wallet address fingerprint (FIX-2P-8)
 
-- [ ] Print the EOA address the bot has loaded from `ETH_PRIVATE_KEY`
-      so the operator can compare it against the funded Polymarket
-      proxy wallet *before* any live trade fires:
+> **Important — two addresses, one funded** (Y8, 2026-04-26): On
+> Polymarket every account has TWO addresses.  The **signer EOA** is
+> the one derived from `ETH_PRIVATE_KEY` (what `c.get_address()`
+> prints); it signs every order but **does not hold USDC**.  The
+> **proxy wallet** is a contract derived deterministically from the
+> signer EOA, displayed on the Polymarket frontend top-right
+> ("Login wallet"), and is where USDC is actually deposited.  These
+> two addresses are different on purpose; do NOT compare USDC balance
+> against the EOA directly — it will always read 0 and trick you into
+> thinking the bot is unfunded.
+
+- [ ] Print the EOA address the bot has loaded from `ETH_PRIVATE_KEY`:
       ```
       docker compose exec weather-bot python -c \
         "from src.config import load_config; from py_clob_client.client import ClobClient as C; \
@@ -197,10 +206,23 @@ do not skip steps.  All commands assume:
                               api_passphrase=cfg.polymarket_passphrase)); \
          print('signer EOA:', c.get_address())"
       ```
-      Expect: a `0x…` address.  Operator MUST eyeball-match this against
-      the wallet shown on Polymarket frontend / Polygonscan before
-      Part 3 cutover.  A mismatch = wrong key in `.env` → STOP, do
-      NOT flip live; restore the correct key and re-run from 1.6.
+      Expect: a `0x…` address.
+
+- [ ] **Cross-check on Polymarket frontend** (Y8): open the Polymarket
+      site logged in with the same wallet → top-right avatar shows
+      the **Login wallet** address.  This MUST equal the `signer EOA`
+      printed above.  A mismatch means the bot is signing as a
+      different wallet than the one the operator funded — STOP, do
+      NOT flip live; investigate the `.env` key vs the wallet you
+      actually use to deposit, restore the correct key, re-run from 1.6.
+
+- [ ] **USDC balance check** (Y8 clarification): the USDC the bot will
+      spend lives in the **proxy wallet** derived from the signer EOA,
+      NOT in the signer EOA itself.  On the Polymarket frontend the
+      USDC balance you see in the header IS the proxy wallet's
+      balance — that's the right number to compare against the $250
+      gate in step 3.2.  Do NOT paste the signer EOA into Polygonscan
+      and conclude "no USDC" — that is expected (and correct).
 
 ### 1.12 Graceful-shutdown smoke test
 
@@ -479,12 +501,18 @@ Run this list at the moment of cutover from $50 smoke to $200 live.
       Expect: `127.0.0.1:5002` (loopback) OR (if `0.0.0.0:5002`) a
       reverse proxy with auth must front it
 - [ ] Wallet USDC balance ≥ $250:
-      verify on Polymarket frontend; the $50 buffer absorbs slippage +
-      gas without ever risking a failed signed-tx queue.
-      **Reconciliation step** (FIX-2P-8): the address you check on the
-      frontend MUST equal the `signer EOA` printed by step 1.11b.  A
-      mismatch means USDC is sitting in a different wallet than the
-      bot will sign from — pause and resolve before cutover.
+      verify on the Polymarket frontend header (NOT on Polygonscan
+      against the signer EOA — see Y8 note in step 1.11b).  The $50
+      buffer absorbs slippage + gas without ever risking a failed
+      signed-tx queue.
+      **Reconciliation** (FIX-2P-8 + Y8): the **Login wallet** address
+      shown in the Polymarket top-right avatar MUST equal the `signer
+      EOA` printed by step 1.11b.  USDC is held by the **proxy wallet**
+      (a contract derived from the EOA, NOT the EOA itself) — the
+      Polymarket UI shows the proxy wallet's balance.  Comparing USDC
+      against the EOA address directly will always read 0 — that's
+      expected and not a problem; only the EOA-vs-Login-wallet match
+      is the gate.
 
 ### 3.3 Operator readiness
 
