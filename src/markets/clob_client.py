@@ -136,15 +136,21 @@ class ClobClient:
             return OrderResult(order_id=f"paper_{suffix}", success=True, message="paper trade")
 
         client = self._get_client()
+        from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
+        # FIX-2P-1: py-clob-client expects an OrderArgs dataclass (snake_case),
+        # NOT a dict.  Passing a dict reaches the SDK's signer which does
+        # `order_args.token_id` → AttributeError on first live order.  Paper
+        # mode early-returns above so paper smoke testing never exercised
+        # this path; the bug was latent until the first live order would fire.
         order_side = BUY if side.upper() == "BUY" else SELL
-        order_payload = {
-            "tokenID": token_id,
-            "price": price,
-            "side": order_side,
-            "size": size,
-        }
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=order_side,
+        )
 
         # FIX-04: bounded timeout, retry with exponential backoff on transient
         # failures, distinct longer backoff on 429.  Without the timeout, a hung
@@ -155,7 +161,7 @@ class ClobClient:
             try:
                 async with asyncio.timeout(ORDER_TIMEOUT_S):
                     order = await asyncio.to_thread(
-                        client.create_and_post_order, order_payload,
+                        client.create_and_post_order, order_args,
                     )
                 order_id = (
                     order.get("orderID", "") if isinstance(order, dict) else str(order)

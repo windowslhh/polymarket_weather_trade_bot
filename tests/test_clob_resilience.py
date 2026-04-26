@@ -175,3 +175,36 @@ async def test_empty_order_id_no_retry(monkeypatch):
     )
     assert not result.success
     assert client._client.create_and_post_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_passes_OrderArgs_dataclass(monkeypatch):
+    """FIX-2P-1: SDK expects OrderArgs (snake_case dataclass), NOT a dict.
+
+    Pre-fix the function passed a {"tokenID": ..., "size": ..., "side": ...}
+    dict, which would crash inside the SDK signer with AttributeError on
+    ``order_args.token_id``.  Paper mode early-returns before this line so
+    25h of paper trading never exercised the bug — first live order would
+    have failed.  This test pins the dataclass type + snake_case field names.
+    """
+    from py_clob_client.clob_types import OrderArgs
+
+    client = _make_client()
+    captured: dict[str, object] = {}
+
+    def _capture(arg, *_rest):
+        captured["arg"] = arg
+        return {"orderID": "ok"}
+
+    client._client.create_and_post_order = MagicMock(side_effect=_capture)
+
+    result = await client.place_limit_order(
+        token_id="tok-abc", side="BUY", price=0.55, size=12.5,
+    )
+    assert result.success
+    arg = captured["arg"]
+    assert isinstance(arg, OrderArgs)
+    assert arg.token_id == "tok-abc"
+    assert arg.price == 0.55
+    assert arg.size == 12.5
+    assert arg.side == "BUY"
