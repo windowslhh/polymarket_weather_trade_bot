@@ -13,8 +13,14 @@ BACKUP_DIR="$BOT_DIR/data/backups"
 [ -f "$BOT_DIR/docker-compose.yml" ] || { echo "BOT_DIR invalid: no docker-compose.yml at $BOT_DIR"; exit 1; }
 
 # FIX-15: same .env lockdown as full_reset_and_deploy.sh.  Idempotent.
+# FIX-2P-7: chown .env + data/ to UID 1000 (container appuser) so the
+# bot can read both bind mounts without manual operator intervention.
 if [ -f "$BOT_DIR/.env" ]; then
     chmod 600 "$BOT_DIR/.env"
+    chown 1000:1000 "$BOT_DIR/.env"
+fi
+if [ -d "$BOT_DIR/data" ]; then
+    chown -R 1000:1000 "$BOT_DIR/data"
 fi
 
 # 1. Stop the bot

@@ -21,9 +21,21 @@ BACKUP_DIR="$BOT_DIR/data/backups"
 # FIX-15: lock down .env to rw------- so the private key and API creds
 # aren't world-readable.  Noop when .env doesn't exist (fresh install
 # will place it later).
+# FIX-2P-7 (2026-04-26): the container runs as UID 1000 ("appuser") and
+# bind-mounts both data/ and .env.  The runbook called for chowning .env
+# to 1000:1000 alongside data/, but the script only chowned data/ — so
+# every fresh deploy left .env owned by root and the container could
+# read it only because chmod 600 + matching root ownership inside the
+# image happen to align.  Make the chown explicit and idempotent so
+# operators don't have to remember the manual step.
 if [ -f "$BOT_DIR/.env" ]; then
     chmod 600 "$BOT_DIR/.env"
-    echo "  chmod 600 applied to $BOT_DIR/.env"
+    chown 1000:1000 "$BOT_DIR/.env"
+    echo "  chmod 600 + chown 1000:1000 applied to $BOT_DIR/.env"
+fi
+if [ -d "$BOT_DIR/data" ]; then
+    chown -R 1000:1000 "$BOT_DIR/data"
+    echo "  chown -R 1000:1000 applied to $BOT_DIR/data"
 fi
 
 cd "$BOT_DIR"
