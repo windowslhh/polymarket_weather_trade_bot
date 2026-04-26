@@ -35,6 +35,21 @@ def test_setup_local_calls_load_eth_private_key():
     assert "load_eth_private_key" in text
 
 
+def test_setup_local_does_not_print_key_suffix():
+    """The setup script must NOT print any portion of the raw private
+    key — even the last 6 hex chars are enough material to start
+    brute-forcing in adversarial scenarios.  Use the SHA-256 fingerprint
+    from src.security._fingerprint instead."""
+    text = (ROOT / "scripts" / "setup_local.sh").read_text()
+    # No raw key slicing in the keychain-probe block
+    assert "key[-6:]" not in text
+    assert "key[-4:]" not in text
+    assert "key[:6]" not in text
+    assert "key[:8]" not in text
+    # Use the audited helper that emits sha256:xxxxxxxx...xxxx
+    assert "_fingerprint" in text
+
+
 def test_setup_local_creates_runtime_dirs():
     text = (ROOT / "scripts" / "setup_local.sh").read_text()
     for d in ("data", "data/backups", "data/history", "logs"):

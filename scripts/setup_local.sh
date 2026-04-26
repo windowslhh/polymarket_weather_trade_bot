@@ -27,9 +27,9 @@ pip install -r requirements.txt --quiet
 #    — click Always Allow once and subsequent runs are silent.
 echo "→ checking macOS Keychain (service=polymarket-bot, account=private-key)"
 python -c "
-from src.security import load_eth_private_key
+from src.security import _fingerprint, load_eth_private_key
 key = load_eth_private_key()
-print(f'   Keychain OK — wallet ends in 0x...{key[-6:]}')
+print(f'   Keychain OK — fingerprint {_fingerprint(key)}')
 "
 
 # 3. Runtime directories
