@@ -156,11 +156,17 @@ class DailyMaxTracker:
         return utc_dt.date().isoformat()
 
     def _local_today(self, icao: str) -> str:
-        """Get today's date string in the station's local timezone."""
+        """Get today's date string in the station's local timezone.
+
+        FIX-2P-10: when no tz mapping is registered for the ICAO, fall
+        back to UTC instead of server-local (`date.today()`).  Container
+        runs UTC by design, but a dev box in a non-UTC tz would
+        otherwise silently key observations under the wrong date.
+        """
         tz = self._tz_map.get(icao)
         if tz:
             return datetime.now(tz).date().isoformat()
-        return date.today().isoformat()
+        return datetime.now(timezone.utc).date().isoformat()
 
     def update(self, obs: Observation) -> tuple[float, bool]:
         """Update with an observation and return (current_daily_max, is_new_high).
@@ -193,10 +199,16 @@ class DailyMaxTracker:
         return list(self._observations.get((icao, day.isoformat()), []))
 
     def cleanup_old(self, keep_date: date | None = None) -> None:
-        """Remove entries older than keep_date (with 1-day buffer for timezone safety)."""
+        """Remove entries older than keep_date (with 1-day buffer for timezone safety).
+
+        FIX-2P-10: keep_date defaults to UTC today (was server-local
+        date.today()).  All timestamps in this tracker are derived from
+        UTC observation times — anchoring the cleanup cursor in UTC
+        keeps the buffer accounting correct.
+        """
         # Subtract 1 day to avoid cleaning up entries for cities whose local
         # date is behind UTC (e.g. Pacific = UTC-7)
-        keep = ((keep_date or date.today()) - timedelta(days=1)).isoformat()
+        keep = ((keep_date or datetime.now(timezone.utc).date()) - timedelta(days=1)).isoformat()
         to_remove = [k for k in self._maxes if k[1] < keep]
         for k in to_remove:
             del self._maxes[k]

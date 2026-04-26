@@ -58,12 +58,19 @@ def _parse_temp_bounds(label: str) -> tuple[float | None, float | None]:
 
 
 def _parse_date(date_str: str) -> date | None:
-    """Try to parse a date string like 'April 5' or '2026-04-05'."""
+    """Try to parse a date string like 'April 5' or '2026-04-05'.
+
+    FIX-2P-10: year fallback uses UTC date — `date.today()` reads the
+    server-local clock and would silently roll over the year on Dec 31
+    UTC vs Jan 1 server-local (or vice versa) when the bot is hosted
+    in a non-UTC tz.  All schedule + DB rows live in UTC, so anchor
+    here too.
+    """
     for fmt in ("%B %d", "%B %d, %Y", "%Y-%m-%d", "%m/%d/%Y", "%b %d"):
         try:
             dt = datetime.strptime(date_str.strip(), fmt)
             if dt.year == 1900:
-                dt = dt.replace(year=date.today().year)
+                dt = dt.replace(year=datetime.now(timezone.utc).year)
             return dt.date()
         except ValueError:
             continue
