@@ -537,6 +537,33 @@ Run this list at the moment of cutover from $50 smoke to $200 live.
       whole time.  Any unexpected ERROR/CRITICAL → pause.
 - [ ] First BUY: open Polymarket frontend, confirm the position
       matches `positions` row for that token_id and strategy
+- [ ] **Y10 fee-formula sanity check** (do this on the FIRST live BUY):
+      pick a small NO buy ideally near price 0.50 to maximise the
+      fee signal.  Open the Polymarket order receipt for that fill.
+      Compute the expected fee using the canonical formula:
+      ```
+      expected_fee_usd = TAKER_FEE_RATE * price * (1 - price) * size_usd
+                       = 0.05 * p * (1 - p) * size_usd
+      ```
+      For a 1-share buy at p=0.50, size_usd ≈ 0.50:
+      ```
+      expected_fee = 0.05 * 0.50 * 0.50 * 0.50 = $0.00625
+      ```
+      Pull the actual USDC delta from the Polymarket receipt (or query
+      Polygonscan for the proxy wallet's USDC outflow on that tx).
+      Compare:
+      - Within ±10% of expected → fee formula correct (FIX-2P-2 in
+        force on Polymarket's side too)
+      - **2× higher** than expected → Polymarket's broker is applying
+        the formula WITH a ×2 factor that we removed in FIX-2P-2.
+        🚨 **EMERGENCY ROLLBACK** via 3.6.  All current EV calculations
+        will be undercounting fee by half — the LOCKED_WIN cap and
+        EV_BELOW_GATE filters are wrong, prepare to revert FIX-2P-2.
+      - 4× higher → both the rate AND the ×2 factor were wrong; same
+        rollback action.
+      Record the actual fee in your operator log alongside the
+      expected number — you only need to do this once per cutover, not
+      on every trade.
 - [ ] First EXIT or TRIM: confirm `positions.status='closed'`,
       `realized_pnl` populated, and `decision_log` has the matching
       reason; no orphan in `orders WHERE status='pending'`

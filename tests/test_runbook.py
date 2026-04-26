@@ -37,6 +37,29 @@ def test_runbook_usdc_balance_step_references_signer_eoa() -> None:
     )
 
 
+def test_runbook_has_y10_fee_formula_smoke_check() -> None:
+    """Y10: the runbook must have a step that, on the first live BUY,
+    cross-checks the actual USDC fee against the FIX-2P-2 formula.
+    A 2× discrepancy = Polymarket applies a ×2 factor we removed,
+    triggering emergency rollback."""
+    body = RUNBOOK.read_text()
+    # The formula must be quoted explicitly so the operator doesn't
+    # have to grep for it during a live cutover.
+    assert "0.05 * p * (1 - p) * size_usd" in body or \
+        "0.05 * price * (1 - price) * size_usd" in body, (
+        "Y10: runbook must show the canonical fee formula"
+    )
+    # Worked example tying $0.00625 to p=0.50 + size=0.50
+    assert "$0.00625" in body, (
+        "Y10: runbook must show a concrete worked example so the "
+        "operator can verify against a real Polymarket receipt"
+    )
+    # Rollback escalation language
+    assert "EMERGENCY ROLLBACK" in body, (
+        "Y10: 2× fee discrepancy must escalate to emergency rollback"
+    )
+
+
 def test_runbook_distinguishes_signer_eoa_from_proxy_wallet() -> None:
     """Y8: the runbook must explicitly explain that the signer EOA and
     the USDC-holding proxy wallet are DIFFERENT addresses, and that
