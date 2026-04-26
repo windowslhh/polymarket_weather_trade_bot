@@ -43,14 +43,14 @@ def test_trim_ev_subtracts_taker_fee():
     """Make the absolute-EV gate fire exactly on the boundary so we can
     observe the taker-fee delta.
 
-    With price=0.80 and win_prob=0.50:
+    With price=0.80 and win_prob=0.50 (post-FIX-2P-2 fee = 5%):
         raw_ev   = 0.5*(1-0.8) - 0.5*0.8         = -0.30
-        fee_adj  = -2*0.015*0.8*(1-0.8)          = -0.0048 (per gates.py constants)
-        net_ev   = -0.3048
+        fee_adj  = -0.05*0.8*(1-0.8)             = -0.008
+        net_ev   = -0.308
 
     The config's min_trim_ev_absolute = 0.30.  With the pre-FIX-14
     formula (no fee), ev = -0.30; -0.30 < -0.30 is False → no TRIM.
-    With FIX-14 applied, ev = -0.3048; -0.3048 < -0.30 is True → TRIM.
+    With FIX-14 applied, ev = -0.308; -0.308 < -0.30 is True → TRIM.
     """
     slot = _slot(price_no=0.80, token_no="tn_trim")
     event = _event()
@@ -87,3 +87,21 @@ def test_fee_helper_constant():
     assert entry_fee_per_dollar(0.5) > 0
     assert entry_fee_per_dollar(0.0) == 0
     assert entry_fee_per_dollar(1.0) == 0
+
+
+def test_fee_formula_matches_post_2026_03_30_rollout():
+    """FIX-2P-2: pin the post-rollout 5% fee formula.
+
+    Polymarket's 2026-03-30 rollout set Weather at 5% taker, with the
+    canonical formula ``fee_per_dollar = rate * p * (1 - p)`` (no ×2
+    factor).  Pre-fix used 1.25% AND ×2 → roughly half the true fee,
+    overstating backtest PnL and squeezing the LOCKED_WIN ev>0 safety
+    net to where 1-tick paper→live slippage flipped EV negative.
+    """
+    from src.strategy.gates import TAKER_FEE_RATE
+
+    assert TAKER_FEE_RATE == 0.05
+    # peak at p=0.5: 5% * 0.25 = 0.0125 = 1.25 cents per dollar
+    assert abs(entry_fee_per_dollar(0.5) - 0.0125) < 1e-9
+    # at LOCKED_WIN cap p=0.95: 5% * 0.95 * 0.05 = 0.002375
+    assert abs(entry_fee_per_dollar(0.95) - 0.002375) < 1e-9

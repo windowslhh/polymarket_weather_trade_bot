@@ -228,16 +228,17 @@ def test_trim_absolute_gate_fires_on_hard_reversal_regardless_of_entry():
 
 def test_trim_empty_entry_ev_map_falls_back_to_absolute_only():
     """When entry_ev_map is empty, relative gate is inactive (absolute only)."""
-    # Slight decay: ev≈-0.02 → would trip relative (if entry_ev known) but not absolute.
+    # Slight decay: ev≈-0.032 (post-FIX-2P-2 5% fee) — would trip relative
+    # gate (if entry_ev known) but not absolute (threshold 0.04).
     event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.52)
     forecast = _make_forecast(75.0)
     config = StrategyConfig(
-        min_trim_ev_absolute=0.03,
+        min_trim_ev_absolute=0.04,
         trim_ev_decay_ratio=0.75,
     )
 
     signals = evaluate_trim_signals(event, forecast, [slot], config)  # no entry_ev_map
-    # ev≈-0.02 > -0.03 → absolute gate not tripped; relative inactive → no trim
+    # ev≈-0.032 > -0.04 → absolute gate not tripped; relative inactive → no trim
     assert len(signals) == 0
 
 

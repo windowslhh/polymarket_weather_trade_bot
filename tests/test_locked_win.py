@@ -161,7 +161,7 @@ class TestLockedWinDetection:
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1
         p = 0.90
-        fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
+        fee = TAKER_FEE_RATE * p * (1.0 - p)  # FIX-2P-2: 5% rate, no ×2 factor
         expected_ev = 0.999 * (1.0 - p) - 0.001 * p - fee
         assert abs(sigs[0].expected_value - expected_ev) < 1e-9
         assert sigs[0].expected_value > 0, "EV must remain positive after fee deduction"
@@ -226,7 +226,7 @@ class TestLockedWinPriceCap:
         sigs = evaluate_locked_win_signals(event, 76.0, _CFG, daily_max_final=True)
         assert len(sigs) == 1, "Below-slot lock at 0.89 must pass (under 0.90 cap)"
         p = 0.89
-        fee = TAKER_FEE_RATE * 2.0 * p * (1.0 - p)
+        fee = TAKER_FEE_RATE * p * (1.0 - p)  # FIX-2P-2: 5% rate, no ×2 factor
         expected_ev = 0.999 * (1.0 - p) - 0.001 * p - fee
         assert abs(sigs[0].expected_value - expected_ev) < 1e-9
         assert sigs[0].expected_value > 0

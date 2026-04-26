@@ -117,22 +117,29 @@ class Gate(Protocol):
 # Shared primitives — fee / win-prob helpers
 # ──────────────────────────────────────────────────────────────────────
 
-# Polymarket taker fee for the Weather category (as of 2026).  Weather
-# markets charge 1.25% base rate, probability-weighted so the fee is
-# highest at 50/50 and decreases toward 0 or 1.  Formula:
-#   fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
-# (peaks at price=0.50: 0.625% per dollar; at price=0.70: 0.525%/$).
-# Makers pay 0%; we assume all our orders execute as taker.
+# Polymarket taker fee for the Weather category.  The 2026-03-30 fee
+# rollout set Weather at 5% (was 1.25%), probability-weighted so the
+# fee is highest at 50/50 and decreases toward 0 or 1.  Formula:
+#   fee_per_dollar = TAKER_FEE_RATE * price * (1 - price)
+# (peaks at price=0.50: 1.25% per dollar; at price=0.95: 0.2375%/$).
+#
+# FIX-2P-2 (2026-04-26): pre-fix this module hard-coded TAKER_FEE_RATE=0.0125
+# AND multiplied by 2.0, computing roughly half the post-rollout true fee.
+# LOCKED_WIN entries at p≈0.95 had razor-thin paper EV that flipped negative
+# at the corrected fee; the 0.95 cap and ev>0 gate now operate against the
+# real fee surface.  Makers pay 0%; we assume all our orders execute as
+# taker.  Preflight (FIX-2P-6) reads the rate from the broker on startup
+# and alerts on drift — see src/preflight.py.
 #
 # Single canonical definition lives here because both this module and
 # evaluator.py reference it; evaluator re-exports the name so callers
 # that predate the M2 refactor keep working.
-TAKER_FEE_RATE: float = 0.0125
+TAKER_FEE_RATE: float = 0.05
 
 
 def entry_fee_per_dollar(price: float) -> float:
     """Compute Polymarket taker fee per dollar invested at *price*."""
-    return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
+    return TAKER_FEE_RATE * price * (1.0 - price)
 
 
 # ──────────────────────────────────────────────────────────────────────

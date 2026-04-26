@@ -160,23 +160,21 @@ def _simulate_market_prices(
     return simulated
 
 
-def _compute_taker_fee(price: float, size_usd: float, fee_rate: float = 0.0125) -> float:
+def _compute_taker_fee(price: float, size_usd: float, fee_rate: float = 0.05) -> float:
     """Compute Polymarket taker fee for weather markets.
 
-    Fee structure (as of 2026):
-    - Weather category: 1.25% base rate
-    - Fee is probability-weighted: peaks at 50% price, decreases toward extremes
-    - Fee = fee_rate * price * (1 - price) * 2 * size_in_shares
+    Fee structure (post 2026-03-30 rollout):
+    - Weather category: 5% base rate (was 1.25%)
+    - Probability-weighted: peaks at 50% price, decreases toward extremes
+    - Fee per dollar invested = fee_rate * price * (1 - price)
     - For takers only; makers pay 0%
 
-    We assume all our orders are taker (market/aggressive limit orders).
+    FIX-2P-2 (2026-04-26): pre-fix used fee_rate=0.0125 AND multiplied by
+    2.0, computing roughly half the post-rollout true fee.  All historical
+    backtest reports prior to this change overstate net PnL.
     """
-    # Probability-weighted fee: higher at 50/50, lower at extremes
-    # This matches Polymarket's actual fee formula
-    prob_weight = 2.0 * price * (1.0 - price)  # peaks at 0.5
-    shares = size_usd / price if price > 0 else 0
-    fee = fee_rate * prob_weight * shares * price
-    return fee
+    fee_per_dollar = fee_rate * price * (1.0 - price)
+    return fee_per_dollar * size_usd
 
 
 def _run_day(
@@ -188,7 +186,7 @@ def _run_day(
     error_dist: ForecastErrorDistribution | None,
     slot_width: float = 2.0,
     slot_range: float = 30.0,
-    taker_fee_rate: float = 0.0125,
+    taker_fee_rate: float = 0.05,
 ) -> DayResult:
     """Simulate one day of trading for one city.
 
