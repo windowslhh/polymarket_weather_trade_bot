@@ -33,16 +33,18 @@
     {% endfor %}
 </div>
 
-<!-- Positions by Strategy (B-only live; legacy A/C/D rolled into B for display) -->
-{% set strat_labels = {'B':'Locked Aggressor'} %}
+<!-- Positions by Strategy.  Iterates ``strategies`` keyed by every active
+     variant + any legacy variant with surviving rows.  Tag class / label /
+     description come from ``strat_meta[name]`` so adding a new variant
+     in src/config.py automatically renders here. -->
 {% for strat_name in strategies.keys()|sort %}
-{% set strat_label = strat_labels.get(strat_name, strat_name) %}
+{% set _meta = strat_meta.get(strat_name, {'label': strat_name, 'tag_class': 'tag-stable', 'description': ''}) %}
 {% set strat_positions = strategies[strat_name] %}
 <div class="panel" style="margin-bottom:16px;">
     <div class="panel-header">
         <h3>
-            <span class="tag tag-stable" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
-            {{ strat_label }}
+            <span class="tag {{ _meta.tag_class }}" style="font-size:13px;margin-right:6px;">{{ strat_name }}</span>
+            {{ _meta.label }}
         </h3>
         <div style="display:flex;gap:16px;font-size:12px;">
             <span style="color:var(--text-muted);">{{ strat_positions|length }} positions</span>
@@ -131,7 +133,7 @@
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
-            <td><span class="tag {% if p.strategy == 'A' %}tag-settling{% elif p.strategy == 'B' %}tag-stable{% elif p.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}">{{ p.strategy if p.strategy else 'B' }}</span></td>
+            <td><span class="tag {{ strat_meta.get(p.strategy, {'tag_class':'tag-stable'}).tag_class }}">{{ p.strategy if p.strategy else '?' }}</span></td>
             <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
             <td class="td-mono" style="{% if p.exit_price is not none %}color:{{ 'var(--green-text)' if p.exit_price > p.entry_price else 'var(--red-text)' if p.exit_price < p.entry_price else 'var(--text)' }}{% endif %}">
                 {{ "%.3f"|format(p.exit_price) if p.exit_price is not none else '-' }}
