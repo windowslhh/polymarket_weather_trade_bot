@@ -110,6 +110,17 @@ class StrategyConfig:
     exit_cooldown_hours: float = 4.0
     # Dynamic threshold: scale distance by real-time ensemble spread ratio
     enable_spread_adjustment: bool = True
+    # cycle-frequency-fix (2026-04-27): when True, the 15-min position
+    # check runs evaluate_no_signals on the cached event list with
+    # freshly-refreshed Gamma prices.  Closes the 60-min sampling gap
+    # that caused local paper to miss the Miami 88-89°F entry window
+    # (price was at 0.70 for ~15 min, fell between local cycles).
+    # Cheap by design: the entry scan does NOT re-discover markets,
+    # does NOT refresh forecasts, and does NOT pull METAR — those are
+    # already kept fresh by refresh_forecasts() / METAR sync.  Only
+    # Gamma outcomePrices are re-fetched.  Default ON because this is
+    # a bug fix, not a feature.
+    enable_position_check_entry_scan: bool = True
     # Fix 5: thin-liquidity cities get a reduced per-city exposure cap.
     # Rationale: Gamma-volume median for Miami / SF / Tampa / Orlando sits around
     # $800-1500 vs $3000+ elsewhere, yet they share the same exposure cap —
