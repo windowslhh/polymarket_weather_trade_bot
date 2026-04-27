@@ -161,6 +161,58 @@ class TestApiCredsResolution:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Derive failure modes (P-A10d)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestDeriveFailureModes:
+    """py-clob-client's create_or_derive_api_creds has two known fail
+    modes — a silent None return and a network exception.  Both must
+    be handled before the bot caches a half-built client and fails
+    cryptically at the first live BUY.
+    """
+
+    def test_derive_returning_none_raises_clear_error(self, monkeypatch):
+        """SDK silent-fail mode: create_or_derive returns None instead of
+        raising.  Without explicit None-check, we'd cache broken client
+        (no creds set) and fail at first BUY with an opaque auth error.
+        """
+        _clob_class, instance, _ = _stub_py_clob_client(monkeypatch)
+        instance.create_or_derive_api_creds.return_value = None
+        cfg = _make_cfg()
+
+        client = ClobClient(cfg)
+        with pytest.raises(RuntimeError, match="returned None"):
+            client._get_client()
+
+        # set_api_creds must NOT have been called with None — the guard
+        # has to fire before that point or py-clob-client's internal
+        # state ends up half-initialised.
+        instance.set_api_creds.assert_not_called()
+        # And self._client must NOT be cached on failure, so a retry
+        # (e.g. preflight loop, restart) gets a fresh derive attempt.
+        assert client._client is None
+
+    def test_derive_network_error_propagates(self, monkeypatch):
+        """Network failure during derive should propagate to caller —
+        preflight (check_clob_reachable) catches it and refuses to start
+        the scheduler.  Swallowing here would cache a half-built client
+        the same way the None case does.
+        """
+        _clob_class, instance, _ = _stub_py_clob_client(monkeypatch)
+        instance.create_or_derive_api_creds.side_effect = ConnectionError(
+            "CLOB unreachable",
+        )
+        cfg = _make_cfg()
+
+        client = ClobClient(cfg)
+        with pytest.raises(ConnectionError, match="CLOB unreachable"):
+            client._get_client()
+
+        instance.set_api_creds.assert_not_called()
+        assert client._client is None
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Lazy-init invariant
 # ──────────────────────────────────────────────────────────────────────
 
