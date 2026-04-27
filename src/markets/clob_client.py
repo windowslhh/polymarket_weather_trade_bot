@@ -90,11 +90,16 @@ class ClobClient:
             return self._client
 
         try:
-            from py_clob_client.client import ClobClient as _ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            # v2-2 (2026-04-27): switched from ``py_clob_client`` to
+            # ``py_clob_client_v2`` ahead of the 2026-04-28 11:00 UTC
+            # exchange cutover.  Same constructor kwargs (host, chain_id,
+            # key, creds, signature_type, funder) — only the import path
+            # changes here.  Method renames land in v2-3..v2-5.
+            from py_clob_client_v2 import ClobClient as _ClobClient, ApiCreds
         except ImportError:
             logger.error(
-                "py-clob-client not installed. Install with: pip install py-clob-client"
+                "py-clob-client-v2 not installed. "
+                "Install with: pip install py-clob-client-v2"
             )
             raise
 
@@ -128,7 +133,11 @@ class ClobClient:
             )
         else:
             logger.info("CLOB creds: deriving from private key (free, signs once)")
-            creds = client.create_or_derive_api_creds()
+            # v2-2 (2026-04-27): renamed in v2 SDK,
+            # ``create_or_derive_api_creds`` → ``create_or_derive_api_key``.
+            # Same semantics: signs once with the L1 key, server returns
+            # the deterministic L2 ApiCreds tied to the EOA.
+            creds = client.create_or_derive_api_key()
             # Defensive: py-clob-client has historically had silent-failure
             # paths that return None instead of raising when the upstream
             # /api-key endpoint returns a 5xx or a malformed body.  Without
@@ -139,7 +148,7 @@ class ClobClient:
             # preflight + the startup banner catch it instead.
             if creds is None:
                 raise RuntimeError(
-                    "Polymarket create_or_derive_api_creds returned None — "
+                    "Polymarket create_or_derive_api_key returned None — "
                     "API likely returned a malformed response.  Check "
                     "https://clob.polymarket.com status; recovery: restart "
                     "the bot once Polymarket recovers.",
@@ -199,15 +208,21 @@ class ClobClient:
             return OrderResult(order_id=f"paper_{suffix}", success=True, message="paper trade")
 
         client = self._get_client()
-        from py_clob_client.order_builder.constants import BUY, SELL
+        # v2-3 (2026-04-27): v2 SDK requires a typed ``OrderArgs`` (not
+        # the raw dict the v1 SDK accepted) plus an explicit
+        # ``OrderType``.  The third method arg ``options`` stays None
+        # so the server picks the tick size dynamically — Polymarket's
+        # weather slots have used 0.01 ticks consistently and we don't
+        # want a hard-coded value to drift if microstructure changes.
+        from py_clob_client_v2 import OrderArgs, OrderType, Side
 
-        order_side = BUY if side.upper() == "BUY" else SELL
-        order_payload = {
-            "tokenID": token_id,
-            "price": price,
-            "side": order_side,
-            "size": size,
-        }
+        order_side = Side.BUY if side.upper() == "BUY" else Side.SELL
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=order_side,
+        )
 
         # FIX-04: bounded timeout, retry with exponential backoff on transient
         # failures, distinct longer backoff on 429.  Without the timeout, a hung
@@ -218,7 +233,10 @@ class ClobClient:
             try:
                 async with asyncio.timeout(ORDER_TIMEOUT_S):
                     order = await asyncio.to_thread(
-                        client.create_and_post_order, order_payload,
+                        client.create_and_post_order,
+                        order_args,
+                        None,  # PartialCreateOrderOptions: server picks tick
+                        OrderType.GTC,
                     )
                 order_id = (
                     order.get("orderID", "") if isinstance(order, dict) else str(order)
@@ -285,7 +303,18 @@ class ClobClient:
 
         client = self._get_client()
         try:
-            await asyncio.to_thread(client.cancel, order_id)
+            # v2-4 (2026-04-27): v1 SDK exposed ``client.cancel(order_id)``
+            # taking a bare string; v2 SDK splits that into:
+            #   - ``cancel_order(payload: OrderPayload)`` — single
+            #   - ``cancel_orders(order_hashes: list)`` — batch
+            #   - ``cancel_all()`` — every open order for this account
+            # We always cancel exactly one known order_id, so the
+            # single-shape is the right replacement.  Note the field
+            # name is ``orderID`` (camelCase) not ``order_id``.
+            from py_clob_client_v2.clob_types import OrderPayload
+            await asyncio.to_thread(
+                client.cancel_order, OrderPayload(orderID=order_id),
+            )
             logger.info("Order cancelled: %s", order_id)
             return True
         except Exception:
@@ -350,8 +379,8 @@ class ClobClient:
         Strategy:
         1. Call get_trades(asset_id=token_id, after=created_at_epoch-300)
            and scan for a matching trade.  If found → 'filled'.
-        2. Else call get_orders(asset_id=token_id) and scan for a matching
-           open order.  If found → 'open' (resting limit on CLOB).
+        2. Else call get_open_orders(asset_id=token_id) and scan for a
+           matching open order.  If found → 'open' (resting limit on CLOB).
         3. Else → 'unknown' (safe to mark failed; a subsequent manual
            review of CLOB trade history confirms).
 
@@ -365,10 +394,16 @@ class ClobClient:
             )
 
         try:
-            from py_clob_client.clob_types import OpenOrderParams, TradeParams
+            # v2-5 (2026-04-27): import path moved to py_clob_client_v2
+            # ahead of the 2026-04-28 exchange cutover.  Param dataclass
+            # fields (asset_id / after) unchanged from v1.
+            from py_clob_client_v2.clob_types import (
+                OpenOrderParams, TradeParams,
+            )
         except ImportError:
             return ProbeResult(
-                state="unreachable", message="py-clob-client not installed",
+                state="unreachable",
+                message="py-clob-client-v2 not installed",
             )
 
         client = self._get_client()
@@ -450,8 +485,12 @@ class ClobClient:
                     )
 
             # Probe open orders (still resting).
+            # v2-5 (2026-04-27): v1 SDK ``client.get_orders(params)`` →
+            # v2 SDK ``client.get_open_orders(params)``.  Same param
+            # shape (``OpenOrderParams(asset_id=...)``); only the method
+            # name changed.
             oparams = OpenOrderParams(asset_id=token_id)
-            orders_resp = await asyncio.to_thread(client.get_orders, oparams)
+            orders_resp = await asyncio.to_thread(client.get_open_orders, oparams)
             orders_list = _extract_list(orders_resp)
             for o in orders_list:
                 if _match_order(o):
@@ -460,7 +499,7 @@ class ClobClient:
                         order_id=str(o.get("id") or o.get("order_id") or ""),
                         price=float(o.get("price", 0)),
                         size=float(o.get("original_size", o.get("size", 0))),
-                        message="matched via get_orders",
+                        message="matched via get_open_orders",
                     )
         except Exception as exc:
             logger.exception("probe_order_status raised")

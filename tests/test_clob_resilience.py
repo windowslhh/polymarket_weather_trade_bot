@@ -175,3 +175,85 @@ async def test_empty_order_id_no_retry(monkeypatch):
     )
     assert not result.success
     assert client._client.create_and_post_order.call_count == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# v2-6: typing pins for v2 SDK call shapes
+# These guard against accidental reverts to v1's untyped (dict / bare
+# string) call shapes that would silently break against the v2 server.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_v2_create_and_post_order_receives_typed_OrderArgs(monkeypatch):
+    """v2-6: ``client.create_and_post_order`` must be called with a
+    typed ``OrderArgs`` instance (NOT a v1-shaped raw dict) AND an
+    explicit ``OrderType`` value.  v1's untyped dict shape silently
+    fails on the v2 server.
+    """
+    from py_clob_client_v2 import OrderArgs, OrderType, Side
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(return_value={"orderID": "ok"})
+
+    result = await client.place_limit_order(
+        token_id="tok-v2", side="BUY", price=0.55, size=10.0,
+        idempotency_key="key-v2",
+    )
+
+    assert result.success
+    assert client._client.create_and_post_order.call_count == 1
+
+    # Inspect the positional args the production code passed.
+    call = client._client.create_and_post_order.call_args
+    args = call.args
+    # 3 positional: order_args, options, order_type
+    assert len(args) == 3, (
+        f"v2 SDK requires (OrderArgs, options, OrderType) — got {len(args)} args"
+    )
+    order_args, options, order_type = args
+
+    # 1. OrderArgs is the typed v2 dataclass, not a dict.
+    assert isinstance(order_args, OrderArgs), (
+        f"first arg must be OrderArgs, got {type(order_args).__name__}"
+    )
+    assert order_args.token_id == "tok-v2"
+    assert order_args.price == 0.55
+    assert order_args.size == 10.0
+    # Side is the v2 IntEnum (BUY=0, SELL=1), not the v1 string.
+    assert order_args.side == Side.BUY
+
+    # 2. options=None lets the server pick tick size dynamically.
+    assert options is None
+
+    # 3. OrderType must be GTC (the default — passing it explicitly
+    #    is the v2 contract).
+    assert order_type == OrderType.GTC
+
+
+@pytest.mark.asyncio
+async def test_v2_cancel_uses_OrderPayload_not_string():
+    """v2-6: ``client.cancel_order`` must be called with a typed
+    ``OrderPayload(orderID=...)`` (NOT v1's bare ``client.cancel(str)``).
+    """
+    from py_clob_client_v2.clob_types import OrderPayload
+    client = _make_client()
+    client._client.cancel_order = MagicMock(return_value={"success": True})
+
+    ok = await client.cancel_order("test-order-123")
+    assert ok is True
+    assert client._client.cancel_order.call_count == 1
+
+    payload = client._client.cancel_order.call_args.args[0]
+    assert isinstance(payload, OrderPayload), (
+        f"v2 SDK requires OrderPayload, got {type(payload).__name__}"
+    )
+    # Field is camelCase ``orderID`` matching the v2 wire format.
+    assert payload.orderID == "test-order-123"
+
+    # And the v1 ``client.cancel`` (bare string) must NEVER fire — a
+    # regression that reverted the v2 rename would set this attribute
+    # via auto-mock.  Pin its absence.
+    assert not getattr(client._client, "cancel").called, (
+        "v1 client.cancel(order_id) shape must not be used — "
+        "regression to pre-v2-4 shape detected"
+    )

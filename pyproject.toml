@@ -8,7 +8,14 @@ version = "0.1.0"
 description = "Automated Polymarket weather temperature trading bot"
 requires-python = ">=3.11"
 dependencies = [
+    # Polymarket exchange v1 — kept temporarily as a rollback safety net
+    # for ~1 week post-cutover (2026-04-28).  After we verify v2 is
+    # stable on both VPS paper and local live, drop this line.
     "py-clob-client>=0.5.0",
+    # Polymarket exchange v2 — primary client from 2026-04-28 onward.
+    # Parallel install (different module name ``py_clob_client_v2``) so
+    # both packages can coexist while the migration lands.
+    "py-clob-client-v2>=1.0.0",
     "httpx>=0.27.0",
     "apscheduler>=3.10.0",
     "aiosqlite>=0.20.0",
