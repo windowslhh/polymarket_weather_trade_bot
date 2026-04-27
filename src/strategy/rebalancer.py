@@ -895,8 +895,19 @@ class Rebalancer:
                     and not _cb_block_buys
                     and self._last_events
                 ):
-                    entry_scan_signals = await self._run_entry_scan(now=now)
-                    signals.extend(entry_scan_signals)
+                    # cycle-fix-5: isolated try/except — an entry-scan
+                    # bug must not block phase-5 ``execute_signals`` for
+                    # the EXIT/TRIM signals already collected in the
+                    # held-position phase.  Closing trades are always
+                    # allowed and must reach the executor.
+                    try:
+                        entry_scan_signals = await self._run_entry_scan(now=now)
+                        signals.extend(entry_scan_signals)
+                    except Exception:
+                        logger.exception(
+                            "Entry scan failed; continuing with EXIT/TRIM "
+                            "signals only (held-position safety unaffected)",
+                        )
                 # ─────────────────────────────────────────────────────────
 
                 # Execute any urgent trades

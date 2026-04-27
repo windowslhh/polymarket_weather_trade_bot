@@ -301,6 +301,35 @@ async def test_path6_forecast_cache_miss_skips_event(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_entry_scan_exception_does_not_block_exit_trim(monkeypatch):
+    """cycle-fix-5: a bug inside _run_entry_scan must NOT swallow the
+    held-position EXIT/TRIM signals already in the merged list.  The
+    isolation try/except in run_position_check is the safety net.
+
+    Closing trades are always allowed (matches the daily-loss circuit
+    breaker invariant); a regression here would mean a flaky entry-scan
+    bug could prevent a needed EXIT from reaching the executor.
+    """
+    reb = _mock_rebalancer()
+    event = _build_event(no_price=0.55)
+    _seed_forecast(reb, event)
+    reb._last_events = [event]
+
+    # Force entry scan to crash hard.
+    boom = AsyncMock(side_effect=RuntimeError("entry-scan synthetic failure"))
+    with patch.object(reb, "_run_entry_scan", new=boom):
+        signals = await reb.run_position_check()
+
+    # Function returned cleanly (no propagated exception) — the empty
+    # list is fine; what matters is we got here at all.  The held-
+    # position phase produced no signals because no positions held;
+    # the test's job is to assert the run_position_check itself
+    # doesn't bubble the entry-scan failure.
+    assert isinstance(signals, list)
+    boom.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_path7_held_token_dedup(monkeypatch):
     """Path 7: held position on (event, token, strategy) → entry scan
     must not re-buy the same token.  Mirrors what happens when a
