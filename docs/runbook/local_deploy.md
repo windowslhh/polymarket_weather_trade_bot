@@ -9,9 +9,20 @@ phases: **setup** (one-time) and **run** (foreground or launchd).
 - `polymarket_trade_bot` already installed and its private key already
   stored in macOS Keychain at `service=polymarket-bot, account=private-key`.
   Both bots share that one entry — no need to re-import.
-- A `.env` at the repo root with the CLOB API credentials filled in
-  (POLYMARKET_API_KEY / SECRET / PASSPHRASE).  `.env.example` lists every
-  variable the bot reads.
+- A `.env` at the repo root.  Only `FUNDER_ADDRESS` is required for
+  live trading; everything else (API creds, signing key) is auto-derived
+  at startup.  Copy `.env.example` to `.env` and fill in `FUNDER_ADDRESS`:
+
+  - **polymarket.com web user**: log in to polymarket.com, click your
+    avatar → **Profile** → **Wallet**.  Copy the *"Polymarket address"*
+    (a Gnosis Safe — that's where your deposited USDC lives).  Paste it
+    after `FUNDER_ADDRESS=`.
+  - **direct EOA setup**: leave `FUNDER_ADDRESS=0x` (the default
+    placeholder) or empty.  ClobClient runs in EOA mode and signs as
+    the wallet whose private key is in Keychain.
+
+  See `.env.example` for the full list of optional fields
+  (`TRIGGER_SECRET`, `ALERT_WEBHOOK_URL`, etc.).
 
 ## Setup (one-time)
 
@@ -21,7 +32,8 @@ cd ~/polymarket_weather_trade_bot
 ```
 
 The script:
-1. Creates `.venv/` with python3.11 and installs `requirements.txt`.
+1. Creates `.venv/` and installs the package (`pip install -e ".[dev]"`
+   — pulls runtime deps from pyproject.toml plus pytest).
 2. Loads the private key from Keychain — the **first** run pops a system
    dialog *"weather-bot wants to use the polymarket-bot keychain entry"*.
    Click **Always Allow** so re-runs and the launchd job stay silent.
@@ -29,6 +41,16 @@ The script:
 4. `chmod 600 .env` — owner-read only.
 5. Runs the full pytest suite (~2 min).  Setup fails loud if anything
    breaks — fix it before starting the bot.
+
+## What gets auto-derived
+
+You do **not** need to fill these into `.env`:
+
+- `ETH_PRIVATE_KEY` — read from Keychain at startup.
+- `POLYMARKET_API_KEY` / `SECRET` / `PASSPHRASE` — derived by
+  `py-clob-client.create_or_derive_api_creds()` on first live request.
+  Free, deterministic, signs once with the L1 key.  Pre-provisioning the
+  three values still works (back-compat) and short-circuits the derive.
 
 ## Run — foreground
 
