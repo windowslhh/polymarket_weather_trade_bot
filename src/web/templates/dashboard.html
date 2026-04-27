@@ -48,19 +48,24 @@
 <div class="grid-2">
     {% if strategy_summary %}
     <div class="panel">
-        <div class="panel-header"><h3>Strategy B</h3></div>
+        <div class="panel-header"><h3>Strategy variants</h3></div>
         <table>
             <thead><tr><th>Strat</th><th>Style</th><th>Open</th><th>Settled</th><th>Exposure</th><th>Realized</th></tr></thead>
             <tbody>
+            {# Iterates whatever the route handed us — strategy_summary is
+               already filtered to active variants by app.py.  Tag class /
+               label come from strat_meta so a new variant in
+               get_strategy_variants() shows up here automatically. #}
             {% for s in strategy_summary %}
+            {% set _meta = strat_meta.get(s.strategy, {'label': s.strategy, 'tag_class': 'tag-stable'}) %}
             <tr>
-                <td><span class="tag tag-stable">B</span></td>
-                <td style="font-size:11px;color:var(--text-muted);">Locked Aggressor</td>
+                <td><span class="tag {{ _meta.tag_class }}">{{ s.strategy }}</span></td>
+                <td style="font-size:11px;color:var(--text-muted);">{{ _meta.label }}</td>
                 <td class="td-mono">{{ s.open_positions }}</td>
                 <td class="td-mono">{{ s.settled_positions }}</td>
                 <td class="td-mono">${{ "%.1f"|format(s.exposure) }}</td>
-                <td class="td-mono {{ 'positive' if strat_realized.get('B', 0) >= 0 else 'negative' }}" style="font-weight:600;">
-                    {{ '+' if strat_realized.get('B', 0) > 0 else '' }}${{ "%.2f"|format(strat_realized.get('B', 0)) }}
+                <td class="td-mono {{ 'positive' if strat_realized.get(s.strategy, 0) >= 0 else 'negative' }}" style="font-weight:600;">
+                    {{ '+' if strat_realized.get(s.strategy, 0) > 0 else '' }}${{ "%.2f"|format(strat_realized.get(s.strategy, 0)) }}
                 </td>
             </tr>
             {% endfor %}

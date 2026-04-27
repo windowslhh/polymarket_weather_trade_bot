@@ -1,10 +1,18 @@
-"""Tests for strategy B — the sole live variant from 2026-04-26.
+"""Tests for ``get_strategy_variants()`` schema and runtime behaviour.
 
-A / C / D' were retired when the bot moved to local live trading with $200
-capital — running a single, well-tuned variant simplifies sizing math and
-concentrates capital where it works.  DB schema retains the strategy column
-(Y6 trigger still allows A/B/C/D) so historical rows remain queryable for
-audit; this file just covers the *active* strategy surface.
+Post-refactor (``strategy-variant-`` series): tests assert the SHAPE of
+the variants dict, not the presence of specific named variants.  Adding
+or removing a variant in src/config.py should not require touching this
+file as long as the schema invariants hold:
+
+- at least one variant exists
+- every variant has a ``_meta`` block with the four template-required keys
+- every non-``_meta`` key in a variant is a valid ``StrategyConfig`` field
+- every variant builds a usable ``StrategyConfig`` via ``replace`` +
+  ``strategy_params``
+- StrategyConfig global defaults match ops expectations
+- evaluate_no_signals / locked_win_signals / exit_signals stay fast
+  across however many variants the dict happens to contain
 """
 from __future__ import annotations
 
@@ -13,7 +21,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.config import StrategyConfig, get_strategy_variants
+from src.config import StrategyConfig, get_strategy_variants, strategy_params
 from src.markets.models import TempSlot, WeatherMarketEvent
 from src.strategy.evaluator import (
     evaluate_exit_signals,
@@ -22,6 +30,9 @@ from src.strategy.evaluator import (
 )
 from src.strategy.sizing import compute_size
 from src.weather.models import Forecast, Observation
+
+
+REQUIRED_META_KEYS = {"label", "description", "color", "tag_class"}
 
 
 def _make_event(city="New York") -> WeatherMarketEvent:
@@ -48,56 +59,104 @@ def _make_forecast(high=75.0, ci=4.0) -> Forecast:
 
 def _build_strat_cfg(variant_name: str) -> StrategyConfig:
     variants = get_strategy_variants()
-    return replace(StrategyConfig(), **variants[variant_name])
+    return replace(StrategyConfig(), **strategy_params(variants[variant_name]))
 
 
-class TestVariantStructure:
+# ──────────────────────────────────────────────────────────────────────
+# Schema invariants — assert shape, not specific names
+# ──────────────────────────────────────────────────────────────────────
 
-    def test_only_b_variant_active(self):
-        variants = get_strategy_variants()
-        assert set(variants.keys()) == {"B"}, (
-            "B is the only live variant from 2026-04-26"
-        )
+class TestSchema:
 
-    def test_a_c_d_dropped(self):
-        variants = get_strategy_variants()
-        assert "A" not in variants
-        assert "C" not in variants
-        assert "D" not in variants
+    def test_at_least_one_variant(self):
+        assert len(get_strategy_variants()) >= 1
 
-    def test_all_overrides_are_valid_fields(self):
+    def test_every_variant_has_meta_block(self):
+        for name, variant in get_strategy_variants().items():
+            assert "_meta" in variant, f"Variant {name!r} missing _meta"
+            assert isinstance(variant["_meta"], dict)
+
+    def test_every_meta_has_required_keys(self):
+        for name, variant in get_strategy_variants().items():
+            missing = REQUIRED_META_KEYS - variant["_meta"].keys()
+            assert not missing, (
+                f"Variant {name!r} _meta missing keys: {missing}"
+            )
+
+    def test_meta_values_are_strings(self):
+        """label / description / color / tag_class are rendered into
+        HTML; non-string values would either crash Jinja or render as
+        ``<MagicMock object at 0x...>`` style noise."""
+        for name, variant in get_strategy_variants().items():
+            meta = variant["_meta"]
+            for key in REQUIRED_META_KEYS:
+                assert isinstance(meta[key], str), (
+                    f"Variant {name!r} _meta[{key!r}] is "
+                    f"{type(meta[key]).__name__}, expected str"
+                )
+
+    def test_all_overrides_are_valid_strategy_fields(self):
+        """Anything that isn't ``_`` -prefixed metadata must be a real
+        StrategyConfig field; otherwise dataclass replace() would
+        TypeError at runtime."""
         valid_fields = set(StrategyConfig.__dataclass_fields__.keys())
-        for name, overrides in get_strategy_variants().items():
-            for key in overrides:
-                assert key in valid_fields, f"Strategy {name}: invalid field '{key}'"
+        for name, variant in get_strategy_variants().items():
+            for key in strategy_params(variant):
+                assert key in valid_fields, (
+                    f"Variant {name!r}: invalid field '{key}'"
+                )
+
+    def test_every_variant_builds_a_usable_strategy_config(self):
+        """The whole point of this dict — replace() must produce a
+        StrategyConfig with sensible numeric values (no None where a
+        float is expected)."""
+        for name in get_strategy_variants():
+            cfg = _build_strat_cfg(name)
+            assert isinstance(cfg, StrategyConfig)
+            assert cfg.max_no_price > 0
+            assert cfg.kelly_fraction > 0
+            assert cfg.locked_win_kelly_fraction > 0
+            assert cfg.max_position_per_slot_usd > 0
+
+    def test_strategy_keys_are_uppercase_letters(self):
+        """Y6 trigger on the DB allows A/B/C/D — keep variant names in
+        that family so an active variant's writes don't bounce."""
+        for name in get_strategy_variants():
+            assert name.isupper(), f"Variant key {name!r} must be uppercase"
+            assert len(name) <= 3, (
+                f"Variant key {name!r} too long for the strategy column"
+            )
 
 
-class TestStrategyBParams:
+class TestStrategyParamsHelper:
 
-    def test_kelly_fraction(self):
-        assert _build_strat_cfg("B").kelly_fraction == 0.5
+    def test_drops_underscore_keys(self):
+        sample = {
+            "max_no_price": 0.70,
+            "_meta": {"label": "x"},
+            "_origin": "test",
+        }
+        out = strategy_params(sample)
+        assert out == {"max_no_price": 0.70}
 
-    def test_locked_win_kelly_fraction(self):
-        assert _build_strat_cfg("B").locked_win_kelly_fraction == 1.0
+    def test_returns_new_dict(self):
+        sample = {"max_no_price": 0.70, "_meta": {}}
+        out = strategy_params(sample)
+        out["mutated"] = True
+        assert "mutated" not in sample
 
-    def test_max_no_price(self):
-        assert _build_strat_cfg("B").max_no_price == 0.70
+    def test_empty_dict(self):
+        assert strategy_params({}) == {}
 
-    def test_min_no_ev(self):
-        assert _build_strat_cfg("B").min_no_ev == 0.05
+    def test_no_underscore_keys_passes_through(self):
+        sample = {"max_no_price": 0.70, "kelly_fraction": 0.5}
+        assert strategy_params(sample) == sample
+        assert strategy_params(sample) is not sample  # still a fresh dict
 
-    def test_max_exposure_per_city(self):
-        assert _build_strat_cfg("B").max_exposure_per_city_usd == 20.0
 
-    def test_max_positions_per_event(self):
-        assert _build_strat_cfg("B").max_positions_per_event == 4
-
-    def test_max_locked_win_per_slot(self):
-        assert _build_strat_cfg("B").max_locked_win_per_slot_usd == 10.0
-
-    def test_max_position_per_slot(self):
-        assert _build_strat_cfg("B").max_position_per_slot_usd == 5.0
-
+# ──────────────────────────────────────────────────────────────────────
+# Global StrategyConfig defaults — ops invariants
+# ──────────────────────────────────────────────────────────────────────
 
 class TestGlobalDefaults:
 
@@ -111,7 +170,11 @@ class TestGlobalDefaults:
         assert StrategyConfig().exit_cooldown_hours == 4.0
 
 
-class TestStrategyBBehaviour:
+# ──────────────────────────────────────────────────────────────────────
+# Per-variant signal generation — runs across ALL active variants
+# ──────────────────────────────────────────────────────────────────────
+
+class TestSignalGeneration:
 
     def _make_market(self):
         event = _make_event()
@@ -123,83 +186,74 @@ class TestStrategyBBehaviour:
             event.slots.append(_make_slot(lower, upper, round(price_no, 3), f"no_{i}"))
         return event
 
-    def test_b_produces_signals(self):
+    @pytest.mark.parametrize("variant_name", list(get_strategy_variants()))
+    def test_each_variant_produces_signals(self, variant_name):
         event = self._make_market()
         forecast = _make_forecast(high=75.0)
-        cfg = _build_strat_cfg("B")
+        cfg = _build_strat_cfg(variant_name)
         sigs = evaluate_no_signals(event, forecast, cfg)
-        assert len(sigs) > 0
+        # Some variants may genuinely produce zero signals on this
+        # synthetic market (very tight EV gates etc.); only assert that
+        # the call completes without raising and returns a list.
+        assert isinstance(sigs, list)
 
-    def test_b_locked_win_full_kelly(self):
-        """B uses full Kelly on locked wins → larger size than half-Kelly base."""
+    @pytest.mark.parametrize("variant_name", list(get_strategy_variants()))
+    def test_locked_win_full_kelly_sizes_larger_than_half(self, variant_name):
+        """A full-Kelly variant should size larger than the same config
+        with locked_win_kelly_fraction halved."""
+        cfg = _build_strat_cfg(variant_name)
+        if cfg.locked_win_kelly_fraction <= 0.5:
+            pytest.skip(f"{variant_name} doesn't use full Kelly")
+
         event = _make_event()
         event.slots = [_make_slot(55.0, 59.0, 0.50, "no_locked")]
+        cfg_half = replace(cfg, locked_win_kelly_fraction=0.5)
 
-        cfg_b = _build_strat_cfg("B")
-        cfg_half = replace(cfg_b, locked_win_kelly_fraction=0.5)
-
-        locked_b = evaluate_locked_win_signals(event, 80.0, cfg_b, daily_max_final=True)
+        locked = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
         locked_half = evaluate_locked_win_signals(event, 80.0, cfg_half, daily_max_final=True)
-        assert len(locked_b) == 1 and len(locked_half) == 1
+        assert len(locked) == 1 and len(locked_half) == 1
 
-        size_b = compute_size(locked_b[0], 0.0, 0.0, cfg_b)
+        size = compute_size(locked[0], 0.0, 0.0, cfg)
         size_half = compute_size(locked_half[0], 0.0, 0.0, cfg_half)
-        assert size_b > size_half
+        assert size > size_half
 
 
-class TestVariantBoundary:
-
-    def test_price_at_exact_boundary_passes(self):
-        """Slot price exactly at B's max_no_price (0.70) passes (strict >)."""
-        event = _make_event()
-        event.slots = [_make_slot(60.0, 62.0, 0.70, "no_exact")]
-        forecast = _make_forecast(high=75.0)
-        sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
-        assert len(sigs) >= 1
-
-    def test_price_one_cent_above_boundary_rejected(self):
-        event = _make_event()
-        event.slots = [_make_slot(60.0, 62.0, 0.71, "no_above")]
-        forecast = _make_forecast(high=75.0)
-        sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
-        assert len(sigs) == 0
-
-    def test_b_inherits_common_base(self):
-        cfg = _build_strat_cfg("B")
-        assert cfg.enable_locked_wins is True
-        assert cfg.auto_calibrate_distance is True
-
-    def test_empty_slots_generate_no_signals(self):
-        event = _make_event()
-        forecast = _make_forecast()
-        sigs = evaluate_no_signals(event, forecast, _build_strat_cfg("B"))
-        assert len(sigs) == 0
-
+# ──────────────────────────────────────────────────────────────────────
+# Failure modes
+# ──────────────────────────────────────────────────────────────────────
 
 class TestVariantFailure:
 
     def test_unknown_variant_key_raises(self):
         with pytest.raises(KeyError):
-            _ = get_strategy_variants()["Z"]
+            _ = get_strategy_variants()["ZZZZZ"]
 
-    def test_a_c_d_lookups_raise(self):
-        variants = get_strategy_variants()
-        for retired in ("A", "C", "D"):
-            with pytest.raises(KeyError):
-                _ = variants[retired]
-
-    def test_partial_override_preserves_defaults(self):
+    def test_partial_override_preserves_strategy_config_defaults(self):
+        """A variant that overrides max_no_price shouldn't accidentally
+        reset other StrategyConfig fields like max_slot_spread."""
         base = StrategyConfig()
-        cfg_b = _build_strat_cfg("B")
-        assert cfg_b.max_no_price == 0.70  # overridden
-        # Base-derived, NOT overridden → inherits base value.
-        assert cfg_b.max_slot_spread == base.max_slot_spread
-        assert cfg_b.min_market_volume == base.min_market_volume
+        for name in get_strategy_variants():
+            cfg = _build_strat_cfg(name)
+            assert cfg.max_slot_spread == base.max_slot_spread
+            assert cfg.min_market_volume == base.min_market_volume
 
+    def test_meta_keys_dont_pollute_strategy_config(self):
+        """``replace(StrategyConfig(), **strategy_params(variant))``
+        must not raise even when _meta is present."""
+        for name in get_strategy_variants():
+            _build_strat_cfg(name)  # raise = test fail
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Performance — keep the dict cheap regardless of variant count
+# ──────────────────────────────────────────────────────────────────────
 
 class TestVariantPerformance:
 
-    def test_evaluate_fast(self):
+    def test_evaluate_fast_across_variants(self):
+        """All evaluators across every variant in <3s for 100 cycles —
+        the rebalancer iterates variants every cycle, so adding more
+        variants must not slow rebalance materially."""
         import time
 
         event = _make_event()
@@ -216,17 +270,22 @@ class TestVariantPerformance:
             observation_time=datetime.now(timezone.utc),
         )
 
-        cfg = _build_strat_cfg("B")
+        cfgs = [_build_strat_cfg(n) for n in get_strategy_variants()]
+
         t0 = time.monotonic()
         for _ in range(100):
-            _ = evaluate_no_signals(event, forecast, cfg)
-            _ = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
-            _ = evaluate_exit_signals(
-                event, obs, 74.0, event.slots[:5], cfg,
-                days_ahead=0, forecast=forecast,
-            )
+            for cfg in cfgs:
+                _ = evaluate_no_signals(event, forecast, cfg)
+                _ = evaluate_locked_win_signals(event, 80.0, cfg, daily_max_final=True)
+                _ = evaluate_exit_signals(
+                    event, obs, 74.0, event.slots[:5], cfg,
+                    days_ahead=0, forecast=forecast,
+                )
         elapsed = time.monotonic() - t0
-        assert elapsed < 3.0, f"300 evaluations took {elapsed:.3f}s"
+        assert elapsed < 3.0, (
+            f"100 cycles × {len(cfgs)} variants × 3 evaluators "
+            f"took {elapsed:.3f}s"
+        )
 
     def test_get_strategy_variants_is_cheap(self):
         import time

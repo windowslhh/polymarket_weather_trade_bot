@@ -13,7 +13,12 @@ import httpx
 from dataclasses import replace
 
 from src.alerts import Alerter
-from src.config import AppConfig, StrategyConfig, get_strategy_variants
+from src.config import (
+    AppConfig,
+    StrategyConfig,
+    get_strategy_variants,
+    strategy_params,
+)
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.markets.discovery import discover_weather_markets, _parse_temp_bounds
@@ -706,9 +711,13 @@ class Rebalancer:
                     if not held_no_slots:
                         continue
 
-                    # Build strategy config for this variant
+                    # Build strategy config for this variant.
+                    # ``strategy_params`` drops the ``_meta`` display block
+                    # so dataclass replace() doesn't see a non-field key.
                     overrides = variants.get(strat_name, {})
-                    strat_cfg = replace(self._config.strategy, **overrides)
+                    strat_cfg = replace(
+                        self._config.strategy, **strategy_params(overrides),
+                    )
 
                     # FIX-17: respect city_whitelist in position_check too,
                     # so a held position from an earlier, broader variant
@@ -1214,8 +1223,12 @@ class Rebalancer:
             # Run all strategy variants
             variants = get_strategy_variants()
             for strat_name, overrides in variants.items():
-                # Build strategy config for this variant
-                strat_cfg = replace(self._config.strategy, **overrides)
+                # Build strategy config for this variant.
+                # ``strategy_params`` drops the ``_meta`` display block
+                # so dataclass replace() doesn't see a non-field key.
+                strat_cfg = replace(
+                    self._config.strategy, **strategy_params(overrides),
+                )
 
                 # FIX-17: city_whitelist lets a variant opt into a narrow
                 # geography (D' targets LA/Seattle/Denver where historical

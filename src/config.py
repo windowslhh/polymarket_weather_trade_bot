@@ -127,23 +127,35 @@ class StrategyConfig:
 
 
 def get_strategy_variants() -> dict[str, dict]:
-    """Strategy B (Locked Aggressor) — sole live variant from 2026-04-26.
+    """Active strategy variants — single source of truth for both runtime
+    behaviour and dashboard display.
 
-    Shared across the bot:
+    Each value is a flat dict that mixes two concerns:
+
+    - **StrategyConfig overrides**: top-level keys whose names match
+      ``StrategyConfig`` field names (``max_no_price``, ``kelly_fraction``,
+      ...).  These are spread into ``replace(StrategyConfig(), **overrides)``
+      to build the per-variant config.
+
+    - **Display metadata**: a single ``_meta`` key holding the human-facing
+      label / description / colour / Jinja CSS class that the web layer
+      and templates read.  The underscore prefix marks it as not-a-config
+      field; ``strategy_params()`` strips it before splatting into
+      ``replace`` so the dataclass doesn't trip on an unknown field.
+
+    Adding a new variant should be a single edit here — the rebalancer,
+    web app, and templates all pull metadata off whatever this returns.
+
+    Shared across all variants (handled by ``StrategyConfig`` defaults):
     - Auto-calibrated distance threshold (per-city)
     - Locked-win signals enabled
     - Hybrid exit mode (EV + distance + pre-settlement force)
     - Exit cooldown to prevent BUY→EXIT→BUY churn
     - NO-only signals (no YES, no LADDER)
 
-    B = Locked Aggressor: half-Kelly forecast entries, full-Kelly on locked
-        wins.  $20/city exposure cap, max 4 open positions per event.
-
-    Historical context: A/C/D' were retired (2026-04-26) when the bot moved
-    to local live trading with $200 capital — running a single, well-tuned
-    variant simplifies sizing math and concentrates capital where it works.
-    DB schema retains the `strategy` column (Y6 trigger still allows
-    A/B/C/D) so historical rows remain queryable for audit.
+    DB schema retains the ``strategy`` column with values A/B/C/D allowed
+    (Y6 trigger preserved) so historical rows from earlier variant
+    line-ups remain queryable for audit even when not active here.
     """
     return {
         "B": {
@@ -152,11 +164,70 @@ def get_strategy_variants() -> dict[str, dict]:
             "max_positions_per_event": 4,
             "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 20.0,
+            # Per-city cap dropped 20 → 10 so the three live variants
+            # together stay within the same per-city ceiling B alone
+            # used (B@20 ≡ B+C+D@10 each, summing to $30/city).  Without
+            # the rebalance the combined exposure would 1.5× silently.
+            "max_exposure_per_city_usd": 10.0,
             "locked_win_kelly_fraction": 1.0,
             "max_locked_win_per_slot_usd": 10.0,
+            "_meta": {
+                "label": "B (Conservative)",
+                "description": "max_no_price=0.70 — baseline production variant",
+                "color": "#3b82f6",     # blue-500
+                "tag_class": "tag-info",
+            },
+        },
+        # Control groups C and D widen max_no_price beyond B to test
+        # whether the EV gate alone is enough to filter out fee-eaten
+        # entries, OR whether the price cap is actually doing work.
+        # Both share the same kelly / EV / Safe-cap profile as B so
+        # comparisons isolate the price-cap dimension cleanly.
+        "C": {
+            "max_no_price": 0.75,
+            "kelly_fraction": 0.5,
+            "max_positions_per_event": 4,
+            "min_no_ev": 0.05,
+            "max_position_per_slot_usd": 5.0,
+            "max_exposure_per_city_usd": 10.0,
+            "locked_win_kelly_fraction": 1.0,
+            "max_locked_win_per_slot_usd": 10.0,
+            "_meta": {
+                "label": "C (Moderate)",
+                "description": "max_no_price=0.75 — control group, +5pt cap",
+                "color": "#f59e0b",     # amber-500
+                "tag_class": "tag-warning",
+            },
+        },
+        "D": {
+            "max_no_price": 0.80,
+            "kelly_fraction": 0.5,
+            "max_positions_per_event": 4,
+            "min_no_ev": 0.05,
+            "max_position_per_slot_usd": 5.0,
+            "max_exposure_per_city_usd": 10.0,
+            "locked_win_kelly_fraction": 1.0,
+            "max_locked_win_per_slot_usd": 10.0,
+            "_meta": {
+                "label": "D (Aggressive)",
+                "description": "max_no_price=0.80 — control group, +10pt cap",
+                "color": "#ef4444",     # red-500
+                "tag_class": "tag-danger",
+            },
         },
     }
+
+
+def strategy_params(variant: dict) -> dict:
+    """Drop ``_meta`` (and any other underscore-prefixed) keys from a
+    variant dict so the remainder can be splatted into
+    ``dataclasses.replace(StrategyConfig(), **)`` without a TypeError.
+
+    Centralised here rather than inlined at every call site so a future
+    addition (``_origin``, ``_deprecated_at``, etc.) propagates without
+    hunting down every consumer.
+    """
+    return {k: v for k, v in variant.items() if not k.startswith("_")}
 
 
 @dataclass(frozen=True)

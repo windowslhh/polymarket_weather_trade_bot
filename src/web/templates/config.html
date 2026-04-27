@@ -52,11 +52,27 @@
 </div>
 
 <div class="panel">
-    <div class="panel-header"><h3>Strategy Variant — B</h3></div>
+    <div class="panel-header">
+        <h3>Strategy variants</h3>
+        <span style="font-size:11px;color:var(--text-dim);">{{ variants|length }} active</span>
+    </div>
     <table>
-        <thead><tr><th>Strat</th><th>Name</th><th>Max NO Price</th><th>Kelly</th><th>Min EV</th><th>Per-City Cap</th><th>Force Exit</th></tr></thead>
+        <thead><tr><th>Strat</th><th>Name</th><th>Max NO Price</th><th>Kelly</th><th>Min EV</th><th>Per-City Cap</th><th>Description</th></tr></thead>
         <tbody>
-        <tr><td><span class="tag tag-stable">B</span></td><td>Locked Aggressor</td><td class="td-mono">0.70</td><td class="td-mono">0.5x / 1.0x locked</td><td class="td-mono">0.05</td><td class="td-mono">$20</td><td class="td-mono">1.0h</td></tr>
+        {# Iterates the live get_strategy_variants() dict, falling back to
+           StrategyConfig defaults for fields a variant doesn't override. #}
+        {% for name, params in variants.items() %}
+        {% set _meta = params.get('_meta', {'label': name, 'tag_class': 'tag-stable', 'description': ''}) %}
+        <tr>
+            <td><span class="tag {{ _meta.tag_class }}">{{ name }}</span></td>
+            <td>{{ _meta.label }}</td>
+            <td class="td-mono">{{ "%.2f"|format(params.get('max_no_price', strategy.max_no_price)) }}</td>
+            <td class="td-mono">{{ params.get('kelly_fraction', strategy.kelly_fraction) }}x / {{ params.get('locked_win_kelly_fraction', strategy.locked_win_kelly_fraction) }}x locked</td>
+            <td class="td-mono">{{ params.get('min_no_ev', strategy.min_no_ev) }}</td>
+            <td class="td-mono">${{ "%.0f"|format(params.get('max_exposure_per_city_usd', strategy.max_exposure_per_city_usd)) }}</td>
+            <td style="font-size:11px;color:var(--text-muted);">{{ _meta.description }}</td>
+        </tr>
+        {% endfor %}
         </tbody>
     </table>
 </div>

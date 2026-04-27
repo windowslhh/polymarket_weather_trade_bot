@@ -3,13 +3,17 @@
 {% block content %}
 <div class="page-title">Trade Timeline</div>
 
-<!-- Strategy P&L Summary (B-only live; legacy A/C/D rolled into B for display) -->
+<!-- Strategy P&L Summary — one card per active variant.  Adding a variant
+     in src/config.py::get_strategy_variants() automatically gets a card. -->
 <div class="metrics">
+    {% for sk in strat_pnl.keys()|sort %}
+    {% set _meta = strat_meta.get(sk, {'label': sk}) %}
     <div class="metric-card">
-        <div class="metric-label">Strategy B <span style="font-size:10px;color:var(--text-dim);">(Locked Aggressor)</span></div>
-        <div class="metric-value {{ 'positive' if strat_pnl.get('B', 0) >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.get('B', 0)) }}</div>
-        <div class="metric-sub">{{ strat_counts.get('B', {}).get('open', 0) }} open / {{ strat_counts.get('B', {}).get('settled', 0) }} closed / ${{ "%.1f"|format(strat_exposure.get('B', 0)) }}</div>
+        <div class="metric-label">Strategy {{ sk }} <span style="font-size:10px;color:var(--text-dim);">({{ _meta.label }})</span></div>
+        <div class="metric-value {{ 'positive' if strat_pnl.get(sk, 0) >= 0 else 'negative' }}">${{ "%.2f"|format(strat_pnl.get(sk, 0)) }}</div>
+        <div class="metric-sub">{{ strat_counts.get(sk, {}).get('open', 0) }} open / {{ strat_counts.get(sk, {}).get('settled', 0) }} closed / ${{ "%.1f"|format(strat_exposure.get(sk, 0)) }}</div>
     </div>
+    {% endfor %}
 </div>
 
 <!-- Full Trade Timeline -->
@@ -62,7 +66,7 @@
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ t.market_date if t.market_date else '-' }}</td>
             <td>
                 {% if t.strategy %}
-                <span class="tag {% if t.strategy == 'A' %}tag-settling{% elif t.strategy == 'B' %}tag-stable{% elif t.strategy == 'C' %}tag-breakout-up{% else %}tag-breakout-down{% endif %}" style="font-size:10px;">{{ t.strategy }}</span>
+                <span class="tag {{ strat_meta.get(t.strategy, {'tag_class':'tag-stable'}).tag_class }}" style="font-size:10px;">{{ t.strategy }}</span>
                 {% else %}-{% endif %}
             </td>
             <td>
