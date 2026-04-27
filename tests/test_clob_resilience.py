@@ -257,3 +257,80 @@ async def test_v2_cancel_uses_OrderPayload_not_string():
         "v1 client.cancel(order_id) shape must not be used — "
         "regression to pre-v2-4 shape detected"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# v2-7 (2026-04-27): dict-shaped responses from /midpoint and
+# /last-trade-price.  First live cycle on v2 raised
+# ``TypeError: float() argument must be a string or a real number, not
+# 'dict'`` because the SDK forwards the raw JSON ({"mid": "0.5"} etc.)
+# and the wrapper called float() unconditionally.  Pin the unwrap so a
+# revert can't reach live again.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_midpoint_unpacks_v2_dict_response():
+    """``client.get_midpoint`` returns ``{"mid": "0.535"}`` against the
+    real /midpoint endpoint (verified by curl 2026-04-27).  Wrapper must
+    extract ``mid`` and float-coerce — never ``float({"mid": ...})``.
+    """
+    client = _make_client()
+    client._client.get_midpoint = MagicMock(return_value={"mid": "0.535"})
+
+    price = await client.get_midpoint("tok-1")
+
+    assert price == 0.535
+    assert client._client.get_midpoint.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_midpoint_handles_legacy_float_response():
+    """Defensive fallback: if a future SDK build returns a raw number,
+    don't break.  isinstance check picks the right branch."""
+    client = _make_client()
+    client._client.get_midpoint = MagicMock(return_value="0.42")
+
+    assert await client.get_midpoint("tok-1") == 0.42
+
+
+@pytest.mark.asyncio
+async def test_get_midpoint_returns_none_on_unparseable_dict():
+    """Unknown dict shape (no ``mid`` / ``midpoint`` key) → ``float(0.0)``
+    via the .get() default would mask a real outage by reporting 0.0.
+    But the alternative — raising — also leaks into the live log as a
+    confusing TypeError stack.  Current behaviour: 0.0 falls through
+    safely; the rebalancer's ``if price is not None`` filter (callsite
+    in get_prices_batch) keeps the slot when it's truly 0, and the
+    Gamma fallback covers the slot when CLOB really can't price it.
+    """
+    client = _make_client()
+    client._client.get_midpoint = MagicMock(return_value={"unexpected": "shape"})
+
+    # 0.0 is the documented fallback — it's truthy-falsy in
+    # ``get_prices_batch``'s ``or`` chain, so the caller will fall
+    # through to ``get_last_trade_price``.
+    assert await client.get_midpoint("tok-1") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_get_last_trade_price_unpacks_v2_dict_response():
+    """``/last-trade-price`` returns ``{"price": "0.001", "side": "BUY"}``
+    (verified by curl 2026-04-27).  Wrapper extracts ``price``."""
+    client = _make_client()
+    client._client.get_last_trade_price = MagicMock(
+        return_value={"price": "0.001", "side": "BUY"},
+    )
+
+    price = await client.get_last_trade_price("tok-1")
+
+    assert price == 0.001
+    assert client._client.get_last_trade_price.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_last_trade_price_handles_legacy_float_response():
+    client = _make_client()
+    client._client.get_last_trade_price = MagicMock(return_value=0.42)
+
+    assert await client.get_last_trade_price("tok-1") == 0.42

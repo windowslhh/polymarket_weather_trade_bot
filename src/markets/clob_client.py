@@ -164,10 +164,20 @@ class ClobClient:
         return await asyncio.to_thread(client.get_order_book, token_id)
 
     async def get_midpoint(self, token_id: str) -> float | None:
-        """Get the midpoint price for a token."""
+        """Get the midpoint price for a token.
+
+        v2-7 (2026-04-27): the CLOB ``/midpoint`` endpoint returns
+        ``{"mid": "0.5"}`` — both v1 and v2 SDKs surface the raw JSON, so
+        an unconditional ``float(result)`` raises ``TypeError`` against
+        the dict.  Pre-v2 we never noticed because every recent run was
+        paper / dry-run, where ``get_prices_batch()`` short-circuits
+        before this method is called.  First live cycle on v2 caught it.
+        """
         client = self._get_client()
         try:
             result = await asyncio.to_thread(client.get_midpoint, token_id)
+            if isinstance(result, dict):
+                return float(result.get("mid", result.get("midpoint", 0.0)))
             return float(result)
         except Exception:
             logger.exception("Failed to get midpoint for %s", token_id)
@@ -322,12 +332,19 @@ class ClobClient:
             return False
 
     async def get_last_trade_price(self, token_id: str) -> float | None:
-        """Get the last trade price for a token via CLOB API."""
+        """Get the last trade price for a token via CLOB API.
+
+        v2-7 (2026-04-27): same dict-vs-float gotcha as ``get_midpoint``.
+        ``/last-trade-price`` returns ``{"price": "0.5", "side": "BUY"}``
+        — extract the ``price`` field before float-coercing.
+        """
         if self._config.dry_run:
             return None  # no real prices in dry-run
         client = self._get_client()
         try:
             result = await asyncio.to_thread(client.get_last_trade_price, token_id)
+            if isinstance(result, dict):
+                return float(result.get("price", result.get("lastTradePrice", 0.0)))
             return float(result)
         except Exception:
             logger.debug("Failed to get last trade price for %s", token_id)
