@@ -129,6 +129,21 @@ class ClobClient:
         else:
             logger.info("CLOB creds: deriving from private key (free, signs once)")
             creds = client.create_or_derive_api_creds()
+            # Defensive: py-clob-client has historically had silent-failure
+            # paths that return None instead of raising when the upstream
+            # /api-key endpoint returns a 5xx or a malformed body.  Without
+            # this guard we'd cache a half-built ``client`` (no creds) on
+            # ``self._client`` and only surface the failure at the FIRST
+            # live BUY — by which point the operator may already be staring
+            # at an inscrutable auth error mid-trade.  Fail fast here so
+            # preflight + the startup banner catch it instead.
+            if creds is None:
+                raise RuntimeError(
+                    "Polymarket create_or_derive_api_creds returned None — "
+                    "API likely returned a malformed response.  Check "
+                    "https://clob.polymarket.com status; recovery: restart "
+                    "the bot once Polymarket recovers.",
+                )
         client.set_api_creds(creds)
 
         self._client = client
