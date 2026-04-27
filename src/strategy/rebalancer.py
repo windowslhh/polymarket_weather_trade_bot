@@ -22,6 +22,7 @@ from src.config import (
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.markets.discovery import discover_weather_markets, _parse_temp_bounds
+from src.markets.gamma_prices import refresh_gamma_prices_only
 from src.markets.models import TempSlot, TradeSignal, WeatherMarketEvent
 from src.markets.price_buffer import PriceBuffer
 from src.portfolio.tracker import PortfolioTracker
@@ -558,37 +559,7 @@ class Rebalancer:
                 held_token_ids = list({p["token_id"] for p in all_positions if p.get("token_id")})
                 if held_token_ids:
                     try:
-                        import json as _json
-                        import httpx as _httpx
-
-                        async def _fetch_gamma_for_tokens(tids: list[str]) -> dict[str, float]:
-                            prices: dict[str, float] = {}
-                            async with _httpx.AsyncClient(timeout=10) as _client:
-                                for i in range(0, len(tids), 20):
-                                    batch = tids[i:i + 20]
-                                    try:
-                                        resp = await _client.get(
-                                            "https://gamma-api.polymarket.com/markets",
-                                            params=[("clob_token_ids", tid) for tid in batch],
-                                        )
-                                        resp.raise_for_status()
-                                        for mkt in resp.json():
-                                            toks = mkt.get("clobTokenIds", [])
-                                            pxs = mkt.get("outcomePrices", [])
-                                            if isinstance(toks, str):
-                                                toks = _json.loads(toks)
-                                            if isinstance(pxs, str):
-                                                pxs = _json.loads(pxs)
-                                            for tid, px in zip(toks, pxs):
-                                                try:
-                                                    prices[tid] = float(px)
-                                                except (ValueError, TypeError):
-                                                    pass
-                                    except Exception:
-                                        logger.warning("Gamma price batch fetch failed (batch %d)", i // 20)
-                            return prices
-
-                        fresh_gamma = await _fetch_gamma_for_tokens(held_token_ids)
+                        fresh_gamma = await refresh_gamma_prices_only(held_token_ids)
                         if fresh_gamma:
                             # Apply TWAP smoothing (same buffer as main cycle)
                             smoothed_fresh = self._price_buffer.apply_batch(fresh_gamma)
