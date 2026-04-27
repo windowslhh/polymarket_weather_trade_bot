@@ -19,15 +19,17 @@
 - Position sizing: track city exposure cumulatively across all events in a rebalance cycle
 - Skip already-held token IDs to prevent duplicate positions
 
-## Strategy Design (as of 2026-04-26, B-only live)
+## Strategy Design (as of 2026-04-27, B/C/D control-group experiment)
 - **Pure NO trading**: Only BUY NO signals — no YES, no LADDER
-- **Single strategy variant** (B = Locked Aggressor) since 2026-04-26:
-  - kelly=0.5, locked-kelly=1.0, `max_no_price=0.70`, `min_no_ev=0.05`
-  - `max_exposure_per_city_usd=20`, `max_positions_per_event=4`, `max_position_per_slot_usd=5`
-  - `max_locked_win_per_slot_usd=10`
-  - A / C / D' retired when the bot moved to local live trading with $200 capital — running a single, well-tuned variant simplifies sizing math and concentrates capital where it works.
-  - DB schema unchanged: the `strategy` column still allows A/B/C/D (Y6 trigger preserved) so historical rows remain queryable for audit.  `get_strategy_variants()` returns only `{"B": ...}`; positions in legacy strategies (A/C/D in old DB rows) are evaluated by `run_position_check` against base `StrategyConfig` defaults (no overrides) so they keep generating exit signals.
-  - Dashboard rolls all closed-position P&L into the B column for display; settlement-table queries via `get_strategy_realized_pnl()` still surface the raw per-strategy split if needed.
+- **Three strategy variants** (B / C / D) running side-by-side as a `max_no_price` control comparison.  All three share kelly_fraction=0.5, locked_win_kelly_fraction=1.0, min_no_ev=0.05, max_exposure_per_city_usd=$10, max_positions_per_event=4, max_position_per_slot_usd=$5; only `max_no_price` differs:
+  - **B (Conservative)**: `max_no_price=0.70` — baseline, the production cap from the prior B-only era
+  - **C (Moderate)**: `max_no_price=0.75` — control: relaxed cap, same EV gate
+  - **D (Aggressive)**: `max_no_price=0.80` — control: cap further relaxed
+  - **Hypothesis**: does the EV gate (`min_no_ev=0.05`) alone filter out fee-dominated entries, or does the price cap have to stay tight?  Tested by holding everything else equal and varying only `max_no_price`.
+  - Per-city cap dropped from $20 (B-only era) to $10 each so the three variants together cap at $30/city — 1.5× the prior B-only ceiling.  This is intentional: the relaxed-cap variants need room to fire, but the global $1000 total exposure ceiling and `daily_loss_limit_usd=75` daily breaker remain in force.
+- **Schema is data-driven**: variants are declared in `src/config.py::get_strategy_variants()` with a flat dict mixing StrategyConfig overrides and a ``_meta`` block (label / description / color / tag_class).  `strategy_params(variant)` strips `_meta` before splatting into `replace(StrategyConfig(), **)`.  Templates iterate `variants.items()` and look up tag classes via `strat_meta[key].tag_class` — adding a new variant is a single edit in `src/config.py` (no template / route surgery).  See `src/web/strategy_meta.py` for the bridge module.
+- **DB schema unchanged**: the `strategy` column still allows A/B/C/D (Y6 trigger preserved).  Legacy A rows remain queryable for audit; `run_position_check` evaluates positions whose strategy isn't an active variant against base `StrategyConfig` defaults so they keep generating exit signals.
+- **Dashboard buckets P&L by row strategy**: each active variant gets its own column; legacy keys with non-zero historical P&L appear alongside.  No more "everything rolled into B" remap.
 - **Global StrategyConfig defaults**: `daily_loss_limit_usd=75`, `locked_win_max_price=0.90`, `exit_cooldown_hours=4`
 - **Signal types**: NO (forecast-based entry), LOCKED (daily_max > slot upper → guaranteed win), EXIT (3-layer hybrid), TRIM (EV decay)
 - **Auto-calibrated distance**: Per-city threshold from historical forecast error distribution (calibrator.py)
