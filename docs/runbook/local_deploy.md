@@ -52,6 +52,27 @@ You do **not** need to fill these into `.env`:
   Free, deterministic, signs once with the L1 key.  Pre-provisioning the
   three values still works (back-compat) and short-circuits the derive.
 
+## Pre-live — USDC balance check
+
+Before the first non-`--paper` run, confirm your funds are where the
+bot can spend them.  The bot does not auto-fund anything; if balances
+are zero the first BUY hits CLOB → comes back rejected → reconciler
+flags the order failed → no position opens.  Same outcome as a
+`--paper` run, but with operator confusion baked in.
+
+Open polymarket.com → Profile → Wallet:
+
+- **USDC ≥ your intended bankroll.**  At minimum the
+  `daily_loss_limit_usd` (default $75) plus a buffer for open
+  positions.  $200 USDC for the first live week is the recommended
+  starting point.
+- **Some MATIC** for transaction gas — usually a few cents' worth, and
+  polymarket.com auto-funds new accounts for the first few trades.
+  Top up via the deposit page if the dashboard's `gas_low` alert fires.
+
+If `FUNDER_ADDRESS` is empty (direct EOA mode), the same check applies
+to your EOA wallet on Polygon — view it on polygonscan.com.
+
 ## Run — foreground
 
 ```bash
@@ -121,6 +142,48 @@ curl -X POST -H "X-Trigger-Secret: $TRIGGER_SECRET" \
 The fee model is the only EV input that can't be unit-tested against
 the real market — verifying it on the first fill is cheap and catches
 a class of bugs that is otherwise invisible until daily P&L drifts.
+
+## First live BUY — verify the debit comes from FUNDER, not EOA
+
+The wrong signing path silently drains the wrong wallet.  After the
+first fill, do a 30-second polygonscan sanity check.
+
+1. Find your **EOA address** (the wallet that the Keychain private key
+   corresponds to — *not* the Safe):
+
+   ```bash
+   .venv/bin/python -c "
+   from eth_account import Account
+   from src.security import load_eth_private_key
+   print(Account.from_key(load_eth_private_key()).address)
+   "
+   ```
+
+2. Open https://polygonscan.com/address/<EOA_ADDRESS> .  Expected
+   activity: only a small **MATIC** outflow for gas.  **No USDC
+   movement** — the EOA is just signing.
+
+3. Open https://polygonscan.com/address/<FUNDER_ADDRESS> (the
+   Safe address from `.env`).  Expected: a **USDC outflow equal to
+   `size_usd + fee`**.  This is where the bot actually spent money.
+
+If it's flipped — USDC drained from the EOA, FUNDER untouched — the
+bot is signing as the EOA against a Safe that doesn't trust it.  Two
+likely causes:
+
+- `FUNDER_ADDRESS` in `.env` is wrong (typo or stale address)
+- `signature_type` got picked wrong somehow (shouldn't happen since
+  P-A10 derives it from `funder` presence — but verify)
+
+Pause immediately and investigate:
+
+```bash
+curl -X POST -H "X-Trigger-Secret: $TRIGGER_SECRET" \
+  http://localhost:5001/api/admin/pause
+```
+
+Then restart with a corrected `.env`.  Existing positions stay open;
+only new BUYs are blocked while paused.
 
 ## Resetting
 
