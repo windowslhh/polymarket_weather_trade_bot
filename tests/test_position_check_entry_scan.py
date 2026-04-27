@@ -300,6 +300,39 @@ async def test_path6_forecast_cache_miss_skips_event(monkeypatch):
     )
 
 
+def test_config_yaml_exposes_entry_scan_flag(tmp_path):
+    """cycle-fix-6: ``config.yaml`` writes ``enable_position_check_entry_scan``
+    and ``load_config()`` carries it through to the StrategyConfig
+    instance.  Pins the YAML key name + boolean coercion so renaming
+    the flag in code without updating the YAML is caught here."""
+    from src.config import load_config
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "strategy:\n"
+        "  enable_position_check_entry_scan: false\n"
+        "scheduling:\n"
+        "  discovery_interval_minutes: 15\n"
+        "  rebalance_interval_minutes: 60\n"
+        "  pnl_snapshot_interval_hours: 24\n"
+        "cities: []\n"
+    )
+    cfg = load_config(config_path=cfg_path, env_path=tmp_path / ".env")
+    assert cfg.strategy.enable_position_check_entry_scan is False
+
+    cfg_path.write_text(
+        "strategy:\n"
+        "  enable_position_check_entry_scan: true\n"
+        "scheduling:\n"
+        "  discovery_interval_minutes: 15\n"
+        "  rebalance_interval_minutes: 60\n"
+        "  pnl_snapshot_interval_hours: 24\n"
+        "cities: []\n"
+    )
+    cfg = load_config(config_path=cfg_path, env_path=tmp_path / ".env")
+    assert cfg.strategy.enable_position_check_entry_scan is True
+
+
 @pytest.mark.asyncio
 async def test_entry_scan_exception_does_not_block_exit_trim(monkeypatch):
     """cycle-fix-5: a bug inside _run_entry_scan must NOT swallow the

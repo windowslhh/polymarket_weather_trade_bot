@@ -59,6 +59,15 @@ strategy:
   force_exit_hours: 1.0
   # Cooldown after exiting a slot to prevent BUY→EXIT→BUY churn
   exit_cooldown_hours: 4.0
+  # cycle-frequency-fix (2026-04-27): the 15-min position check runs
+  # evaluate_no_signals (and locked-win) on the cached event list with
+  # freshly-refreshed Gamma prices.  Closes the 60-min sampling gap
+  # that misses transient ≤max_no_price windows (Miami 88-89°F at
+  # 0.70 was eligible for ~15 min between two local cycles).
+  # Cheap by design: only Gamma outcomePrices are re-fetched; no
+  # forecast / METAR refresh.  Toggle off if you ever want to
+  # diagnose by reverting to 60-min-only entry sampling.
+  enable_position_check_entry_scan: true
 
 scheduling:
   # How often to discover new markets (minutes)
