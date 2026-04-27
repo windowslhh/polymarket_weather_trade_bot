@@ -168,48 +168,55 @@ def get_strategy_variants() -> dict[str, dict]:
     (Y6 trigger preserved) so historical rows from earlier variant
     line-ups remain queryable for audit even when not active here.
     """
+    # ──────────────────────────────────────────────────────────────────
+    # B and C disabled for live cutover (user request 2026-04-27).
+    # Going live with D-only.  Restore by un-commenting the two blocks
+    # inside the dict below verbatim — schema, _meta colours, and
+    # DB-allowed strategy column values (A/B/C/D, Y6 trigger) are all
+    # still in place.
+    # ──────────────────────────────────────────────────────────────────
     return {
-        "B": {
-            "max_no_price": 0.70,
-            "kelly_fraction": 0.5,
-            "max_positions_per_event": 4,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            # Per-city cap dropped 20 → 10 so the three live variants
-            # together stay within the same per-city ceiling B alone
-            # used (B@20 ≡ B+C+D@10 each, summing to $30/city).  Without
-            # the rebalance the combined exposure would 1.5× silently.
-            "max_exposure_per_city_usd": 10.0,
-            "locked_win_kelly_fraction": 1.0,
-            "max_locked_win_per_slot_usd": 10.0,
-            "_meta": {
-                "label": "B (Conservative)",
-                "description": "max_no_price=0.70 — baseline production variant",
-                "color": "#3b82f6",     # blue-500
-                "tag_class": "tag-info",
-            },
-        },
-        # Control groups C and D widen max_no_price beyond B to test
-        # whether the EV gate alone is enough to filter out fee-eaten
-        # entries, OR whether the price cap is actually doing work.
-        # Both share the same kelly / EV / Safe-cap profile as B so
-        # comparisons isolate the price-cap dimension cleanly.
-        "C": {
-            "max_no_price": 0.75,
-            "kelly_fraction": 0.5,
-            "max_positions_per_event": 4,
-            "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 10.0,
-            "locked_win_kelly_fraction": 1.0,
-            "max_locked_win_per_slot_usd": 10.0,
-            "_meta": {
-                "label": "C (Moderate)",
-                "description": "max_no_price=0.75 — control group, +5pt cap",
-                "color": "#f59e0b",     # amber-500
-                "tag_class": "tag-warning",
-            },
-        },
+        # "B": {
+        #     "max_no_price": 0.70,
+        #     "kelly_fraction": 0.5,
+        #     "max_positions_per_event": 4,
+        #     "min_no_ev": 0.05,
+        #     "max_position_per_slot_usd": 5.0,
+        #     # Per-city cap dropped 20 → 10 so the three live variants
+        #     # together stay within the same per-city ceiling B alone
+        #     # used (B@20 ≡ B+C+D@10 each, summing to $30/city).  Without
+        #     # the rebalance the combined exposure would 1.5× silently.
+        #     "max_exposure_per_city_usd": 10.0,
+        #     "locked_win_kelly_fraction": 1.0,
+        #     "max_locked_win_per_slot_usd": 10.0,
+        #     "_meta": {
+        #         "label": "B (Conservative)",
+        #         "description": "max_no_price=0.70 — baseline production variant",
+        #         "color": "#3b82f6",     # blue-500
+        #         "tag_class": "tag-info",
+        #     },
+        # },
+        # # Control groups C and D widen max_no_price beyond B to test
+        # # whether the EV gate alone is enough to filter out fee-eaten
+        # # entries, OR whether the price cap is actually doing work.
+        # # Both share the same kelly / EV / Safe-cap profile as B so
+        # # comparisons isolate the price-cap dimension cleanly.
+        # "C": {
+        #     "max_no_price": 0.75,
+        #     "kelly_fraction": 0.5,
+        #     "max_positions_per_event": 4,
+        #     "min_no_ev": 0.05,
+        #     "max_position_per_slot_usd": 5.0,
+        #     "max_exposure_per_city_usd": 10.0,
+        #     "locked_win_kelly_fraction": 1.0,
+        #     "max_locked_win_per_slot_usd": 10.0,
+        #     "_meta": {
+        #         "label": "C (Moderate)",
+        #         "description": "max_no_price=0.75 — control group, +5pt cap",
+        #         "color": "#f59e0b",     # amber-500
+        #         "tag_class": "tag-warning",
+        #     },
+        # },
         "D": {
             "max_no_price": 0.80,
             "kelly_fraction": 0.5,
