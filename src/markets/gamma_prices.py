@@ -12,8 +12,10 @@ shape is identical between held-token refresh and the broader
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from typing import Iterable
 
 import httpx
 
@@ -31,8 +33,56 @@ DEFAULT_BATCH_SIZE = 20
 DEFAULT_TIMEOUT_S = 10.0
 
 
+async def _fetch_one_batch(
+    client: httpx.AsyncClient, batch: list[str], batch_idx: int,
+) -> dict[str, float]:
+    """Fetch a single batch's prices.  Returns {token: price} for the
+    tokens this batch's response covered; an empty dict on per-batch
+    failure (logged at WARNING).  Never raises — caller uses
+    ``return_exceptions`` semantics via ``asyncio.gather``."""
+    out: dict[str, float] = {}
+    try:
+        resp = await client.get(
+            _GAMMA_MARKETS_URL,
+            params=[("clob_token_ids", tid) for tid in batch],
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        logger.warning(
+            "Gamma price batch fetch failed (batch %d, %d tokens)",
+            batch_idx, len(batch), exc_info=True,
+        )
+        return out
+
+    if not isinstance(data, list):
+        return out
+    for mkt in data:
+        toks = mkt.get("clobTokenIds", [])
+        pxs = mkt.get("outcomePrices", [])
+        if isinstance(toks, str):
+            try:
+                toks = json.loads(toks)
+            except Exception:
+                toks = []
+        if isinstance(pxs, str):
+            try:
+                pxs = json.loads(pxs)
+            except Exception:
+                pxs = []
+        for tid, px in zip(toks, pxs):
+            try:
+                out[tid] = float(px)
+            except (ValueError, TypeError):
+                # Gamma occasionally returns "" or null for markets in
+                # odd states — skip silently so the caller's stale
+                # cache stays canonical for those tokens.
+                pass
+    return out
+
+
 async def refresh_gamma_prices_only(
-    token_ids: list[str],
+    token_ids: Iterable[str],
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     timeout_s: float = DEFAULT_TIMEOUT_S,
@@ -49,56 +99,44 @@ async def refresh_gamma_prices_only(
     - DailyMaxTracker
     - Local DB
 
-    Errors per batch are logged at WARNING and swallowed: a partial
-    refresh is more useful than a hard fail when some tokens are
-    transiently 5xx-ing.
+    Errors per batch are logged at WARNING and swallowed (asyncio.gather
+    runs with ``return_exceptions=True``): a partial refresh is more
+    useful than a hard fail when some tokens are transiently 5xx-ing.
+
+    cycle-fix-9: batches run concurrently via ``asyncio.gather``.  At 30
+    events × 2 outcomes × ~30 tokens/event = ~60 tokens → 3 batches.
+    Pre-fix: serial 3×~1s = 3s.  Post-fix: 1×~1s + small fan-out
+    overhead.  Failure of one batch does not abort the others.
     """
+    # Materialise + dedup so order is stable AND a caller passing a
+    # set/generator still gets a sensible batch split.
+    tokens = list({tid: None for tid in token_ids})
     prices: dict[str, float] = {}
-    if not token_ids:
+    if not tokens:
         return prices
+
+    batches = [
+        tokens[i:i + batch_size]
+        for i in range(0, len(tokens), batch_size)
+    ]
 
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            for i in range(0, len(token_ids), batch_size):
-                batch = token_ids[i:i + batch_size]
-                try:
-                    resp = await client.get(
-                        _GAMMA_MARKETS_URL,
-                        params=[("clob_token_ids", tid) for tid in batch],
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                except Exception:
-                    logger.warning(
-                        "Gamma price batch fetch failed (batch %d, %d tokens)",
-                        i // batch_size, len(batch), exc_info=True,
-                    )
-                    continue
-
-                if not isinstance(data, list):
-                    continue
-                for mkt in data:
-                    toks = mkt.get("clobTokenIds", [])
-                    pxs = mkt.get("outcomePrices", [])
-                    if isinstance(toks, str):
-                        try:
-                            toks = json.loads(toks)
-                        except Exception:
-                            toks = []
-                    if isinstance(pxs, str):
-                        try:
-                            pxs = json.loads(pxs)
-                        except Exception:
-                            pxs = []
-                    for tid, px in zip(toks, pxs):
-                        try:
-                            prices[tid] = float(px)
-                        except (ValueError, TypeError):
-                            # Gamma occasionally returns "" or null for
-                            # markets in odd states — skip silently so
-                            # the caller's stale cache stays canonical
-                            # for those tokens until the next refresh.
-                            pass
+            results = await asyncio.gather(
+                *(_fetch_one_batch(client, b, idx) for idx, b in enumerate(batches)),
+                return_exceptions=True,
+            )
+        for r in results:
+            if isinstance(r, Exception):
+                # _fetch_one_batch already logs per-batch failures and
+                # returns {}.  This branch fires only for an exception
+                # raised OUTSIDE the helper — log once at the gather
+                # level and carry on with whatever we did get.
+                logger.warning(
+                    "Gamma price gather caught uncaught exception: %r", r,
+                )
+                continue
+            prices.update(r)
     except Exception:
         logger.warning(
             "Gamma price refresh failed at the client level; returning %d "

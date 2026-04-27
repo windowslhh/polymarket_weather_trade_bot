@@ -153,6 +153,92 @@ async def test_batch_size_override():
     assert call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_batches_run_concurrently():
+    """cycle-fix-9: 3 batches with 1s sleep each must complete in
+    ~1s (concurrent), not ~3s (sequential).  Without the
+    asyncio.gather speed-up the entry scan would block the whole
+    15-min position-check cycle for 7-15s on a typical event count.
+    """
+    import asyncio
+    import time
+
+    tokens = [f"tok_{i}" for i in range(60)]  # 60 → 3 batches of 20
+    n_calls = 0
+
+    async def _slow_get(*args, **kwargs):
+        nonlocal n_calls
+        n_calls += 1
+        await asyncio.sleep(1.0)  # simulate Gamma latency
+        # Return one market per batch covering the requested tokens.
+        batch_tokens = [v for k, v in kwargs.get("params", []) if k == "clob_token_ids"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=[
+            _make_mkt(batch_tokens, ["0.5"] * len(batch_tokens)),
+        ])
+        return resp
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = _slow_get
+
+    with patch("src.markets.gamma_prices.httpx.AsyncClient", return_value=client):
+        t0 = time.monotonic()
+        out = await refresh_gamma_prices_only(tokens)
+        elapsed = time.monotonic() - t0
+
+    assert n_calls == 3, f"expected 3 batches, got {n_calls}"
+    assert len(out) == 60, f"all 60 tokens should resolve, got {len(out)}"
+    # Concurrent: ~1.0s.  Serial would be ~3.0s.  Pin under 2s to
+    # leave generous slack for slow CI machines.
+    assert elapsed < 2.0, (
+        f"batches did not run concurrently: {elapsed:.2f}s for 3×1s "
+        "calls (target < 2s, serial would be ~3s)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_batch_failure_does_not_block_others():
+    """cycle-fix-9: if one parallel batch fails (5xx, timeout, JSON
+    decode error), the others' results must still come back.  Pre-fix
+    the serial loop already ``continue``-d on per-batch error; this
+    test pins that asyncio.gather + return_exceptions preserves the
+    same partial-success semantic."""
+    tokens = [f"tok_{i}" for i in range(40)]  # 2 batches of 20
+    call_idx = 0
+
+    async def _mixed_get(*args, **kwargs):
+        nonlocal call_idx
+        call_idx += 1
+        batch_tokens = [v for k, v in kwargs.get("params", []) if k == "clob_token_ids"]
+        if call_idx == 1:
+            raise RuntimeError("simulated batch 1 5xx")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value=[
+            _make_mkt(batch_tokens, ["0.5"] * len(batch_tokens)),
+        ])
+        return resp
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = _mixed_get
+
+    with patch("src.markets.gamma_prices.httpx.AsyncClient", return_value=client):
+        out = await refresh_gamma_prices_only(tokens)
+
+    # Order is non-deterministic across batches under gather, but the
+    # second batch's 20 tokens must come back regardless of which one
+    # threw.  Allow either batch to be the failed one.
+    assert len(out) == 20, (
+        "exactly one batch's worth of tokens should resolve; "
+        f"got {len(out)} (failure must not block the other)"
+    )
+
+
 def test_module_constants_sane():
     """Defaults are documented + don't drift accidentally."""
     assert DEFAULT_BATCH_SIZE == 20
@@ -163,6 +249,9 @@ def test_module_constants_sane():
     # Allow only the two explicit public names + stdlib re-exports we need.
     expected = {"refresh_gamma_prices_only", "DEFAULT_BATCH_SIZE",
                 "DEFAULT_TIMEOUT_S", "annotations", "logger",
-                "logging", "json", "httpx"}
+                "logging", "json", "httpx",
+                # cycle-fix-9: parallel-batch implementation pulled in
+                # ``asyncio`` and ``Iterable`` from typing.
+                "asyncio", "Iterable"}
     unexpected = set(public) - expected
     assert not unexpected, f"unexpected public names: {unexpected}"
