@@ -379,8 +379,8 @@ class ClobClient:
         Strategy:
         1. Call get_trades(asset_id=token_id, after=created_at_epoch-300)
            and scan for a matching trade.  If found → 'filled'.
-        2. Else call get_orders(asset_id=token_id) and scan for a matching
-           open order.  If found → 'open' (resting limit on CLOB).
+        2. Else call get_open_orders(asset_id=token_id) and scan for a
+           matching open order.  If found → 'open' (resting limit on CLOB).
         3. Else → 'unknown' (safe to mark failed; a subsequent manual
            review of CLOB trade history confirms).
 
@@ -394,10 +394,16 @@ class ClobClient:
             )
 
         try:
-            from py_clob_client.clob_types import OpenOrderParams, TradeParams
+            # v2-5 (2026-04-27): import path moved to py_clob_client_v2
+            # ahead of the 2026-04-28 exchange cutover.  Param dataclass
+            # fields (asset_id / after) unchanged from v1.
+            from py_clob_client_v2.clob_types import (
+                OpenOrderParams, TradeParams,
+            )
         except ImportError:
             return ProbeResult(
-                state="unreachable", message="py-clob-client not installed",
+                state="unreachable",
+                message="py-clob-client-v2 not installed",
             )
 
         client = self._get_client()
@@ -479,8 +485,12 @@ class ClobClient:
                     )
 
             # Probe open orders (still resting).
+            # v2-5 (2026-04-27): v1 SDK ``client.get_orders(params)`` →
+            # v2 SDK ``client.get_open_orders(params)``.  Same param
+            # shape (``OpenOrderParams(asset_id=...)``); only the method
+            # name changed.
             oparams = OpenOrderParams(asset_id=token_id)
-            orders_resp = await asyncio.to_thread(client.get_orders, oparams)
+            orders_resp = await asyncio.to_thread(client.get_open_orders, oparams)
             orders_list = _extract_list(orders_resp)
             for o in orders_list:
                 if _match_order(o):
@@ -489,7 +499,7 @@ class ClobClient:
                         order_id=str(o.get("id") or o.get("order_id") or ""),
                         price=float(o.get("price", 0)),
                         size=float(o.get("original_size", o.get("size", 0))),
-                        message="matched via get_orders",
+                        message="matched via get_open_orders",
                     )
         except Exception as exc:
             logger.exception("probe_order_status raised")

@@ -47,7 +47,7 @@ async def test_matching_trade_returns_filled():
     client._client.get_trades = MagicMock(return_value=[{
         "id": "t1", "side": "BUY", "price": 0.501, "size": 10.0, "asset_id": "tok1",
     }])
-    client._client.get_orders = MagicMock(return_value=[])
+    client._client.get_open_orders = MagicMock(return_value=[])
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
@@ -60,7 +60,7 @@ async def test_matching_trade_returns_filled():
 async def test_no_match_returns_unknown():
     client = _make_client()
     client._client.get_trades = MagicMock(return_value=[])
-    client._client.get_orders = MagicMock(return_value=[])
+    client._client.get_open_orders = MagicMock(return_value=[])
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
@@ -77,7 +77,7 @@ async def test_open_order_returns_open():
     """
     client = _make_client()
     client._client.get_trades = MagicMock(return_value=[])
-    client._client.get_orders = MagicMock(return_value=[{
+    client._client.get_open_orders = MagicMock(return_value=[{
         "id": "o99", "side": "BUY", "price": 0.5, "original_size": 10.0,
         "asset_id": "tok1",
     }])
@@ -96,7 +96,7 @@ async def test_side_mismatch_is_not_matched():
     client._client.get_trades = MagicMock(return_value=[{
         "id": "t_sell", "side": "SELL", "price": 0.5, "size": 10.0,
     }])
-    client._client.get_orders = MagicMock(return_value=[])
+    client._client.get_open_orders = MagicMock(return_value=[])
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
@@ -112,7 +112,7 @@ async def test_dict_wrapped_response_is_unwrapped():
         "data": [{"id": "t1", "side": "BUY", "price": 0.5, "size": 10.0}],
         "next_cursor": "",
     })
-    client._client.get_orders = MagicMock(return_value={"data": []})
+    client._client.get_open_orders = MagicMock(return_value={"data": []})
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
@@ -136,7 +136,7 @@ async def test_partial_fill_still_matches():
     client._client.get_trades = MagicMock(return_value=[])
     # Order placed at 10 shares, 3 already matched → 7 remaining.
     # A 7-share pending intent should match this open order.
-    client._client.get_orders = MagicMock(return_value=[{
+    client._client.get_open_orders = MagicMock(return_value=[{
         "id": "o_partial", "side": "BUY", "price": 0.5,
         "original_size": 10.0, "size_matched": 3.0,
     }])
@@ -160,7 +160,7 @@ async def test_price_improvement_still_matches():
     client._client.get_trades = MagicMock(return_value=[{
         "id": "improved_1", "side": "BUY", "price": 0.494, "size": 10.0,
     }])
-    client._client.get_orders = MagicMock(return_value=[])
+    client._client.get_open_orders = MagicMock(return_value=[])
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
@@ -177,7 +177,7 @@ async def test_price_outside_tolerance_is_unmatched():
     client._client.get_trades = MagicMock(return_value=[{
         "id": "far", "side": "BUY", "price": 0.48, "size": 10.0,  # 0.02 off
     }])
-    client._client.get_orders = MagicMock(return_value=[])
+    client._client.get_open_orders = MagicMock(return_value=[])
 
     r = await client.probe_order_status(
         token_id="tok1", side="BUY", price=0.5, size_shares=10.0,
