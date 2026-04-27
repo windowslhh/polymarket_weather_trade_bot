@@ -1003,6 +1003,21 @@ class Rebalancer:
         skipped_no_forecast = 0
         skipped_no_daily_max = 0
 
+        # cycle-fix-8: cache total exposure per strategy ONCE before the
+        # event loop — the SQL aggregate is independent of event_id, so
+        # calling it inside the inner loop pays N_events × N_variants
+        # round-trips for the same number.  At 23 events × 3 variants
+        # the old shape was 69 redundant ``get_total_exposure`` queries
+        # per 15-min cycle.  cycle_total_additions still accumulates
+        # in-memory across events to keep the in-cycle bookkeeping
+        # honest (a B BUY in event A is reflected in B's running total
+        # before event B's sizing).
+        strat_total_exp_base: dict[str, float] = {}
+        for strat_name in variants:
+            strat_total_exp_base[strat_name] = (
+                await self._portfolio.get_total_exposure(strategy=strat_name)
+            )
+
         for event in events:
             forecast = self._cached_forecasts_by_date.get(
                 event.market_date, {},
@@ -1128,8 +1143,11 @@ class Rebalancer:
                         f"{strat_name}:{event.city}", 0.0,
                     )
                 )
+                # cycle-fix-8: read from the per-strategy snapshot
+                # taken before the event loop; in-cycle BUYs still
+                # bump cycle_total_additions for accurate total caps.
                 strat_total_exp = (
-                    await self._portfolio.get_total_exposure(strategy=strat_name)
+                    strat_total_exp_base.get(strat_name, 0.0)
                     + cycle_total_additions.get(strat_name, 0.0)
                 )
                 effective_cfg = _effective_city_config(strat_cfg, event.city)

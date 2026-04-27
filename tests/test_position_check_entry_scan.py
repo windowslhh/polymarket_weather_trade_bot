@@ -390,6 +390,47 @@ async def test_path9_locked_win_respects_cooldown(monkeypatch):
     ), "locked-win token in cooldown must not be re-bought"
 
 
+@pytest.mark.asyncio
+async def test_total_exposure_queried_once_per_strategy(monkeypatch):
+    """cycle-fix-8: ``get_total_exposure(strategy=)`` is independent of
+    event_id, so the entry scan must call it ONCE per active variant
+    before the event loop — not N_events × N_variants times inside.
+
+    With 5 events and N active variants, pre-fix shape called the
+    aggregate 5 × N times; cached shape calls it N times.  Pin the
+    call count to N (number of active variants from
+    ``get_strategy_variants()``).
+    """
+    from src.config import get_strategy_variants
+
+    reb = _mock_rebalancer()
+    events = [
+        _build_event(event_id=f"evt_{i}", no_price=0.55)
+        for i in range(5)
+    ]
+    for ev in events:
+        _seed_forecast(reb, ev)
+    reb._last_events = events
+
+    fetched: dict[str, float] = {}
+    for ev in events:
+        fetched[f"{ev.event_id}_no_lo"] = 0.55
+        fetched[f"{ev.event_id}_no_hi"] = 0.99
+
+    with patch(
+        "src.strategy.rebalancer.refresh_gamma_prices_only",
+        new=AsyncMock(return_value=fetched),
+    ):
+        await reb.run_position_check()
+
+    n_variants = len(get_strategy_variants())
+    assert reb._portfolio.get_total_exposure.await_count == n_variants, (
+        f"get_total_exposure should be called once per active variant "
+        f"(={n_variants}), not N_events × N_variants times — cycle-fix-8.  "
+        f"Observed: {reb._portfolio.get_total_exposure.await_count}"
+    )
+
+
 def test_config_yaml_exposes_entry_scan_flag(tmp_path):
     """cycle-fix-6: ``config.yaml`` writes ``enable_position_check_entry_scan``
     and ``load_config()`` carries it through to the StrategyConfig
