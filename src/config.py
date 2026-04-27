@@ -168,11 +168,28 @@ class SchedulingConfig:
 
 @dataclass
 class AppConfig:
-    # Polymarket credentials
-    polymarket_api_key: str = ""
-    polymarket_secret: str = ""
-    polymarket_passphrase: str = ""
+    # Polymarket L2 API credentials.  Optional: when None, ClobClient
+    # calls ``create_or_derive_api_creds()`` on the underlying py-clob-client
+    # to derive them from the L1 private key.  Pre-provisioned creds in
+    # .env still work (back-compat) and short-circuit the derive call.
+    polymarket_api_key: str | None = None
+    polymarket_secret: str | None = None
+    polymarket_passphrase: str | None = None
+    # L1 private key (signing key).  Loaded from macOS Keychain in live
+    # mode by src.security.load_eth_private_key; .env fallback is honored
+    # for non-macOS environments (VPS paper today).  Stays as ``str = ""``
+    # rather than Optional because the rest of the codebase reads it
+    # without None-handling — the empty default mirrors paper-mode where
+    # no key is needed.
     eth_private_key: str = ""
+    # Polymarket proxy / Gnosis Safe address that holds the actual USDC
+    # on-chain.  Polymarket.com web users have one of these by default;
+    # direct EOA setups do not.  When set, ClobClient signs orders with
+    # signature_type=2 (POLY_GNOSIS_SAFE).  When None, signature_type=0
+    # (direct EOA on-chain wallet).  ``load_config`` normalises the env
+    # placeholder ``0x`` / ``0x0`` to None so an unfilled .env stub
+    # doesn't accidentally trip proxy mode against a non-existent Safe.
+    funder_address: str | None = None
 
     # Optional weather API key
     openweathermap_api_key: str = ""
@@ -184,6 +201,10 @@ class AppConfig:
     # Set TRIGGER_SECRET in .env; if empty the endpoint is unprotected (dev only).
     trigger_secret: str = ""
 
+    # Optional Polygon RPC URL override.  Currently unused — reserved for
+    # future on-chain helpers (settlement redemption, balance queries).
+    polygon_rpc_url: str = ""
+
     # Sub-configs
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
@@ -193,6 +214,21 @@ class AppConfig:
     dry_run: bool = False
     paper: bool = False
     db_path: Path = field(default_factory=lambda: _ROOT / "data" / "bot.db")
+
+
+def _env_or_none(key: str, *placeholders: str) -> str | None:
+    """Read an env var; collapse empty / whitespace / placeholder to None.
+
+    Treating ``""`` and the literal placeholder ``0x`` (used in .env.example
+    so the file passes a syntax sanity check while flagging the field as
+    unset) as None means downstream code can use ``if not value`` without
+    extra normalisation, and a half-edited .env can't accidentally drive
+    the bot into proxy-wallet mode against a non-existent address.
+    """
+    raw = os.getenv(key, "").strip()
+    if not raw or raw in placeholders:
+        return None
+    return raw
 
 
 def load_config(config_path: str | Path | None = None, env_path: str | Path | None = None) -> AppConfig:
@@ -208,10 +244,14 @@ def load_config(config_path: str | Path | None = None, env_path: str | Path | No
     cities_raw = raw.get("cities", [])
 
     return AppConfig(
-        polymarket_api_key=os.getenv("POLYMARKET_API_KEY", ""),
-        polymarket_secret=os.getenv("POLYMARKET_SECRET", ""),
-        polymarket_passphrase=os.getenv("POLYMARKET_PASSPHRASE", ""),
+        polymarket_api_key=_env_or_none("POLYMARKET_API_KEY"),
+        polymarket_secret=_env_or_none("POLYMARKET_SECRET"),
+        polymarket_passphrase=_env_or_none("POLYMARKET_PASSPHRASE"),
         eth_private_key=os.getenv("ETH_PRIVATE_KEY", ""),
+        # 0x / 0x0 are .env.example placeholders — reject so an unfilled
+        # FUNDER_ADDRESS line doesn't flip the bot into proxy-wallet mode.
+        funder_address=_env_or_none("FUNDER_ADDRESS", "0x", "0x0"),
+        polygon_rpc_url=os.getenv("POLYGON_RPC_URL", ""),
         openweathermap_api_key=os.getenv("OPENWEATHERMAP_API_KEY", ""),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
         trigger_secret=os.getenv("TRIGGER_SECRET", ""),

@@ -41,14 +41,25 @@ mkdir -p data/backups data/history logs
 echo "→ data/, data/backups/, data/history/, logs/ ready"
 
 # 4. .env permissions — keep secrets owner-only.  Refuse to continue
-#    without a .env so we don't accidentally start with empty CLOB creds.
+#    without a .env so we don't accidentally start with empty config.
+#    The only field that's strictly required for live trading is
+#    FUNDER_ADDRESS (if you signed up on polymarket.com); API creds and
+#    the private key are auto-derived / Keychain-loaded.  We do not
+#    block on FUNDER_ADDRESS being empty here — the bot will run direct
+#    EOA mode if so, and the operator may explicitly want that.
 if [ ! -f .env ]; then
   echo "ERROR: .env is missing.  Copy .env.example to .env and fill in"
-  echo "       POLYMARKET_API_KEY / SECRET / PASSPHRASE before re-running."
+  echo "       FUNDER_ADDRESS (if you registered on polymarket.com)"
+  echo "       — leave it empty for direct EOA mode."
   exit 1
 fi
 chmod 600 .env
 echo "→ .env permissions set to 600"
+if ! grep -qE '^FUNDER_ADDRESS=0x[0-9a-fA-F]+' .env; then
+  echo "   note: FUNDER_ADDRESS is empty / unset — bot will use direct"
+  echo "         EOA mode (signature_type=0).  Polymarket.com web users"
+  echo "         normally need their proxy-wallet address here."
+fi
 
 # 5. Smoke test — full pytest, ignoring the offline backtest scripts.
 echo "→ running pytest (this takes ~2 min)"
