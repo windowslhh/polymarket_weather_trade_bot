@@ -64,26 +64,74 @@ class ClobClient:
         self._client = None
 
     def _get_client(self):
-        """Lazy-init the py-clob-client."""
-        if self._client is None:
-            try:
-                from py_clob_client.client import ClobClient as _ClobClient
-                from py_clob_client.clob_types import ApiCreds
+        """Lazy-init the py-clob-client.
 
-                creds = ApiCreds(
-                    api_key=self._config.polymarket_api_key,
-                    api_secret=self._config.polymarket_secret,
-                    api_passphrase=self._config.polymarket_passphrase,
-                )
-                self._client = _ClobClient(
-                    "https://clob.polymarket.com",
-                    key=self._config.eth_private_key,
-                    chain_id=137,  # Polygon
-                    creds=creds,
-                )
-            except ImportError:
-                logger.error("py-clob-client not installed. Install with: pip install py-clob-client")
-                raise
+        Live-mode only — paper / dry-run paths short-circuit before
+        reaching this method (no real CLOB credentials required to
+        simulate fills).  Two responsibilities:
+
+        1. Pick signature mode + funder.  signature_type (per
+           py-clob-client/rfq_types.py docstring):
+              0 = EOA              (direct on-chain wallet)
+              1 = POLY_PROXY       (Magic / email — legacy)
+              2 = POLY_GNOSIS_SAFE (polymarket.com web user proxy wallet)
+           If FUNDER_ADDRESS is set we are operating against a Gnosis
+           Safe (the polymarket.com signup default), so signature_type=2
+           and funder=address.  Without a funder we sign as the EOA
+           directly (signature_type=0, no funder kwarg).
+
+        2. Get L2 API creds.  Either the operator pre-provisioned them
+           in .env (back-compat) or we derive them from the L1 key
+           on the fly.  ``create_or_derive_api_creds`` is free — it
+           signs once with our private key and Polymarket returns the
+           deterministic key/secret/passphrase tied to that EOA.
+        """
+        if self._client is not None:
+            return self._client
+
+        try:
+            from py_clob_client.client import ClobClient as _ClobClient
+            from py_clob_client.clob_types import ApiCreds
+        except ImportError:
+            logger.error(
+                "py-clob-client not installed. Install with: pip install py-clob-client"
+            )
+            raise
+
+        funder = (self._config.funder_address or "").strip() or None
+        signature_type = 2 if funder else 0
+        if funder:
+            logger.info(
+                "CLOB init: proxy-wallet mode (funder=%s..., signature_type=2)",
+                funder[:10],
+            )
+        else:
+            logger.info(
+                "CLOB init: direct EOA mode (no FUNDER_ADDRESS, signature_type=0)",
+            )
+
+        client = _ClobClient(
+            "https://clob.polymarket.com",
+            key=self._config.eth_private_key,
+            chain_id=137,  # Polygon
+            signature_type=signature_type,
+            funder=funder,
+        )
+
+        api_key = (self._config.polymarket_api_key or "").strip()
+        api_secret = (self._config.polymarket_secret or "").strip()
+        api_pass = (self._config.polymarket_passphrase or "").strip()
+        if api_key and api_secret and api_pass:
+            logger.info("CLOB creds: using POLYMARKET_API_* from .env")
+            creds = ApiCreds(
+                api_key=api_key, api_secret=api_secret, api_passphrase=api_pass,
+            )
+        else:
+            logger.info("CLOB creds: deriving from private key (free, signs once)")
+            creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+
+        self._client = client
         return self._client
 
     async def get_orderbook(self, token_id: str) -> dict:
