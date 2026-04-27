@@ -400,6 +400,79 @@ async def test_path9_locked_win_respects_cooldown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_entry_scan_excludes_held_tokens_from_gamma_refresh(monkeypatch):
+    """cycle-fix-11: held tokens were refreshed in phase 2 of
+    position_check; the entry scan must NOT refresh them again
+    (double-feeding the TWAP buffer in a single cycle would bias
+    the moving average toward the latest tick).
+
+    Setup: one held position on the lo-price token.  Both held-phase
+    refresh and entry-scan refresh patched to the same recording
+    AsyncMock so we can inspect the token-id arguments to each call
+    independently.
+    """
+    held_token = "evt_entry_1_no_lo"
+    held_position = {
+        "id": 1,
+        "event_id": "evt_entry_1",
+        "token_id": held_token,
+        "token_type": "NO",
+        "city": "New York",
+        "side": "BUY",
+        "slot_label": "between 64-65°F on April 27",
+        "strategy": "B",
+        "entry_price": 0.55,
+        "size_usd": 5.0,
+        "shares": 9.09,
+        "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "closed_at": None,
+        "buy_reason": "[B] NO: dist=20°F",
+    }
+
+    reb = _mock_rebalancer(positions=[held_position])
+    event = _build_event(no_price=0.55)
+    _seed_forecast(reb, event)
+    reb._last_events = [event]
+    # Pre-populate _last_gamma_prices with a held-phase value so the
+    # entry-scan slot read through still sees the held token's price
+    # without needing a re-fetch.
+    reb._last_gamma_prices[held_token] = 0.55
+    reb._last_gamma_prices[f"{event.event_id}_no_hi"] = 0.99
+
+    # Record every call's token_ids argument.
+    calls: list[set[str]] = []
+
+    async def _record(token_ids, **kwargs):
+        calls.append(set(token_ids))
+        # Return prices for whatever was asked.
+        return {tid: 0.55 if tid.endswith("_no_lo") else 0.99 for tid in token_ids}
+
+    with patch(
+        "src.strategy.rebalancer.refresh_gamma_prices_only",
+        new=AsyncMock(side_effect=_record),
+    ):
+        await reb.run_position_check()
+
+    # 2 calls expected: phase-2 (held tokens) + phase-4 (entry scan
+    # non-held).  The held token MUST appear ONLY in the phase-2 call,
+    # never in the phase-4 set.
+    assert len(calls) == 2, (
+        f"expected 2 Gamma calls (held + entry-scan), got {len(calls)}: {calls}"
+    )
+    held_call = next(c for c in calls if held_token in c)
+    non_held_call = next(c for c in calls if held_token not in c)
+    assert held_token in held_call, "held-phase must include held token"
+    assert held_token not in non_held_call, (
+        "entry-scan must NOT re-fetch held token (cycle-fix-11)"
+    )
+    # The non-held entry-scan call still covers all OTHER tokens in
+    # the cached events, including the YES token and the hi-price slot.
+    assert f"{event.event_id}_no_hi" in non_held_call
+    assert f"{event.event_id}_yes_lo" in non_held_call
+
+
+@pytest.mark.asyncio
 async def test_total_exposure_queried_once_per_strategy(monkeypatch):
     """cycle-fix-8: ``get_total_exposure(strategy=)`` is independent of
     event_id, so the entry scan must call it ONCE per active variant

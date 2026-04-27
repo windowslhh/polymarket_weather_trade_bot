@@ -900,8 +900,22 @@ class Rebalancer:
                     # the EXIT/TRIM signals already collected in the
                     # held-position phase.  Closing trades are always
                     # allowed and must reach the executor.
+                    #
+                    # cycle-fix-11: pass held-token set so the entry
+                    # scan can EXCLUDE them from its Gamma refresh.
+                    # The held-position phase already refreshed those
+                    # via the same TWAP buffer; refetching would cause
+                    # the buffer to receive the same fresh price twice
+                    # this cycle, biasing the moving average towards
+                    # the latest tick.
+                    held_token_set = {
+                        p["token_id"] for p in all_positions
+                        if p.get("token_id")
+                    }
                     try:
-                        entry_scan_signals = await self._run_entry_scan(now=now)
+                        entry_scan_signals = await self._run_entry_scan(
+                            now=now, already_refreshed=held_token_set,
+                        )
                         signals.extend(entry_scan_signals)
                     except Exception:
                         logger.exception(
@@ -931,7 +945,12 @@ class Rebalancer:
         logger.info("--- Position check done ---")
         return signals
 
-    async def _run_entry_scan(self, *, now: datetime) -> list[TradeSignal]:
+    async def _run_entry_scan(
+        self,
+        *,
+        now: datetime,
+        already_refreshed: set[str] | None = None,
+    ) -> list[TradeSignal]:
         """Cheap NO-entry pass over cached events with refreshed Gamma prices.
 
         Mirrors the 60-min cycle's entry phase but scoped to:
@@ -960,36 +979,48 @@ class Rebalancer:
         if not events:
             return scan_signals
 
-        # 1. Refresh Gamma outcomePrices for every active token.  Same
-        #    helper held-token refresh uses; partial-success is OK.
-        all_token_ids = list({
+        # 1. Refresh Gamma outcomePrices for every active token EXCEPT
+        #    those the held-position phase already refreshed this
+        #    cycle.  Re-fetching held tokens would feed the TWAP
+        #    PriceBuffer the same fresh price twice in the same cycle,
+        #    biasing the moving average toward the latest tick — the
+        #    very thing TWAP exists to avoid.  Held-token prices are
+        #    already in ``_last_gamma_prices``; entry-scan reads from
+        #    there for those, fresh-fetches the rest.
+        already_refreshed = already_refreshed or set()
+        all_token_ids = {
             tid
             for event in events
             for slot in event.slots
             for tid in (slot.token_id_yes, slot.token_id_no)
             if tid
-        })
+        }
+        non_held_token_ids = list(all_token_ids - already_refreshed)
         try:
-            fresh = await refresh_gamma_prices_only(all_token_ids)
+            fresh = await refresh_gamma_prices_only(non_held_token_ids)
         except Exception:
             logger.warning(
                 "Entry scan: Gamma price refresh failed; skipping scan",
                 exc_info=True,
             )
             return scan_signals
-        if not fresh:
+        if not fresh and not already_refreshed:
+            # Truly nothing — no held tokens covered by phase-2 refresh
+            # AND the entry-scan refresh came back empty.  Bail before
+            # the per-event loop tries to read stale slot prices.
             logger.debug(
-                "Entry scan: Gamma returned no prices for %d tokens",
-                len(all_token_ids),
+                "Entry scan: Gamma returned no prices for %d non-held tokens",
+                len(non_held_token_ids),
             )
             return scan_signals
         # TWAP-smooth so a single weird tick can't drive a BUY.  Shares
         # the buffer with the rest of the bot — same noise floor.
-        smoothed = self._price_buffer.apply_batch(fresh)
-        self._last_gamma_prices.update(smoothed)
+        if fresh:
+            smoothed = self._price_buffer.apply_batch(fresh)
+            self._last_gamma_prices.update(smoothed)
         logger.info(
-            "Entry scan: refreshed prices for %d/%d tokens (TWAP-smoothed)",
-            len(fresh), len(all_token_ids),
+            "Entry scan: refreshed %d/%d tokens (held-skipped=%d, TWAP-smoothed)",
+            len(fresh), len(non_held_token_ids), len(already_refreshed),
         )
 
         # 2. Per-event evaluate.  Variants iterated outside the event
