@@ -208,15 +208,21 @@ class ClobClient:
             return OrderResult(order_id=f"paper_{suffix}", success=True, message="paper trade")
 
         client = self._get_client()
-        from py_clob_client.order_builder.constants import BUY, SELL
+        # v2-3 (2026-04-27): v2 SDK requires a typed ``OrderArgs`` (not
+        # the raw dict the v1 SDK accepted) plus an explicit
+        # ``OrderType``.  The third method arg ``options`` stays None
+        # so the server picks the tick size dynamically — Polymarket's
+        # weather slots have used 0.01 ticks consistently and we don't
+        # want a hard-coded value to drift if microstructure changes.
+        from py_clob_client_v2 import OrderArgs, OrderType, Side
 
-        order_side = BUY if side.upper() == "BUY" else SELL
-        order_payload = {
-            "tokenID": token_id,
-            "price": price,
-            "side": order_side,
-            "size": size,
-        }
+        order_side = Side.BUY if side.upper() == "BUY" else Side.SELL
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=order_side,
+        )
 
         # FIX-04: bounded timeout, retry with exponential backoff on transient
         # failures, distinct longer backoff on 429.  Without the timeout, a hung
@@ -227,7 +233,10 @@ class ClobClient:
             try:
                 async with asyncio.timeout(ORDER_TIMEOUT_S):
                     order = await asyncio.to_thread(
-                        client.create_and_post_order, order_payload,
+                        client.create_and_post_order,
+                        order_args,
+                        None,  # PartialCreateOrderOptions: server picks tick
+                        OrderType.GTC,
                     )
                 order_id = (
                     order.get("orderID", "") if isinstance(order, dict) else str(order)
