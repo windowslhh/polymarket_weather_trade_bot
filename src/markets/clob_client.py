@@ -303,7 +303,18 @@ class ClobClient:
 
         client = self._get_client()
         try:
-            await asyncio.to_thread(client.cancel, order_id)
+            # v2-4 (2026-04-27): v1 SDK exposed ``client.cancel(order_id)``
+            # taking a bare string; v2 SDK splits that into:
+            #   - ``cancel_order(payload: OrderPayload)`` — single
+            #   - ``cancel_orders(order_hashes: list)`` — batch
+            #   - ``cancel_all()`` — every open order for this account
+            # We always cancel exactly one known order_id, so the
+            # single-shape is the right replacement.  Note the field
+            # name is ``orderID`` (camelCase) not ``order_id``.
+            from py_clob_client_v2.clob_types import OrderPayload
+            await asyncio.to_thread(
+                client.cancel_order, OrderPayload(orderID=order_id),
+            )
             logger.info("Order cancelled: %s", order_id)
             return True
         except Exception:
