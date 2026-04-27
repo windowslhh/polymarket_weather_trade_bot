@@ -300,6 +300,96 @@ async def test_path6_forecast_cache_miss_skips_event(monkeypatch):
     )
 
 
+def _make_locked_win_signal(event: WeatherMarketEvent) -> "TradeSignal":
+    """Build a TradeSignal that mimics what
+    ``evaluate_locked_win_signals`` would emit on the lo-price slot.
+    Reused by the two cycle-fix-7 tests below."""
+    from src.markets.models import TradeSignal as _TS
+    return _TS(
+        token_type=TokenType.NO,
+        side=Side.BUY,
+        slot=event.slots[0],
+        event=event,
+        expected_value=0.20,
+        estimated_win_prob=0.97,
+        is_locked_win=True,
+        reason="LOCKED WIN: below-slot",
+    )
+
+
+@pytest.mark.asyncio
+async def test_path8_locked_win_in_entry_scan(monkeypatch):
+    """cycle-fix-7: ``evaluate_locked_win_signals`` runs alongside
+    ``evaluate_no_signals`` inside the entry scan with the same
+    forecast / daily_max / dedup / cap.  Locked wins must reach the
+    merged signals list with positive size and the entry-scan tag.
+    """
+    reb = _mock_rebalancer()
+    event = _build_event(no_price=0.55)
+    _seed_forecast(reb, event)
+    reb._last_events = [event]
+
+    locked_signal = _make_locked_win_signal(event)
+
+    fetched = {
+        f"{event.event_id}_no_lo": 0.55,
+        f"{event.event_id}_no_hi": 0.99,
+    }
+    with patch(
+        "src.strategy.rebalancer.refresh_gamma_prices_only",
+        new=AsyncMock(return_value=fetched),
+    ), patch(
+        "src.strategy.rebalancer.evaluate_locked_win_signals",
+        return_value=[locked_signal],
+    ):
+        signals = await reb.run_position_check()
+
+    locked_buys = [
+        s for s in signals
+        if s.side == Side.BUY and s.is_locked_win
+    ]
+    assert locked_buys, "locked-win signal should reach the merged list"
+    assert all(s.suggested_size_usd > 0 for s in locked_buys)
+    assert all("entry-scan" in (s.reason or "") for s in locked_buys), (
+        "locked wins from the entry scan must carry the (entry-scan) tag "
+        "so dashboards / decision_log can attribute them correctly"
+    )
+
+
+@pytest.mark.asyncio
+async def test_path9_locked_win_respects_cooldown(monkeypatch):
+    """cycle-fix-7: a token in ``_recent_exits`` within the cooldown
+    window must NOT receive a locked-win BUY from the entry scan.
+    Same dedup the forecast-NO path uses (path 5)."""
+    reb = _mock_rebalancer()
+    event = _build_event(no_price=0.55)
+    _seed_forecast(reb, event)
+    reb._last_events = [event]
+
+    locked_token = event.slots[0].token_id_no
+    reb._recent_exits[locked_token] = datetime.now(timezone.utc)
+
+    locked_signal = _make_locked_win_signal(event)
+
+    fetched = {
+        f"{event.event_id}_no_lo": 0.55,
+        f"{event.event_id}_no_hi": 0.99,
+    }
+    with patch(
+        "src.strategy.rebalancer.refresh_gamma_prices_only",
+        new=AsyncMock(return_value=fetched),
+    ), patch(
+        "src.strategy.rebalancer.evaluate_locked_win_signals",
+        return_value=[locked_signal],
+    ):
+        signals = await reb.run_position_check()
+
+    assert not any(
+        s.is_locked_win and s.token_id == locked_token and s.side == Side.BUY
+        for s in signals
+    ), "locked-win token in cooldown must not be re-bought"
+
+
 def test_config_yaml_exposes_entry_scan_flag(tmp_path):
     """cycle-fix-6: ``config.yaml`` writes ``enable_position_check_entry_scan``
     and ``load_config()`` carries it through to the StrategyConfig

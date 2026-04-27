@@ -1088,7 +1088,35 @@ class Rebalancer:
                     held_token_ids, days_ahead,
                     daily_max_f=daily_max, local_hour=local_hour,
                 )
-                if not no_signals:
+                # cycle-fix-7: locked-win has the same 60-min sampling
+                # gap as forecast-NO — when daily_max crosses a slot
+                # boundary in the 30-50 minute window between full
+                # cycles, locked-win signals get missed.  Run the same
+                # gate at 15-min cadence with the same dedup + cap.
+                # daily_max_final is computed only when we have METAR
+                # data for THIS cycle; entry scan reads from the
+                # _max_tracker that the held-position phase refreshed,
+                # so check the post-peak / stability rule here too.
+                _dm_final = False
+                if (
+                    daily_max is not None
+                    and city_tz is not None
+                    and _city_icao
+                ):
+                    _obs_series = self._max_tracker.get_observations(
+                        _city_icao, day=event.market_date,
+                    )
+                    _dm_final = is_daily_max_final(
+                        datetime.now(city_tz), _obs_series,
+                        post_peak_hour=strat_cfg.post_peak_hour,
+                        stability_window_minutes=strat_cfg.stability_window_minutes,
+                    )
+                locked_signals = evaluate_locked_win_signals(
+                    event, daily_max, strat_cfg, held_token_ids, days_ahead,
+                    daily_max_final=_dm_final,
+                )
+
+                if not no_signals and not locked_signals:
                     continue
 
                 # Apply cooldown / cap / sizing identical to 60-min cycle.
@@ -1107,7 +1135,8 @@ class Rebalancer:
                 effective_cfg = _effective_city_config(strat_cfg, event.city)
 
                 new_count = 0
-                for signal in no_signals:
+                # Locked wins first (higher confidence), then forecast-NO.
+                for signal in locked_signals + no_signals:
                     if new_count >= max_new:
                         break
                     tid = signal.token_id
