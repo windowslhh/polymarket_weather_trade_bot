@@ -173,6 +173,15 @@ async def test_path1_enabled_with_cached_events_fires_buy(monkeypatch):
     # Reason carries the entry-scan tag so dashboards / decision_log
     # operators can tell where the signal came from.
     assert any("entry-scan" in (s.reason or "") for s in buys)
+    # cycle-fix-10: size must be positive — a zero-size BUY would slip
+    # through the executor and never actually open a position.  This
+    # was implicit in path1 originally; pinning it here so a future
+    # regression in compute_size or the city/total exposure
+    # bookkeeping is caught at the boundary.
+    assert all(s.suggested_size_usd > 0 for s in buys), (
+        f"BUY signals should have positive suggested_size_usd; "
+        f"observed sizes: {[s.suggested_size_usd for s in buys]}"
+    )
 
 
 @pytest.mark.asyncio
