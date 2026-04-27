@@ -227,9 +227,19 @@ def test_trim_absolute_gate_fires_on_hard_reversal_regardless_of_entry():
 
 
 def test_trim_empty_entry_ev_map_falls_back_to_absolute_only():
-    """When entry_ev_map is empty, relative gate is inactive (absolute only)."""
-    # Slight decay: ev≈-0.02 → would trip relative (if entry_ev known) but not absolute.
-    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.52)
+    """When entry_ev_map is empty, relative gate is inactive (absolute only).
+
+    Price calibration (Fix C, 2026-04-28): with the corrected per-side
+    taker fee (TAKER_FEE_RATE 0.0125 → 0.025), the fee-inclusive EV at
+    win_prob~0.5 is ~0.0125 lower than under the old (under-priced) fee.
+    Old test used ``price_no=0.52`` and assumed ``ev≈-0.02``; with the
+    correct fee that's actually ``ev≈-0.032``, which trips the absolute
+    gate (``-min_trim_ev_absolute = -0.03``).  Drop the price to 0.51
+    so EV stays at ~-0.022, comfortably above the absolute trigger —
+    the test still demonstrates that the relative gate is inactive
+    when entry_ev_map is empty.
+    """
+    event, slot = _make_event_with_slot(73.0, 77.0, price_no=0.51)
     forecast = _make_forecast(75.0)
     config = StrategyConfig(
         min_trim_ev_absolute=0.03,
@@ -237,7 +247,7 @@ def test_trim_empty_entry_ev_map_falls_back_to_absolute_only():
     )
 
     signals = evaluate_trim_signals(event, forecast, [slot], config)  # no entry_ev_map
-    # ev≈-0.02 > -0.03 → absolute gate not tripped; relative inactive → no trim
+    # ev≈-0.022 > -0.03 → absolute gate not tripped; relative inactive → no trim
     assert len(signals) == 0
 
 

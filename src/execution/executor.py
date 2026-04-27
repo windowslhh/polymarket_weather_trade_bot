@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 
 from src.markets.clob_client import ClobClient
@@ -176,6 +177,7 @@ class Executor:
         # H-1: include signal.strategy so the reconciler can match SELL orders
         # to the right variant's position when two variants hold the same token.
         idempotency_key = uuid.uuid4().hex
+        order_created_at = int(time.time())
         await store.insert_pending_order(
             idempotency_key=idempotency_key,
             event_id=signal.event.event_id,
@@ -206,9 +208,71 @@ class Executor:
                 idempotency_key, result.message or "unknown CLOB failure"
             )
             logger.error("Order failed: %s", result.message)
+            # A1 (2026-04-28): when the v2 SDK reports the order was *posted*
+            # (real ``order_id``) but ``status='unmatched'``, it's resting on
+            # the Polymarket book and could match later — at which point the
+            # bot has no record of it (orders row is 'failed', no positions
+            # row) and the operator gets a phantom fill.  ``mark_order_failed``
+            # alone leaves the zombie alive — failed rows are NOT picked up by
+            # the reconciler's ``get_pending_orders``.  Best-effort cancel
+            # here closes the loop synchronously.  cancel failures are
+            # non-fatal: log a warning and rely on the next bot restart's
+            # reconciler probe path as a safety net.  We deliberately do NOT
+            # touch ``order_id == ""`` rows — those mean the wrapper never
+            # got a CLOB handle (timeout / rejected / network), so there's
+            # nothing to cancel.
+            if result.order_id:
+                try:
+                    cancelled = await self._clob.cancel_order(result.order_id)
+                except Exception:
+                    logger.exception(
+                        "A1: cancel_order raised for zombie order %s — order "
+                        "may still be resting on Polymarket; reconciler will "
+                        "resolve on next restart",
+                        result.order_id,
+                    )
+                else:
+                    if cancelled:
+                        logger.info(
+                            "A1: cancelled zombie order %s (was %s)",
+                            result.order_id, result.message,
+                        )
+                    else:
+                        logger.warning(
+                            "A1: cancel_order returned False for %s — order "
+                            "may still be resting on Polymarket; reconciler "
+                            "will resolve on next restart",
+                            result.order_id,
+                        )
             return
 
         if signal.side == Side.BUY:
+            # 2026-04-28: pull actual fill data from /data/trades so the
+            # dashboard's "Entry" column reflects effective per-share cost
+            # (limit-vs-fill slippage was previously hidden) and the fee
+            # paid is captured for net-P&L reporting.  Best-effort —
+            # ``get_fill_summary`` returns None on paper / dry-run, on
+            # SDK error, or when the trade hasn't propagated yet; in
+            # those cases match_price stays NULL and the dashboard falls
+            # back to the limit price.
+            match_price: float | None = None
+            fee_paid_usd: float | None = None
+            try:
+                summary = await self._clob.get_fill_summary(
+                    token_id=signal.token_id,
+                    order_id=result.order_id,
+                    created_at_epoch=order_created_at,
+                )
+            except Exception:
+                logger.exception(
+                    "get_fill_summary raised for %s — falling back to limit price",
+                    result.order_id,
+                )
+                summary = None
+            if summary is not None:
+                match_price = summary.match_price
+                fee_paid_usd = summary.fee_paid_usd
+
             await self._portfolio.record_fill_atomic(
                 idempotency_key=idempotency_key,
                 order_id=result.order_id,
@@ -227,6 +291,8 @@ class Executor:
                 # the absolute floor.
                 entry_ev=signal.expected_value,
                 entry_win_prob=signal.estimated_win_prob,
+                match_price=match_price,
+                fee_paid_usd=fee_paid_usd,
             )
         else:  # Side.SELL
             await store.finalize_sell_order(idempotency_key, result.order_id)

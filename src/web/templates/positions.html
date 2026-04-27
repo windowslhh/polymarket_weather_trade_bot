@@ -58,16 +58,28 @@
     </div>
     {% if strat_positions %}
     <table>
-        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Reason</th><th>Opened</th></tr></thead>
+        <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Type</th><th>Entry</th><th>Fee</th><th>Current</th><th>P&L</th><th>Size</th><th>Reason</th><th>Opened</th></tr></thead>
         <tbody>
+        {# 2026-04-28: prefer ``match_price`` (effective per-share fill, including
+           tick-level slippage relative to the bot's submitted limit) when
+           recorded, falling back to ``entry_price`` for legacy / paper rows.
+           ``effective_entry`` flows into both the cell text AND the data-entry
+           attribute so the JS price-refresh loop's P&L colour comparison stays
+           consistent with what the user sees. #}
         {% for p in strat_positions %}
-        <tr data-token="{{ p.token_id }}" data-entry="{{ p.entry_price }}" data-shares="{{ p.shares }}">
+        {% set effective_entry = p.match_price if p.match_price is not none else p.entry_price %}
+        <tr data-token="{{ p.token_id }}" data-entry="{{ effective_entry }}" data-shares="{{ p.shares }}">
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag tag-{{ 'buy' if p.token_type == 'NO' else 'sell' }}">{{ p.token_type }}</span></td>
-            <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
-            <td class="td-mono price-cell" data-token="{{ p.token_id }}" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > p.entry_price else 'var(--red-text)' if p.current_price < p.entry_price else 'var(--text)' }}{% endif %}">
+            <td class="td-mono" title="{% if p.match_price is not none %}match {{ '%.4f'|format(p.match_price) }} (limit {{ '%.4f'|format(p.entry_price) }}){% else %}limit {{ '%.4f'|format(p.entry_price) }} (no match data){% endif %}">
+                {{ "%.3f"|format(effective_entry) }}{% if p.match_price is none %}<span style="color:var(--text-dim);font-size:10px;">*</span>{% endif %}
+            </td>
+            <td class="td-mono" style="font-size:11px;color:var(--text-muted);">
+                {% if p.fee_paid_usd is not none %}${{ "%.4f"|format(p.fee_paid_usd) }}{% else %}-{% endif %}
+            </td>
+            <td class="td-mono price-cell" data-token="{{ p.token_id }}" style="{% if p.current_price is not none %}color:{{ 'var(--green-text)' if p.current_price > effective_entry else 'var(--red-text)' if p.current_price < effective_entry else 'var(--text)' }}{% endif %}">
                 {{ "%.3f"|format(p.current_price) if p.current_price is not none else '-' }}
             </td>
             <td class="td-mono pnl-cell" data-token="{{ p.token_id }}" style="font-weight:600;{% if p.unrealized_pnl is not none %}color:{{ 'var(--green-text)' if p.unrealized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">
@@ -128,14 +140,19 @@
     <table>
         <thead><tr><th>City</th><th>Slot</th><th>Date</th><th>Strat</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Size</th><th>Exit Reason</th><th>Closed</th></tr></thead>
         <tbody>
+        {# B1 (2026-04-28): closed-row Entry shows effective fill price; the
+           exit-vs-entry colour comparison uses the same effective value so
+           a 0.685 fill that exited at 0.69 reads green (profit) instead of
+           neutral against the 0.69 limit. #}
         {% for p in closed_positions[:15] %}
+        {% set closed_effective_entry = p.match_price if p.match_price is not none else p.entry_price %}
         <tr>
             <td style="font-weight:500;">{{ p.city }}</td>
             <td class="td-mono" style="font-size:12px;">{{ p.slot_short }}</td>
             <td style="font-size:11px;color:var(--accent-light);white-space:nowrap;">{{ p.market_date }}</td>
             <td><span class="tag {{ strat_meta.get(p.strategy, {'tag_class':'tag-stable'}).tag_class }}">{{ p.strategy if p.strategy else '?' }}</span></td>
-            <td class="td-mono">{{ "%.3f"|format(p.entry_price) }}</td>
-            <td class="td-mono" style="{% if p.exit_price is not none %}color:{{ 'var(--green-text)' if p.exit_price > p.entry_price else 'var(--red-text)' if p.exit_price < p.entry_price else 'var(--text)' }}{% endif %}">
+            <td class="td-mono" title="{% if p.match_price is not none %}match {{ '%.4f'|format(p.match_price) }} (limit {{ '%.4f'|format(p.entry_price) }}){% else %}limit {{ '%.4f'|format(p.entry_price) }} (no match data){% endif %}">{{ "%.3f"|format(closed_effective_entry) }}{% if p.match_price is none %}<span style="color:var(--text-dim);font-size:10px;">*</span>{% endif %}</td>
+            <td class="td-mono" style="{% if p.exit_price is not none %}color:{{ 'var(--green-text)' if p.exit_price > closed_effective_entry else 'var(--red-text)' if p.exit_price < closed_effective_entry else 'var(--text)' }}{% endif %}">
                 {{ "%.3f"|format(p.exit_price) if p.exit_price is not none else '-' }}
             </td>
             <td class="td-mono" style="font-weight:600;{% if p.realized_pnl is not none %}color:{{ 'var(--green-text)' if p.realized_pnl >= 0 else 'var(--red-text)' }}{% endif %}">

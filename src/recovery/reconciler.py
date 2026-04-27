@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable
 
 from src.alerts import Alerter
 from src.portfolio.store import Store
+from src.portfolio.utils import effective_entry_price
 
 logger = logging.getLogger(__name__)
 
@@ -265,8 +266,11 @@ async def _reconcile_sell_hybrid_state(
     position row is still open — the exact crash-between-commits window.
 
     Heal by closing at the SELL price.  Realized P&L is computed as
-    (sell_price − entry_price) × shares, same as
-    close_positions_for_token does.
+    (sell_price − effective_entry) × shares, same as
+    close_positions_for_token does.  ``effective_entry_price`` returns
+    match_price when present (actual fill) and falls back to entry_price
+    (limit) for legacy / paper rows — so reconciler-driven realized P&L
+    matches what the executor would have written had it not crashed.
     """
     rows = await store.get_filled_sells_with_open_positions()
     if not rows:
@@ -277,7 +281,7 @@ async def _reconcile_sell_hybrid_state(
         len(rows),
     )
     for r in rows:
-        entry = float(r["entry_price"])
+        entry = effective_entry_price(r)
         sell = float(r["price"])
         shares = float(r["shares"])
         realized = (sell - entry) * shares

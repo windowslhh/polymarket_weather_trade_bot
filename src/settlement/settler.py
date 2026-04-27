@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 import httpx
 
 from src.portfolio.store import Store
+from src.portfolio.utils import effective_entry_price
 
 logger = logging.getLogger(__name__)
 
@@ -303,8 +304,15 @@ def _compute_position_pnl(
     label_prices: dict[str, float],
     token_prices: dict[str, float] | None = None,
 ) -> float:
-    """Compute realized P&L for a single position."""
-    entry_price = position["entry_price"]
+    """Compute realized P&L for a single position.
+
+    B1 (2026-04-28): cost basis must be the actual fill price (``match_price``),
+    not the limit ``entry_price`` — settlement P&L is the dominant exit path,
+    so a 1-tick limit-vs-fill divergence on every position would systematically
+    bias the daily P&L roll-up.  ``effective_entry_price`` returns match_price
+    when present and falls back to entry_price for legacy / paper rows.
+    """
+    entry_price = effective_entry_price(position)
     shares = position["shares"]
     token_type = position["token_type"]
 

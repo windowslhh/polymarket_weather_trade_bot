@@ -30,7 +30,9 @@ def _make_client() -> ClobClient:
 @pytest.mark.asyncio
 async def test_order_succeeds_on_first_attempt(monkeypatch):
     client = _make_client()
-    client._client.create_and_post_order = MagicMock(return_value={"orderID": "ok"})
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "ok", "status": "matched"},
+    )
     result = await client.place_limit_order(
         token_id="tok", side="BUY", price=0.5, size=10, idempotency_key="key1",
     )
@@ -43,7 +45,11 @@ async def test_order_succeeds_on_first_attempt(monkeypatch):
 async def test_order_retries_on_generic_exception(monkeypatch):
     client = _make_client()
     # Fail twice, succeed on third.
-    calls = [RuntimeError("boom"), RuntimeError("still boom"), {"orderID": "ok3"}]
+    calls = [
+        RuntimeError("boom"),
+        RuntimeError("still boom"),
+        {"orderID": "ok3", "status": "matched"},
+    ]
 
     def side_effect(*_):
         v = calls.pop(0)
@@ -95,7 +101,7 @@ async def test_rate_limit_triggers_longer_backoff(monkeypatch):
     client = _make_client()
     calls = [
         RuntimeError("HTTP 429: Too Many Requests"),
-        {"orderID": "after_429"},
+        {"orderID": "after_429", "status": "matched"},
     ]
 
     def side_effect(*_):
@@ -193,7 +199,9 @@ async def test_v2_create_and_post_order_receives_typed_OrderArgs(monkeypatch):
     """
     from py_clob_client_v2 import OrderArgs, OrderType, Side
     client = _make_client()
-    client._client.create_and_post_order = MagicMock(return_value={"orderID": "ok"})
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "ok", "status": "matched"},
+    )
 
     result = await client.place_limit_order(
         token_id="tok-v2", side="BUY", price=0.55, size=10.0,
@@ -334,3 +342,251 @@ async def test_get_last_trade_price_handles_legacy_float_response():
     client._client.get_last_trade_price = MagicMock(return_value=0.42)
 
     assert await client.get_last_trade_price("tok-1") == 0.42
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2026-04-28: ghost-position prevention.  v2 ``create_and_post_order``
+# returns the same {"orderID": ...} dict shape for both immediately
+# matched fills AND orders that posted but didn't match.  The bot was
+# trusting any non-empty orderID as a successful fill, which produced
+# ghost rows in ``positions`` for orders that only sat on the book.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_unmatched_order_returns_failure_no_position():
+    """An order with ``status='unmatched'`` posted but never crossed; the
+    wrapper must surface success=False so the executor records the orders
+    row as 'failed' (no positions row created).  Recovery is delegated to
+    the startup reconciler's ``probe_order_status`` path."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "0xabc", "status": "unmatched"},
+    )
+
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.565, size=10,
+    )
+
+    assert result.success is False
+    assert result.order_id == "0xabc"
+    assert "unmatched" in result.message.lower()
+    # Must NOT retry — unmatched is a terminal classification, not a
+    # transient failure.  Hammering the CLOB would post duplicate orders.
+    assert client._client.create_and_post_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_matched_with_tx_hashes_succeeds():
+    """Order with ``status='matched'`` AND ``transactionsHashes`` populated
+    is the canonical successful-fill shape."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        return_value={
+            "orderID": "0xabc",
+            "status": "matched",
+            "transactionsHashes": ["0xdeadbeef"],
+        },
+    )
+
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success is True
+    assert result.order_id == "0xabc"
+
+
+@pytest.mark.asyncio
+async def test_matched_status_alone_succeeds():
+    """``status='matched'`` without explicit ``transactionsHashes`` is also
+    a successful fill (matched-side claim is sufficient — the field can be
+    omitted on some response shapes)."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "0xabc", "status": "matched"},
+    )
+
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success is True
+    assert result.order_id == "0xabc"
+
+
+@pytest.mark.asyncio
+async def test_tx_hashes_without_status_succeeds():
+    """Defensive fallback: tx hashes present but status field omitted
+    (some response shapes elide it once tx is finalized) → still a fill."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        return_value={
+            "orderID": "0xabc",
+            "transactionsHashes": ["0xdeadbeef"],
+        },
+    )
+
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_no_status_no_tx_hashes_returns_unmatched():
+    """An ``orderID`` with neither matched-status nor tx hashes is the
+    same un-filled signal — must NOT create a positions row.  Pre-fix the
+    wrapper accepted this as success on the strength of the orderID alone
+    and that's what produced the Miami 86-87 NO @0.565 ghost on
+    2026-04-28."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "0xabc"},
+    )
+
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success is False
+    assert result.order_id == "0xabc"
+    assert "unmatched" in result.message.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2026-04-28: get_fill_summary aggregates trade-level fill data so the
+# dashboard can show actual per-share entry instead of limit price.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_paper_returns_none(monkeypatch):
+    """Paper / dry-run modes have no real CLOB trades — short-circuit to None
+    so callers fall back to limit price."""
+    cfg = SimpleNamespace(
+        dry_run=False, paper=True,
+        polymarket_api_key="k", polymarket_secret="s", polymarket_passphrase="p",
+        eth_private_key="0xabc",
+    )
+    client = ClobClient(cfg)  # type: ignore[arg-type]
+    assert await client.get_fill_summary(token_id="tok", order_id="0xabc") is None
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_aggregates_weighted_price_and_fee():
+    """Two partial fills at different prices → weighted-avg ``match_price``
+    + summed fees.  The Polymarket trade response carries ``fee_rate_bps``
+    as the COMBINED maker+taker bps; our taker share is bps/2/10000.
+
+    Verifies the fee math against the prod-confirmed formula:
+      fee = size × (bps/2/10000) × price × (1 - price)
+    """
+    client = _make_client()
+    # Two trades: 6 shares @ 0.685, 4 shares @ 0.690 — both belong to
+    # taker_order_id=0xORDER (our just-placed BUY).  Combined bps=1000
+    # (5% taker + 5% maker), so taker rate = 0.05.
+    trades = [
+        {
+            "taker_order_id": "0xORDER",
+            "size": "6.0", "price": "0.685",
+            "fee_rate_bps": 1000,
+        },
+        {
+            "taker_order_id": "0xORDER",
+            "size": "4.0", "price": "0.690",
+            "fee_rate_bps": 1000,
+        },
+        # Unrelated trade — must be excluded.
+        {
+            "taker_order_id": "0xSOMEONE_ELSE",
+            "size": "10.0", "price": "0.5",
+            "fee_rate_bps": 1000,
+        },
+    ]
+    client._client.get_trades = MagicMock(return_value=trades)
+
+    summary = await client.get_fill_summary(
+        token_id="tok", order_id="0xORDER",
+    )
+
+    assert summary is not None
+    assert summary.shares == 10.0
+    # Weighted: (6*0.685 + 4*0.690) / 10 = (4.11 + 2.76) / 10 = 0.687
+    assert abs(summary.match_price - 0.687) < 1e-9
+    # Fee per trade: size * 0.05 * price * (1-price)
+    # T1: 6 * 0.05 * 0.685 * 0.315 = 0.0647325
+    # T2: 4 * 0.05 * 0.690 * 0.310 = 0.042780
+    expected_fee = 6 * 0.05 * 0.685 * 0.315 + 4 * 0.05 * 0.690 * 0.310
+    assert abs(summary.fee_paid_usd - expected_fee) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_handles_paginated_dict_response():
+    """``get_trades`` sometimes returns ``{"data": [...], "next_cursor": ...}``
+    — the wrapper's ``_extract_list`` already normalises both shapes; this
+    pins the contract."""
+    client = _make_client()
+    trades_resp = {
+        "data": [
+            {
+                "taker_order_id": "0xORDER",
+                "size": "5.0", "price": "0.50",
+                "fee_rate_bps": 1000,
+            },
+        ],
+        "next_cursor": "LTE=",
+    }
+    client._client.get_trades = MagicMock(return_value=trades_resp)
+
+    summary = await client.get_fill_summary(
+        token_id="tok", order_id="0xORDER",
+    )
+
+    assert summary is not None
+    assert summary.shares == 5.0
+    assert summary.match_price == 0.50
+    # 5 * 0.05 * 0.50 * 0.50 = 0.0625
+    assert abs(summary.fee_paid_usd - 0.0625) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_no_matching_trades_returns_none():
+    """If no trade rows match our ``order_id`` (timing lag, cancelled, etc.),
+    return None so the executor records limit price as a documented fallback."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {
+            "taker_order_id": "0xSOMEONE_ELSE",
+            "size": "10.0", "price": "0.5", "fee_rate_bps": 1000,
+        },
+    ])
+
+    summary = await client.get_fill_summary(
+        token_id="tok", order_id="0xORDER",
+    )
+
+    assert summary is None
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_prefers_explicit_fee_field():
+    """If the trade response carries an explicit ``fee_paid`` field,
+    prefer it over computing from ``fee_rate_bps``."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {
+            "taker_order_id": "0xORDER",
+            "size": "10.0", "price": "0.50",
+            "fee_paid": "0.0123",  # explicit beats the 0.0625 computation
+            "fee_rate_bps": 1000,
+        },
+    ])
+
+    summary = await client.get_fill_summary(
+        token_id="tok", order_id="0xORDER",
+    )
+
+    assert summary is not None
+    assert abs(summary.fee_paid_usd - 0.0123) < 1e-9

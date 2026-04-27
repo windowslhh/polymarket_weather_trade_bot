@@ -6,6 +6,7 @@ from datetime import date
 
 from src.markets.models import TempSlot, TokenType
 from src.portfolio.store import Store
+from src.portfolio.utils import effective_entry_price
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,17 @@ class PortfolioTracker:
         buy_reason: str = "",
         entry_ev: float | None = None,
         entry_win_prob: float | None = None,
+        match_price: float | None = None,
+        fee_paid_usd: float | None = None,
     ) -> int:
         """Atomically promote a pending order to filled + insert the position.
 
         Raises if no pending order matches the idempotency_key.
+        ``match_price`` is the actual weighted-avg fill price from the trade
+        response (limit price was 0.69, may have crossed at 0.685);
+        ``fee_paid_usd`` is the taker-side fee.  Both are optional so paper
+        mode and legacy callers keep working — the dashboard falls back to
+        ``entry_price`` when ``match_price`` is NULL.
         """
         shares = size_usd / price if price > 0 else 0
         position_id = await self._store.finalize_buy_order(
@@ -102,11 +110,17 @@ class PortfolioTracker:
             buy_reason=buy_reason,
             entry_ev=entry_ev,
             entry_win_prob=entry_win_prob,
+            match_price=match_price,
+            fee_paid_usd=fee_paid_usd,
+        )
+        match_str = (
+            f" match=%.4f fee=$%.4f" % (match_price, fee_paid_usd or 0.0)
+            if match_price is not None else ""
         )
         logger.info(
-            "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares) [id=%d src=%s]",
+            "Position opened [%s]: %s %s %s @ %.4f ($%.2f, %.2f shares)%s [id=%d src=%s]",
             strategy, side, token_type.value, slot_label, price, size_usd, shares,
-            position_id, order_id,
+            match_str, position_id, order_id,
         )
         return position_id
 
@@ -166,7 +180,9 @@ class PortfolioTracker:
 
         When strategy is provided, only closes positions for that strategy.
         This prevents a SELL signal from strategy A from closing B/C/D positions.
-        Computes realized P&L = (exit_price - entry_price) * shares for NO positions.
+        Computes realized P&L = (exit_price - effective_entry) * shares, where
+        ``effective_entry`` is ``match_price`` (actual fill) when present and
+        falls back to ``entry_price`` (limit submitted) for legacy / paper rows.
         """
         positions = await self._store.get_open_positions(event_id=event_id, strategy=strategy)
         closed = 0
@@ -174,7 +190,7 @@ class PortfolioTracker:
             if pos["token_id"] == token_id and pos["status"] == "open":
                 pnl: float | None = None
                 if exit_price is not None:
-                    pnl = (exit_price - pos["entry_price"]) * pos["shares"]
+                    pnl = (exit_price - effective_entry_price(pos)) * pos["shares"]
                 await self._store.close_position(
                     pos["id"],
                     exit_reason=exit_reason,
@@ -294,7 +310,8 @@ class PortfolioTracker:
         for pos in positions:
             current = current_prices.get(pos["token_id"])
             if current is not None:
-                unrealized += (current - pos["entry_price"]) * pos["shares"]
+                # B1: cost basis = match_price (actual fill) when present.
+                unrealized += (current - effective_entry_price(pos)) * pos["shares"]
         return unrealized
 
     async def snapshot_pnl(
