@@ -10,6 +10,24 @@ from src.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
+# v2-8 (2026-04-27): py-clob-client-v2 ships ``_http_client = httpx.Client(
+# http2=True)`` at module level with no explicit timeout — httpx's default
+# 5s pool/read timeout combined with HTTP/2 keep-alive on macOS triggered
+# spurious ReadTimeouts on the first live cycle (CLOB midpoint endpoint
+# itself responded in 3-4s, verified by curl from the same mac).  One
+# stuck call propagated up to the rebalancer and froze the cycle.  Force
+# HTTP/1.1 and a 30s read timeout so transient slowness no longer blocks.
+# Idempotent — runs at import time before _get_client lazy-imports the
+# SDK, so every CLOB call goes through the patched client.
+try:
+    import httpx as _httpx
+    import py_clob_client_v2.http_helpers.helpers as _v2_http_helpers
+    _v2_http_helpers._http_client = _httpx.Client(
+        http2=False, timeout=_httpx.Timeout(30.0),
+    )
+except Exception as exc:  # noqa: BLE001
+    logger.warning("v2-8 httpx monkey-patch failed: %s", exc)
+
 # FIX-04: network resilience knobs. Kept module-level so tests can monkeypatch
 # them without touching the client.
 ORDER_TIMEOUT_S = 30.0

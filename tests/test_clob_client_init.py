@@ -275,3 +275,42 @@ class TestMatrixSmoke:
             instance.create_or_derive_api_key.assert_called_once()
         else:
             instance.create_or_derive_api_key.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# v2-8: httpx monkey-patch
+# ──────────────────────────────────────────────────────────────────────
+
+class TestV2HttpxMonkeyPatch:
+    """The patch must replace ``py_clob_client_v2.http_helpers.helpers
+    ._http_client`` with an httpx.Client configured for http2=False and
+    a 30s read timeout.  Without it, the live cycle hung on a default
+    5s ReadTimeout against the CLOB ``/midpoint`` endpoint.
+    """
+
+    def test_v2_http_client_uses_30s_read_timeout(self):
+        # Importing src.markets.clob_client triggers the patch at module
+        # load.  We import inside the test so the assertion is explicit
+        # about the dependency.
+        import src.markets.clob_client  # noqa: F401  — side-effect import
+        import py_clob_client_v2.http_helpers.helpers as h
+
+        assert h._http_client.timeout.read == 30.0
+        # Connect / write timeouts inherit from the same Timeout(30.0)
+        # constructor — assert one of them too so a future revert that
+        # only sets read=30 with connect still defaulting to 5 is caught.
+        assert h._http_client.timeout.connect == 30.0
+
+    def test_v2_http_client_uses_http_1_1(self):
+        """``http2=False`` is what we asked for; httpx stores it on the
+        connection pool inside the transport (``_pool._http2``), which
+        is the stable hook across the 0.27.x line we pin."""
+        import src.markets.clob_client  # noqa: F401
+        import py_clob_client_v2.http_helpers.helpers as h
+
+        pool = h._http_client._transport._pool
+        assert pool._http2 is False, (
+            "v2-8 monkey-patch must set http2=False — HTTP/2 keep-alive "
+            "on macOS caused the original ReadTimeout regression"
+        )
+        assert pool._http1 is True
