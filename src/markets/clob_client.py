@@ -90,11 +90,16 @@ class ClobClient:
             return self._client
 
         try:
-            from py_clob_client.client import ClobClient as _ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            # v2-2 (2026-04-27): switched from ``py_clob_client`` to
+            # ``py_clob_client_v2`` ahead of the 2026-04-28 11:00 UTC
+            # exchange cutover.  Same constructor kwargs (host, chain_id,
+            # key, creds, signature_type, funder) — only the import path
+            # changes here.  Method renames land in v2-3..v2-5.
+            from py_clob_client_v2 import ClobClient as _ClobClient, ApiCreds
         except ImportError:
             logger.error(
-                "py-clob-client not installed. Install with: pip install py-clob-client"
+                "py-clob-client-v2 not installed. "
+                "Install with: pip install py-clob-client-v2"
             )
             raise
 
@@ -128,7 +133,11 @@ class ClobClient:
             )
         else:
             logger.info("CLOB creds: deriving from private key (free, signs once)")
-            creds = client.create_or_derive_api_creds()
+            # v2-2 (2026-04-27): renamed in v2 SDK,
+            # ``create_or_derive_api_creds`` → ``create_or_derive_api_key``.
+            # Same semantics: signs once with the L1 key, server returns
+            # the deterministic L2 ApiCreds tied to the EOA.
+            creds = client.create_or_derive_api_key()
             # Defensive: py-clob-client has historically had silent-failure
             # paths that return None instead of raising when the upstream
             # /api-key endpoint returns a 5xx or a malformed body.  Without
@@ -139,7 +148,7 @@ class ClobClient:
             # preflight + the startup banner catch it instead.
             if creds is None:
                 raise RuntimeError(
-                    "Polymarket create_or_derive_api_creds returned None — "
+                    "Polymarket create_or_derive_api_key returned None — "
                     "API likely returned a malformed response.  Check "
                     "https://clob.polymarket.com status; recovery: restart "
                     "the bot once Polymarket recovers.",
