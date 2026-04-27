@@ -98,12 +98,19 @@ async def main():
         logger.info("✓ All %d BUY signals have reason attached", len(buy_signals))
         checks_passed += 1
 
-    # Check 3: All signals have strategy B (only live variant from 2026-04-26)
+    # Check 3: All signals carry a strategy key from the active variant
+    # set.  Pulled live from get_strategy_variants() so the smoke script
+    # tracks src/config.py automatically — adding C / D / E doesn't
+    # require editing this assertion.
+    from src.config import get_strategy_variants
     checks_total += 1
-    valid_strats = {"B"}
+    valid_strats = set(get_strategy_variants())
     bad_strats = [s for s in signals if s.strategy not in valid_strats]
     if bad_strats:
-        logger.error("FAIL: %d signals with invalid strategy", len(bad_strats))
+        logger.error(
+            "FAIL: %d signals with invalid strategy (active variants: %s)",
+            len(bad_strats), sorted(valid_strats),
+        )
     else:
         strat_counts = {}
         for s in signals:
