@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import load_config  # noqa: E402
 from src.markets.clob_client import ClobClient  # noqa: E402
+from src.security import load_eth_private_key  # noqa: E402
 
 
 def _is_real_order_id(order_id: str | None) -> bool:
@@ -99,15 +100,15 @@ async def _amain(args: argparse.Namespace) -> int:
         if skipped_synth:
             print(f"  (skipping {skipped_synth} legacy / paper / dry-run rows)")
 
-        if args.dry_run:
-            for r in eligible:
-                print(
-                    f"  WOULD backfill id={r['id']} token={r['token_id'][:12]}... "
-                    f"order={r['source_order_id'][:14]}... entry={r['entry_price']:.4f}",
-                )
-            print(f"Dry-run only: {len(eligible)} row(s) eligible.")
-            return 0
-
+        # Build the CLOB client BEFORE branching on dry-run so the dry-run
+        # path can preview real match_price / fee values.  ``get_fill_summary``
+        # always queries CLOB (it hits /data/trades, an L2 endpoint) so we
+        # need an authenticated client either way.  src/main.py loads the EOA
+        # private key from macOS Keychain at live-mode startup; ``load_config``
+        # alone does NOT — the .env's ETH_PRIVATE_KEY is empty by design
+        # (Keychain is the source of truth).  Mirror main.py's load order
+        # unconditionally here; the script refuses to run in paper / dry_run
+        # config below regardless.
         cfg = load_config()
         if cfg.dry_run or cfg.paper:
             print(
@@ -116,14 +117,17 @@ async def _amain(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        cfg.eth_private_key = load_eth_private_key()
         clob = ClobClient(cfg)
 
         updated = 0
         misses = 0
+        errors = 0
         for r in eligible:
             try:
                 match_price, fee = await _backfill_row(clob, r)
             except Exception as exc:
+                errors += 1
                 print(
                     f"  ERROR id={r['id']} token={r['token_id'][:12]}... -> {exc}",
                     file=sys.stderr,
@@ -133,22 +137,39 @@ async def _amain(args: argparse.Namespace) -> int:
                 misses += 1
                 print(
                     f"  MISS id={r['id']} order={r['source_order_id'][:14]}... "
-                    f"(no matching trades on CLOB)",
+                    f"limit={r['entry_price']:.4f} (no matching trades on CLOB)",
                 )
                 continue
-            conn.execute(
-                "UPDATE positions SET match_price = ?, fee_paid_usd = ? WHERE id = ?",
-                (match_price, fee, r["id"]),
-            )
-            conn.commit()
-            updated += 1
-            print(
-                f"  OK id={r['id']} token={r['token_id'][:12]}... "
-                f"limit={r['entry_price']:.4f} match={match_price:.4f} "
-                f"fee=${fee:.4f}",
-            )
+            slip = match_price - r["entry_price"]
+            if args.dry_run:
+                print(
+                    f"  WOULD id={r['id']} token={r['token_id'][:12]}... "
+                    f"limit={r['entry_price']:.4f} match={match_price:.4f} "
+                    f"fee=${fee:.4f} slip={slip:+.4f}",
+                )
+            else:
+                conn.execute(
+                    "UPDATE positions SET match_price = ?, fee_paid_usd = ? WHERE id = ?",
+                    (match_price, fee, r["id"]),
+                )
+                conn.commit()
+                updated += 1
+                print(
+                    f"  OK id={r['id']} token={r['token_id'][:12]}... "
+                    f"limit={r['entry_price']:.4f} match={match_price:.4f} "
+                    f"fee=${fee:.4f} slip={slip:+.4f}",
+                )
 
-        print(f"Done. Updated {updated} row(s), missed {misses}, skipped {skipped_synth}.")
+        if args.dry_run:
+            print(
+                f"Dry-run: {len(eligible)} eligible — would-update={len(eligible) - misses - errors} "
+                f"miss={misses} error={errors} skipped={skipped_synth}",
+            )
+        else:
+            print(
+                f"Done. Updated {updated} row(s), missed {misses}, "
+                f"errors {errors}, skipped {skipped_synth}.",
+            )
         return 0
     finally:
         conn.close()

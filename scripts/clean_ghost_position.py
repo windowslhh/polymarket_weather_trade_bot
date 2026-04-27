@@ -40,6 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import load_config  # noqa: E402
 from src.markets.clob_client import ClobClient  # noqa: E402
+from src.security import load_eth_private_key  # noqa: E402
 
 
 async def _has_real_trades(
@@ -100,7 +101,15 @@ async def _amain(args: argparse.Namespace) -> int:
             print("No matching open positions found.")
             return 0
 
+        # ``_has_real_trades`` always queries CLOB (/data/trades is L2),
+        # even on dry-run, because the safety contract is "don't delete a
+        # row until we've confirmed there's no fill behind it".  src/main.py
+        # loads the EOA private key from macOS Keychain at live-mode
+        # startup; ``load_config`` alone does NOT — the .env's
+        # ETH_PRIVATE_KEY is empty by design.  Mirror main.py's load order
+        # unconditionally so dry-run and --execute both authenticate.
         cfg = load_config()
+        cfg.eth_private_key = load_eth_private_key()
         clob = ClobClient(cfg)
 
         deleted = 0
