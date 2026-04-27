@@ -101,6 +101,12 @@ class Rebalancer:
         self._last_forecasts: dict = {}
         self._last_daily_maxes: dict[str, float | None] = {}
         self._last_markets: list[dict] = []
+        # cycle-fix-2: cached WeatherMarketEvent list from the last full
+        # rebalance.  The 15-min position-check entry scan iterates this
+        # to evaluate NO signals against freshly-refreshed Gamma prices
+        # without re-running discovery / forecast / METAR.  Empty until
+        # the first full cycle populates it.
+        self._last_events: list[WeatherMarketEvent] = []
         self._active_city_configs: list = []  # cities with active Polymarket markets
 
         # Mutual-exclusion lock: prevents full rebalance and 15-min position check
@@ -537,20 +543,37 @@ class Rebalancer:
         except Exception:
             logger.exception("Position check: kill-switch read failed; continuing")
 
+        # cycle-fix-2: entry scan is allowed to run even when no positions
+        # are currently held — that's the COMMON case on a fresh DB and
+        # exactly the bug we're fixing.  Compute the activation flag here
+        # so the rest of the method can short-circuit individual phases
+        # without aborting the whole cycle.
+        entry_scan_active = (
+            self._config.strategy.enable_position_check_entry_scan
+            and not _cb_block_buys
+            and bool(self._last_events)
+        )
+
         async with self._cycle_lock:
             try:
                 # Get all open positions grouped by event
                 all_positions = await self._portfolio.get_all_open_positions()
-                if not all_positions:
-                    logger.debug("Position check: no open positions")
+                if not all_positions and not entry_scan_active:
+                    logger.debug(
+                        "Position check: no open positions and no entry "
+                        "scan eligible — skipping",
+                    )
                     return []
 
+                # cycle-fix-2: held-position phase guarded so the entry
+                # scan further down still runs when no positions are
+                # held (fresh DB after a reset is exactly the case the
+                # entry-scan fixes — 60-min cycle missed price windows
+                # so 0 positions ever opened).
+                now = datetime.now(timezone.utc)
                 # Identify cities with open positions
                 cities_with_positions = {p["city"] for p in all_positions}
                 city_configs = [c for c in self._config.cities if c.name in cities_with_positions]
-
-                if not city_configs:
-                    return []
 
                 # ── Refresh prices for held tokens ───────────────────────────────
                 # Fetch fresh Gamma prices for all open position token IDs so that
@@ -590,7 +613,6 @@ class Rebalancer:
                     if pos["event_id"] not in event_meta:
                         event_meta[pos["event_id"]] = {"city": pos["city"]}
 
-                now = datetime.now(timezone.utc)
                 variants = get_strategy_variants()
                 skipped_no_obs = 0
 
@@ -848,6 +870,35 @@ class Rebalancer:
                         skipped_no_obs,
                     )
 
+                # ── cycle-fix-2: cheap entry scan ────────────────────────
+                # Closes the 60-min sampling-gap that local paper hit on
+                # the Miami 88-89°F slot (NO price was at 0.70 for ~15 min
+                # between two local cycles; VPS happened to land inside).
+                # Iterates the cached event list (populated by the last
+                # full cycle), refreshes Gamma prices for every active
+                # event token (NOT just held), then runs evaluate_no_signals
+                # per (event, variant).  Re-uses the same gates / cooldown /
+                # exposure / max_per_event filters as the 60-min cycle so
+                # the only behavioural difference is sampling cadence.
+                #
+                # Skipped silently when:
+                #   - the config flag is False
+                #   - the circuit breaker / kill switch is engaged
+                #     (already gates _cb_block_buys above; reuse it)
+                #   - the cached event list is empty (no full cycle yet)
+                # Per-event skipped when:
+                #   - no forecast cached for (event.market_date, event.city)
+                #     — the forecast invariant H-9 must hold; we don't
+                #     fall back to today's forecast for D+1/D+2 events.
+                if (
+                    self._config.strategy.enable_position_check_entry_scan
+                    and not _cb_block_buys
+                    and self._last_events
+                ):
+                    entry_scan_signals = await self._run_entry_scan(now=now)
+                    signals.extend(entry_scan_signals)
+                # ─────────────────────────────────────────────────────────
+
                 # Execute any urgent trades
                 if signals:
                     # FIX-02: SELL signals now include both EXIT and TRIM since
@@ -868,6 +919,228 @@ class Rebalancer:
 
         logger.info("--- Position check done ---")
         return signals
+
+    async def _run_entry_scan(self, *, now: datetime) -> list[TradeSignal]:
+        """Cheap NO-entry pass over cached events with refreshed Gamma prices.
+
+        Mirrors the 60-min cycle's entry phase but scoped to:
+        - the cached event list (no re-discovery)
+        - the cached forecasts (no NWS/Open-Meteo refresh)
+        - the cached METAR / DailyMaxTracker (no METAR refresh)
+        Only Gamma outcomePrices are re-fetched.
+
+        Caller (``run_position_check``) has already verified the config
+        flag, that ``_cb_block_buys`` is False, and that the cycle lock
+        is held — this method assumes those checks have been done.
+
+        Per-event skips:
+        - forecast cache miss for (event.market_date, event.city) →
+          can't satisfy FIX-22 invariant, skip the event entirely
+        - exit_cooldown hit on the candidate token → skip that signal
+        - max_positions_per_event already reached for the variant →
+          skip remaining slots for that (event, variant) pair
+
+        Dedup against held positions and exit cooldowns is identical
+        to the 60-min cycle so a 15-min scan immediately after a
+        60-min cycle won't re-buy the same slot.
+        """
+        scan_signals: list[TradeSignal] = []
+        events = list(self._last_events)
+        if not events:
+            return scan_signals
+
+        # 1. Refresh Gamma outcomePrices for every active token.  Same
+        #    helper held-token refresh uses; partial-success is OK.
+        all_token_ids = list({
+            tid
+            for event in events
+            for slot in event.slots
+            for tid in (slot.token_id_yes, slot.token_id_no)
+            if tid
+        })
+        try:
+            fresh = await refresh_gamma_prices_only(all_token_ids)
+        except Exception:
+            logger.warning(
+                "Entry scan: Gamma price refresh failed; skipping scan",
+                exc_info=True,
+            )
+            return scan_signals
+        if not fresh:
+            logger.debug(
+                "Entry scan: Gamma returned no prices for %d tokens",
+                len(all_token_ids),
+            )
+            return scan_signals
+        # TWAP-smooth so a single weird tick can't drive a BUY.  Shares
+        # the buffer with the rest of the bot — same noise floor.
+        smoothed = self._price_buffer.apply_batch(fresh)
+        self._last_gamma_prices.update(smoothed)
+        logger.info(
+            "Entry scan: refreshed prices for %d/%d tokens (TWAP-smoothed)",
+            len(fresh), len(all_token_ids),
+        )
+
+        # 2. Per-event evaluate.  Variants iterated outside the event
+        #    loop so cycle_total_additions / cycle_city_additions can
+        #    accumulate across events for a single variant — same
+        #    accounting shape as the 60-min cycle.
+        variants = get_strategy_variants()
+        cycle_city_additions: dict[str, float] = {}
+        cycle_total_additions: dict[str, float] = {}
+        cooldown_seconds = self._config.strategy.exit_cooldown_hours * 3600
+        skipped_no_forecast = 0
+        skipped_no_daily_max = 0
+
+        for event in events:
+            forecast = self._cached_forecasts_by_date.get(
+                event.market_date, {},
+            ).get(event.city)
+            if forecast is None:
+                # H-9: do NOT fall back to today's by-name forecast for a
+                # D+1/D+2 event.  The 60-min cycle will re-populate the
+                # by-date cache; the entry scan can wait one more tick.
+                skipped_no_forecast += 1
+                continue
+
+            # daily_max + observation come from the trackers refreshed
+            # by THIS position_check pass (METAR sync earlier in the
+            # method).  Allow None — evaluate_no_signals handles it.
+            city_tz = self._city_tz.get(event.city)
+            local_today = (
+                datetime.now(city_tz).date() if city_tz
+                else datetime.now(timezone.utc).date()
+            )
+            local_hour = (
+                datetime.now(city_tz).hour if city_tz else None
+            )
+            days_ahead = (event.market_date - local_today).days
+            _city_icao = next(
+                (c.icao for c in self._config.cities
+                 if c.name == event.city), None,
+            )
+            daily_max = (
+                self._max_tracker.get_max(_city_icao, day=event.market_date)
+                if _city_icao else None
+            )
+            error_dist = self._error_dists.get(event.city)
+            trend_state = self._trend.get_trend(event.city)
+
+            # Re-stamp slot prices from the freshly-smoothed cache so
+            # evaluate_no_signals sees the latest values, not whatever
+            # was on slot.price_no when discovery ran.
+            for slot in event.slots:
+                if slot.token_id_no:
+                    fresh_no = self._last_gamma_prices.get(slot.token_id_no)
+                    if fresh_no is not None:
+                        slot.price_no = fresh_no
+                if slot.token_id_yes:
+                    fresh_yes = self._last_gamma_prices.get(slot.token_id_yes)
+                    if fresh_yes is not None:
+                        slot.price_yes = fresh_yes
+
+            for strat_name, overrides in variants.items():
+                strat_cfg = replace(
+                    self._config.strategy, **strategy_params(overrides),
+                )
+                if strat_cfg.city_whitelist and event.city not in strat_cfg.city_whitelist:
+                    continue
+                if strat_cfg.auto_calibrate_distance and error_dist is not None:
+                    cal_dist = calibrate_distance_dynamic(
+                        error_dist,
+                        ensemble_spread_f=forecast.ensemble_spread_f,
+                        enable_spread_adjustment=strat_cfg.enable_spread_adjustment,
+                    )
+                    strat_cfg = replace(
+                        strat_cfg,
+                        no_distance_threshold_f=math.ceil(cal_dist),
+                    )
+
+                # Identify already-held tokens for this (event, strategy)
+                # so evaluate_no_signals can dedup.
+                existing_positions = await self._portfolio.get_open_positions_for_event(
+                    event_id=event.event_id, strategy=strat_name,
+                )
+                held_token_ids = {
+                    p["token_id"] for p in existing_positions if p.get("token_id")
+                }
+                event_pos_count = len(existing_positions)
+                max_new = max(
+                    0,
+                    strat_cfg.max_positions_per_event - event_pos_count,
+                )
+                if max_new <= 0:
+                    continue
+
+                no_signals = evaluate_no_signals(
+                    event, forecast, strat_cfg, error_dist, trend_state,
+                    held_token_ids, days_ahead,
+                    daily_max_f=daily_max, local_hour=local_hour,
+                )
+                if not no_signals:
+                    continue
+
+                # Apply cooldown / cap / sizing identical to 60-min cycle.
+                strat_city_exp = (
+                    await self._portfolio.get_city_exposure(
+                        event.city, strategy=strat_name,
+                    )
+                    + cycle_city_additions.get(
+                        f"{strat_name}:{event.city}", 0.0,
+                    )
+                )
+                strat_total_exp = (
+                    await self._portfolio.get_total_exposure(strategy=strat_name)
+                    + cycle_total_additions.get(strat_name, 0.0)
+                )
+                effective_cfg = _effective_city_config(strat_cfg, event.city)
+
+                new_count = 0
+                for signal in no_signals:
+                    if new_count >= max_new:
+                        break
+                    tid = signal.token_id
+                    exit_time = self._recent_exits.get(tid)
+                    if exit_time and (now - exit_time).total_seconds() < cooldown_seconds:
+                        continue
+                    size = compute_size(
+                        signal, strat_city_exp, strat_total_exp, effective_cfg,
+                    )
+                    if size <= 0:
+                        continue
+                    signal.suggested_size_usd = size
+                    signal.strategy = strat_name
+                    signal.reason = (
+                        f"[{strat_name}] {signal.reason}, "
+                        f"EV={signal.expected_value:.3f} (entry-scan)"
+                    )
+                    scan_signals.append(signal)
+                    strat_city_exp += size
+                    strat_total_exp += size
+                    cycle_city_additions[f"{strat_name}:{event.city}"] = (
+                        cycle_city_additions.get(
+                            f"{strat_name}:{event.city}", 0.0,
+                        ) + size
+                    )
+                    cycle_total_additions[strat_name] = (
+                        cycle_total_additions.get(strat_name, 0.0) + size
+                    )
+                    new_count += 1
+
+        if skipped_no_forecast:
+            logger.info(
+                "Entry scan: %d event(s) skipped (no by-date forecast cached)",
+                skipped_no_forecast,
+            )
+        if scan_signals:
+            logger.info(
+                "Entry scan: %d new BUY candidate(s) across %d events",
+                len(scan_signals),
+                len({s.event.event_id for s in scan_signals if s.event}),
+            )
+        else:
+            logger.debug("Entry scan: no new BUY candidates")
+        return scan_signals
 
     # ── Full rebalance cycle ─────────────────────────────────────────
 
@@ -934,6 +1207,11 @@ class Rebalancer:
             max_days_ahead=self._config.strategy.max_days_ahead,
         )
         self._last_events_count = len(events)
+        # cycle-fix-2: cache the parsed event list so the 15-min position
+        # check can iterate it for an entry scan without re-running the
+        # full discovery / forecast / METAR chain.  Replace, not extend —
+        # stale events from a prior cycle would otherwise leak through.
+        self._last_events = list(events)
         if not events:
             logger.info("No active weather markets found")
             return []
