@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.config import StrategyConfig, get_strategy_variants
+from src.config import StrategyConfig, get_strategy_variants, strategy_params
 from src.markets.models import TempSlot, WeatherMarketEvent
 from src.strategy.evaluator import (
     evaluate_exit_signals,
@@ -48,7 +48,7 @@ def _make_forecast(high=75.0, ci=4.0) -> Forecast:
 
 def _build_strat_cfg(variant_name: str) -> StrategyConfig:
     variants = get_strategy_variants()
-    return replace(StrategyConfig(), **variants[variant_name])
+    return replace(StrategyConfig(), **strategy_params(variants[variant_name]))
 
 
 class TestVariantStructure:
@@ -68,7 +68,7 @@ class TestVariantStructure:
     def test_all_overrides_are_valid_fields(self):
         valid_fields = set(StrategyConfig.__dataclass_fields__.keys())
         for name, overrides in get_strategy_variants().items():
-            for key in overrides:
+            for key in strategy_params(overrides):
                 assert key in valid_fields, f"Strategy {name}: invalid field '{key}'"
 
 
