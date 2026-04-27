@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 from src.config import get_strategy_variants
+from src.portfolio.utils import effective_entry_price
 from src.web.strategy_meta import (
     active_variant_keys,
     empty_strategy_aggregation,
@@ -368,12 +369,18 @@ def create_app(store, rebalancer, config) -> Flask:
                     pass
             _set_cache("prices_fresh", gamma_prices)
 
-        # Enrich positions with current price, unrealized P&L, and parsed slot info
+        # Enrich positions with current price, unrealized P&L, and parsed slot info.
+        # 2026-04-28: prefer ``match_price`` (actual per-share fill from /data/trades)
+        # over ``entry_price`` (limit submitted) so unrealized P&L reflects the
+        # actual cost basis after tick-level slippage.  Legacy / paper rows have
+        # match_price=NULL and continue to use entry_price.  ``effective_entry_price``
+        # is the single source of truth — see src/portfolio/utils.py.
         for p in open_pos:
+            effective_entry = effective_entry_price(p)
             current = gamma_prices.get(p["token_id"])
             if current is not None:
                 p["current_price"] = current
-                p["unrealized_pnl"] = round((current - p["entry_price"]) * p["shares"], 4)
+                p["unrealized_pnl"] = round((current - effective_entry) * p["shares"], 4)
             else:
                 p["current_price"] = None
                 p["unrealized_pnl"] = None
@@ -467,7 +474,9 @@ def create_app(store, rebalancer, config) -> Flask:
         # 1. Open positions (BUY rows)
         for p in open_pos:
             current = gamma_prices.get(p["token_id"])
-            entry = p["entry_price"]
+            # B1 (2026-04-28): cost basis = match_price when present, else
+            # entry_price (limit) as documented fallback for legacy / paper.
+            entry = effective_entry_price(p)
             unrealized = round((current - entry) * p["shares"], 3) if current else None
             reason = p.get("buy_reason") or ""
             if not reason:
@@ -514,7 +523,9 @@ def create_app(store, rebalancer, config) -> Flask:
                 "strategy": p.get("strategy", "B"),
                 "action": "SELL",
                 "size": f"${p['size_usd']:.1f}",
-                "entry": f"{p['entry_price']:.3f}",
+                # B1: closed rows show effective entry (cost basis), not the
+                # limit price — keeps the entry / exit / P&L triplet self-consistent.
+                "entry": f"{effective_entry_price(p):.3f}",
                 "exit": f"{p['exit_price']:.3f}" if p.get("exit_price") is not None else "-",
                 "current": "-",
                 "pnl": f"{'+'if p.get('realized_pnl',0)>0 else ''}${p['realized_pnl']:.3f}" if p.get("realized_pnl") is not None else "-",
@@ -538,7 +549,9 @@ def create_app(store, rebalancer, config) -> Flask:
                 "strategy": p.get("strategy", "B"),
                 "action": "BUY",
                 "size": f"${p['size_usd']:.1f}",
-                "entry": f"{p['entry_price']:.3f}",
+                # B1: hidden BUY companion row uses the same effective-entry as the
+                # SELL row above so both halves of the lifecycle agree.
+                "entry": f"{effective_entry_price(p):.3f}",
                 "exit": "-",
                 "current": "-",
                 "pnl": "-",
@@ -589,7 +602,9 @@ def create_app(store, rebalancer, config) -> Flask:
             strat_counts[key]["open"] += 1
             current = gamma_prices.get(p["token_id"])
             if current:
-                strat_pnl[key] = strat_pnl.get(key, 0.0) + (current - p["entry_price"]) * p["shares"]
+                # B1: per-strategy unrealized P&L must use effective entry too,
+                # otherwise the timeline strat-summary disagrees with the row P&L.
+                strat_pnl[key] = strat_pnl.get(key, 0.0) + (current - effective_entry_price(p)) * p["shares"]
         for p in closed_pos:
             key = p.get("strategy") or fallback_strat
             strat_counts.setdefault(key, {"open": 0, "settled": 0})

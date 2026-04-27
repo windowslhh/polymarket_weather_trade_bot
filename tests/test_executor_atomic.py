@@ -72,6 +72,11 @@ async def test_happy_path_records_order_and_position():
     clob.place_limit_order = AsyncMock(
         return_value=OrderResult(order_id="clob_abc123", success=True),
     )
+    # 2026-04-28: executor now calls get_fill_summary after a matched BUY to
+    # record actual match_price + fee.  Pin a None return so the test stays
+    # focused on the orders/positions atomicity contract; the FillSummary
+    # plumbing is exercised in test_clob_resilience.
+    clob.get_fill_summary = AsyncMock(return_value=None)
     executor = Executor(clob, tracker)
 
     await executor.execute_signals([_build_signal()])
@@ -95,13 +100,18 @@ async def test_happy_path_records_order_and_position():
 
 @pytest.mark.asyncio
 async def test_empty_order_id_leaves_pending_then_failed():
-    """FIX-M4: CLOB returns empty order_id → treat as failure, no position."""
+    """FIX-M4: CLOB returns empty order_id → treat as failure, no position.
+
+    A1: empty order_id means the CLOB call never returned a handle, so
+    there is nothing to cancel — ``cancel_order`` must NOT fire.
+    """
     store, _ = await _mk_store()
     tracker = PortfolioTracker(store)
     clob = AsyncMock()
     clob.place_limit_order = AsyncMock(
         return_value=OrderResult(order_id="", success=False, message="empty"),
     )
+    clob.cancel_order = AsyncMock(return_value=True)
     executor = Executor(clob, tracker)
 
     await executor.execute_signals([_build_signal()])
@@ -115,6 +125,74 @@ async def test_empty_order_id_leaves_pending_then_failed():
     assert orders[0]["status"] == "failed"
     assert orders[0]["failure_reason"] == "empty"
     assert row[0] == 0  # no position
+    # A1: empty order_id → nothing to cancel.
+    assert clob.cancel_order.call_count == 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_unmatched_order_is_cancelled():
+    """A1 (2026-04-28): when the wrapper returns success=False with a real
+    ``order_id`` (the v2 SDK posted the order but it didn't immediately
+    match — ``status='unmatched'``), the executor must call cancel_order
+    so the resting GTC doesn't ghost-fill later.  ``mark_order_failed``
+    alone is not enough: failed rows are NOT picked up by the reconciler's
+    ``get_pending_orders`` query."""
+    store, _ = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = AsyncMock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="0xZOMBIE", success=False,
+            message="unmatched (status=unmatched)",
+        ),
+    )
+    clob.cancel_order = AsyncMock(return_value=True)
+    executor = Executor(clob, tracker)
+
+    await executor.execute_signals([_build_signal()])
+
+    async with store.db.execute("SELECT * FROM orders") as cur:
+        orders = [dict(r) for r in await cur.fetchall()]
+    async with store.db.execute("SELECT COUNT(*) FROM positions") as cur:
+        (pos_count,) = await cur.fetchone()
+
+    # Order row marked failed (no positions row).
+    assert len(orders) == 1
+    assert orders[0]["status"] == "failed"
+    assert "unmatched" in orders[0]["failure_reason"].lower()
+    assert pos_count == 0
+    # cancel_order must fire with the resting CLOB handle.
+    assert clob.cancel_order.call_count == 1
+    assert clob.cancel_order.call_args.args == ("0xZOMBIE",)
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_unmatched_order_cancel_failure_is_swallowed():
+    """A1: cancel_order raising must NOT propagate — the order row stays
+    'failed' and the operator sees a warning in logs.  Reconciler is the
+    safety net on the next restart."""
+    store, _ = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = AsyncMock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="0xZOMBIE2", success=False, message="unmatched",
+        ),
+    )
+    clob.cancel_order = AsyncMock(side_effect=RuntimeError("CLOB down"))
+    executor = Executor(clob, tracker)
+
+    # Must NOT raise.
+    await executor.execute_signals([_build_signal()])
+
+    async with store.db.execute("SELECT * FROM orders") as cur:
+        orders = [dict(r) for r in await cur.fetchall()]
+    assert orders[0]["status"] == "failed"
+    assert clob.cancel_order.call_count == 1
 
     await store.close()
 
@@ -165,6 +243,11 @@ async def test_crash_between_clob_and_record_fill_leaves_pending():
     clob.place_limit_order = AsyncMock(
         return_value=OrderResult(order_id="clob_xyz", success=True),
     )
+    # CrashTracker.record_fill_atomic raises before consuming match data,
+    # but the executor still calls get_fill_summary on the success path —
+    # mock it to None so the call resolves instead of returning an
+    # un-coercible AsyncMock.
+    clob.get_fill_summary = AsyncMock(return_value=None)
     executor = Executor(clob, crash_tracker)
 
     # execute_signals logs but swallows the exception per-signal.

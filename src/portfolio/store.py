@@ -192,6 +192,15 @@ class Store:
             ("orders", "strategy", "ALTER TABLE orders ADD COLUMN strategy TEXT NOT NULL DEFAULT 'B'"),
             # FIX-01: forecast_date column for audit.
             ("edge_history", "forecast_date", "ALTER TABLE edge_history ADD COLUMN forecast_date TEXT"),
+            # 2026-04-28: dashboard parity — record actual fill data so the
+            # "Entry" column shows effective per-share cost instead of the
+            # bot's submitted limit (a 0.69 limit may fill at 0.685 and the
+            # current display hides the slippage).  ``match_price`` is
+            # USDC_paid / shares_received from the trade response;
+            # ``fee_paid_usd`` is the taker-side fee.  Both default to NULL
+            # for legacy rows; UI falls back to ``entry_price``.
+            ("positions", "match_price", "ALTER TABLE positions ADD COLUMN match_price REAL"),
+            ("positions", "fee_paid_usd", "ALTER TABLE positions ADD COLUMN fee_paid_usd REAL"),
         ]
         for table, column, sql in migrations:
             try:
@@ -267,17 +276,22 @@ class Store:
         buy_reason: str = "",
         entry_ev: float | None = None,
         entry_win_prob: float | None = None,
+        match_price: float | None = None,
+        fee_paid_usd: float | None = None,
     ) -> int:
         # entry_ev / entry_win_prob support the relative EV-decay TRIM
         # rule (fix 4) — allow None so older call sites remain compatible.
+        # match_price / fee_paid_usd default to None so callers without
+        # post-fill trade data (paper, legacy) leave the dashboard fallback
+        # to entry_price.
         cursor = await self.db.execute(
             """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
                                        entry_price, size_usd, shares, strategy, buy_reason,
-                                       entry_ev, entry_win_prob)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       entry_ev, entry_win_prob, match_price, fee_paid_usd)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event_id, token_id, token_type, city, slot_label, side,
              entry_price, size_usd, shares, strategy, buy_reason,
-             entry_ev, entry_win_prob),
+             entry_ev, entry_win_prob, match_price, fee_paid_usd),
         )
         await self.db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
@@ -407,6 +421,8 @@ class Store:
         buy_reason: str = "",
         entry_ev: float | None = None,
         entry_win_prob: float | None = None,
+        match_price: float | None = None,
+        fee_paid_usd: float | None = None,
     ) -> int:
         """Promote a pending BUY order to filled AND insert the position row atomically.
 
@@ -432,11 +448,12 @@ class Store:
         pos_cursor = await self.db.execute(
             """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
                                        entry_price, size_usd, shares, strategy, buy_reason,
-                                       entry_ev, entry_win_prob, source_order_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       entry_ev, entry_win_prob, source_order_id,
+                                       match_price, fee_paid_usd)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event_id, token_id, token_type, city, slot_label, side,
              entry_price, size_usd, shares, strategy, buy_reason,
-             entry_ev, entry_win_prob, order_id),
+             entry_ev, entry_win_prob, order_id, match_price, fee_paid_usd),
         )
         await self.db.commit()
         return pos_cursor.lastrowid  # type: ignore[return-value]
@@ -466,10 +483,15 @@ class Store:
         B's position — D' stays open.  Pre-H-1 the JOIN was (event_id,
         token_id) only, which could double-close across variants.
         """
+        # B1 (2026-04-28): include p.match_price so the reconciler's realized-P&L
+        # path can use ``effective_entry_price`` (match_price falls back to
+        # entry_price when NULL).  Pre-B1 the JOIN selected entry_price only,
+        # so reconciler-driven P&L drifted from settlement-driven P&L by the
+        # limit-vs-fill gap on every healed SELL.
         async with self.db.execute(
             """SELECT o.idempotency_key, o.order_id, o.price, o.event_id,
                       o.token_id, p.id AS position_id, p.entry_price,
-                      p.shares, p.strategy
+                      p.match_price, p.shares, p.strategy
                FROM orders o
                JOIN positions p
                  ON p.event_id = o.event_id

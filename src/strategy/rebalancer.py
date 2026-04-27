@@ -26,6 +26,7 @@ from src.markets.gamma_prices import refresh_gamma_prices_only
 from src.markets.models import TempSlot, TradeSignal, WeatherMarketEvent
 from src.markets.price_buffer import PriceBuffer
 from src.portfolio.tracker import PortfolioTracker
+from src.portfolio.utils import effective_entry_price
 from src.strategy.evaluator import (
     _estimate_no_win_prob,
     _slot_distance,
@@ -808,8 +809,12 @@ class Rebalancer:
                                 continue
                             if "LOCKED WIN" in (pos.get("buy_reason") or ""):
                                 locked_win_token_ids.add(tid)
+                            # B1: cost basis for trim gates (price-stop threshold,
+                            # relative-decay floating-loss check) is the actual
+                            # fill price when known.  Falls back to entry_price
+                            # for legacy / paper rows via the helper.
                             if pos.get("entry_price"):
-                                entry_prices[tid] = pos["entry_price"]
+                                entry_prices[tid] = effective_entry_price(pos)
                             if pos.get("entry_ev") is not None:
                                 entry_ev_map[tid] = pos["entry_ev"]
                         trim_signals = evaluate_trim_signals(
@@ -1690,8 +1695,11 @@ class Rebalancer:
                 for pos in existing_positions:
                     if "LOCKED WIN" in (pos.get("buy_reason") or ""):
                         locked_win_token_ids.add(pos["token_id"])
+                    # B1 (2026-04-28): trim gates use effective fill price
+                    # (match_price when known, falls back to limit) so the
+                    # price-stop ratio threshold is anchored to actual cost.
                     if pos.get("token_id") and pos.get("entry_price"):
-                        entry_prices[pos["token_id"]] = pos["entry_price"]
+                        entry_prices[pos["token_id"]] = effective_entry_price(pos)
                     if pos.get("token_id") and pos.get("entry_ev") is not None:
                         entry_ev_map[pos["token_id"]] = pos["entry_ev"]
 

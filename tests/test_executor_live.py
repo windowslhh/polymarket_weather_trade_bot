@@ -66,7 +66,7 @@ async def test_live_success_writes_order_and_position():
     clob = ClobClient(_mk_live_config())
     clob._client = MagicMock()
     clob._client.create_and_post_order = MagicMock(
-        return_value={"orderID": "clob_live_1"},
+        return_value={"orderID": "clob_live_1", "status": "matched"},
     )
 
     executor = Executor(clob, tracker)
@@ -96,7 +96,10 @@ async def test_live_rate_limit_retries_then_succeeds(monkeypatch):
 
     clob = ClobClient(_mk_live_config())
     clob._client = MagicMock()
-    calls = [RuntimeError("HTTP 429 Too Many"), {"orderID": "clob_live_ok"}]
+    calls = [
+        RuntimeError("HTTP 429 Too Many"),
+        {"orderID": "clob_live_ok", "status": "matched"},
+    ]
 
     def side_effect(*_):
         v = calls.pop(0)

@@ -71,6 +71,20 @@ class Position:
     side: str  # "BUY"
 
 
+@dataclass
+class FillSummary:
+    """Aggregated fill data for a single order, derived from ``get_trades``.
+
+    ``match_price`` is the effective per-share entry (USDC paid / shares
+    received), so the dashboard's "entry" column reflects the slippage-adjusted
+    cost rather than the limit price the bot submitted.  ``fee_paid_usd`` is
+    the per-share fee × shares matched, taker-side only.
+    """
+    shares: float
+    match_price: float
+    fee_paid_usd: float
+
+
 class ClobClient:
     """Async wrapper for Polymarket CLOB operations.
 
@@ -269,15 +283,50 @@ class ClobClient:
                 order_id = (
                     order.get("orderID", "") if isinstance(order, dict) else str(order)
                 )
+                # Ghost-position guard (2026-04-28): v2 ``create_and_post_order``
+                # returns the same dict shape for both immediately-matched fills
+                # and unmatched resting orders.  Pre-fix, the wrapper treated
+                # any non-empty ``orderID`` as a successful fill, so executor
+                # would write a positions row for an order that only sat on
+                # the book — producing a ghost row whose live "position" was
+                # actually never owned (e.g. Miami 86-87 NO @0.565 on
+                # 2026-04-28).  Real fills carry ``status=='matched'`` AND/OR
+                # at least one transactionsHashes entry; resting/unmatched
+                # orders carry ``status=='unmatched'`` (or 'live') with no
+                # tx hashes.  Treat anything else as un-filled and let the
+                # startup reconciler resolve the open order on the next
+                # restart via ``probe_order_status``.
+                if isinstance(order, dict):
+                    status = str(order.get("status", "")).lower()
+                    tx_hashes = (
+                        order.get("transactionsHashes")
+                        or order.get("transaction_hashes")
+                        or []
+                    )
+                else:
+                    status = ""
+                    tx_hashes = []
+                matched = status == "matched" or bool(tx_hashes)
                 logger.info(
-                    "Order placed: %s %s @ %.4f x %.2f -> %s%s (attempt=%d)",
-                    side, token_id, price, size, order_id, key_suffix, attempt + 1,
+                    "Order placed: %s %s @ %.4f x %.2f -> %s status=%s matched=%s%s (attempt=%d)",
+                    side, token_id, price, size, order_id,
+                    status or "?", matched, key_suffix, attempt + 1,
                 )
                 # FIX-M4: empty order_id is treated as failure (see above).
                 if not order_id:
                     return OrderResult(
                         order_id="", success=False,
                         message="CLOB returned empty order_id",
+                    )
+                if not matched:
+                    # Order posted but did not immediately match.  Surface as
+                    # success=False so the executor records the orders row as
+                    # 'failed' (no positions row created) — the reconciler's
+                    # ``probe_order_status`` path will pick the live order up
+                    # later and either confirm a fill or close the loop.
+                    return OrderResult(
+                        order_id=order_id, success=False,
+                        message=f"unmatched (status={status or 'unknown'})",
                     )
                 return OrderResult(order_id=order_id, success=True)
             except TimeoutError as e:
@@ -321,6 +370,100 @@ class ClobClient:
         logger.exception("Order placement exhausted retries", exc_info=last_exc)
         return OrderResult(
             order_id="", success=False, message=str(last_exc) if last_exc else "retries exhausted",
+        )
+
+    async def get_fill_summary(
+        self,
+        *,
+        token_id: str,
+        order_id: str,
+        created_at_epoch: int | None = None,
+    ) -> "FillSummary | None":
+        """Fetch trades for ``order_id`` and aggregate effective price + fees.
+
+        Used by the executor right after a matched BUY to record the actual
+        per-share cost (limit price was 0.69 but the fill may have crossed
+        at 0.685 due to a thin-side maker) plus the taker fee paid.
+
+        Returns ``None`` in paper / dry-run mode (no real trades), and on
+        any SDK error — callers fall back to limit price + NULL fee.
+
+        Field-name resilience: Polymarket's ``/data/trades`` response is
+        forwarded as raw JSON.  ``taker_order_id`` is the documented field
+        keying a trade to the order that initiated it; the per-trade
+        ``fee_rate_bps`` is the COMBINED maker+taker bps (5%+5%=1000), so
+        our taker share is bps/2/10000 — multiplied by ``size`` and
+        ``price * (1 - price)`` per Polymarket's fee formula (matches the
+        prod-verified math: 3.12 × 0.05 × 0.69 × 0.31 = $0.0334 for the
+        2026-04-28 Miami trade).  If a future SDK adds an explicit
+        ``fee_paid`` per-trade field, that's preferred — checked first.
+        """
+        if self._config.dry_run or self._config.paper:
+            return None
+        if not order_id:
+            return None
+
+        try:
+            from py_clob_client_v2.clob_types import TradeParams
+        except ImportError:
+            logger.warning("get_fill_summary: py-clob-client-v2 not installed")
+            return None
+
+        client = self._get_client()
+        try:
+            params = TradeParams(asset_id=token_id, after=created_at_epoch)
+            resp = await asyncio.to_thread(client.get_trades, params)
+        except Exception:
+            logger.exception("get_fill_summary: get_trades failed")
+            return None
+
+        trades = _extract_list(resp)
+        matching: list[dict] = []
+        for t in trades:
+            taker_id = (
+                t.get("taker_order_id")
+                or t.get("takerOrderID")
+                or t.get("taker_orderID")
+                or ""
+            )
+            if str(taker_id) == str(order_id):
+                matching.append(t)
+        if not matching:
+            return None
+
+        total_shares = 0.0
+        total_usdc = 0.0
+        total_fee = 0.0
+        for t in matching:
+            try:
+                size = float(t.get("size", 0) or 0)
+                price = float(t.get("price", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if size <= 0 or price <= 0:
+                continue
+            total_shares += size
+            total_usdc += size * price
+            explicit_fee = t.get("fee_paid") or t.get("fee_paid_usd")
+            if explicit_fee is not None:
+                try:
+                    total_fee += float(explicit_fee)
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            try:
+                bps_combined = float(t.get("fee_rate_bps", 0) or 0)
+            except (TypeError, ValueError):
+                bps_combined = 0.0
+            taker_rate = (bps_combined / 2.0) / 10000.0
+            total_fee += size * taker_rate * price * (1.0 - price)
+
+        if total_shares <= 0:
+            return None
+        return FillSummary(
+            shares=total_shares,
+            match_price=total_usdc / total_shares,
+            fee_paid_usd=total_fee,
         )
 
     async def cancel_order(self, order_id: str) -> bool:

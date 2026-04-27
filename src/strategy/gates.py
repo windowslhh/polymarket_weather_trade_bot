@@ -117,21 +117,40 @@ class Gate(Protocol):
 # Shared primitives — fee / win-prob helpers
 # ──────────────────────────────────────────────────────────────────────
 
-# Polymarket taker fee for the Weather category (as of 2026).  Weather
-# markets charge 1.25% base rate, probability-weighted so the fee is
-# highest at 50/50 and decreases toward 0 or 1.  Formula:
+# Per-side fee rate for the Polymarket v2 Weather category.  Both maker
+# AND taker pay the same 500 bps (5%) per side; the on-chain trade response
+# reports the COMBINED 1000 bps.  We always execute as taker, so the per-side
+# rate that hits us is 5%, applied via the probability-weighted formula:
 #   fee_per_dollar = TAKER_FEE_RATE * 2 * price * (1 - price)
-# (peaks at price=0.50: 0.625% per dollar; at price=0.70: 0.525%/$).
-# Makers pay 0%; we assume all our orders execute as taker.
+# (peaks at price=0.50: 0.0125 per dollar; at price=0.70: 0.0105/$).
 #
+# Calibration history:
+#   Pre 2026-04-28: 0.0125 — assumed Polymarket charged a single 1.25%
+#     base rate.  Wrong: 1.25% was effectively per-PAIR after the *2,
+#     so EV math was using HALF the real fee.
+#   2026-04-28: 0.025 — verified against on-chain Miami / Chicago trades:
+#     Miami 3.12 × 0.05 × 0.69 × 0.31 = $0.0334 (matches receipt);
+#     Chicago 2.48 × 0.05 × 0.76 × 0.24 = $0.0226 (matches receipt).
+#     With this constant `entry_fee_per_dollar(p) = 0.05 × p × (1-p)`,
+#     which is the prod-confirmed taker-side fee schedule.
+#
+# The name ``TAKER_FEE_RATE`` is kept (despite being literally per-side
+# and applying to both sides on Polymarket v2) to avoid a wide rename
+# across importers — the docstring on every reference site is authoritative.
 # Single canonical definition lives here because both this module and
 # evaluator.py reference it; evaluator re-exports the name so callers
 # that predate the M2 refactor keep working.
-TAKER_FEE_RATE: float = 0.0125
+TAKER_FEE_RATE: float = 0.025
 
 
 def entry_fee_per_dollar(price: float) -> float:
-    """Compute Polymarket taker fee per dollar invested at *price*."""
+    """Compute Polymarket taker fee per dollar invested at *price*.
+
+    Formula: ``TAKER_FEE_RATE * 2 * price * (1 - price)``.  With
+    ``TAKER_FEE_RATE=0.025`` this collapses to ``0.05 × p × (1-p)``,
+    matching the per-trade fee Polymarket actually deducts (verified
+    against on-chain trades 2026-04-28).
+    """
     return TAKER_FEE_RATE * 2.0 * price * (1.0 - price)
 
 

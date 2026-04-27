@@ -21,6 +21,7 @@ from pathlib import Path
 import httpx
 
 from src.config import CityConfig, StrategyConfig, load_config
+from src.strategy.gates import TAKER_FEE_RATE
 from src.strategy.temperature import wu_round
 from src.weather.historical import (
     ForecastErrorDistribution,
@@ -160,16 +161,20 @@ def _simulate_market_prices(
     return simulated
 
 
-def _compute_taker_fee(price: float, size_usd: float, fee_rate: float = 0.0125) -> float:
+def _compute_taker_fee(price: float, size_usd: float, fee_rate: float = TAKER_FEE_RATE) -> float:
     """Compute Polymarket taker fee for weather markets.
 
-    Fee structure (as of 2026):
-    - Weather category: 1.25% base rate
+    Fee structure (verified against on-chain trades, 2026-04-28):
+    - Per-side rate (maker == taker == TAKER_FEE_RATE; Polymarket charges
+      both sides the same 500 bps).  Combined per-pair = 1000 bps.
     - Fee is probability-weighted: peaks at 50% price, decreases toward extremes
     - Fee = fee_rate * price * (1 - price) * 2 * size_in_shares
-    - For takers only; makers pay 0%
+            = 0.025 * 2 * price * (1 - price) * shares  (with the 2026-04-28 calibration)
+            = 0.05 * price * (1 - price) * shares       (matches receipts)
 
     We assume all our orders are taker (market/aggressive limit orders).
+    The default value is sourced from ``src.strategy.gates.TAKER_FEE_RATE``
+    so a future calibration only has to change one constant.
     """
     # Probability-weighted fee: higher at 50/50, lower at extremes
     # This matches Polymarket's actual fee formula
@@ -188,7 +193,7 @@ def _run_day(
     error_dist: ForecastErrorDistribution | None,
     slot_width: float = 2.0,
     slot_range: float = 30.0,
-    taker_fee_rate: float = 0.0125,
+    taker_fee_rate: float = TAKER_FEE_RATE,
 ) -> DayResult:
     """Simulate one day of trading for one city.
 
