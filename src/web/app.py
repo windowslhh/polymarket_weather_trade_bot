@@ -12,6 +12,14 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
+from src.config import get_strategy_variants
+from src.web.strategy_meta import (
+    active_variant_keys,
+    empty_strategy_aggregation,
+    fold_legacy_into_active,
+    strat_meta,
+)
+
 logger = logging.getLogger(__name__)
 
 # Persistent event loop running in a background thread
@@ -235,15 +243,21 @@ def create_app(store, rebalancer, config) -> Flask:
             st.get_daily_pnl(_dt.now(_tz.utc).date().isoformat()),
         )
         decision_log = _run_async(st.get_decision_log(limit=8))
+        active_keys = active_variant_keys()
+        active_set = set(active_keys)
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") == "B"]
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in active_set]
         strat_realized_raw = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {}
-        strat_realized = {"B": sum(strat_realized_raw.values()) if strat_realized_raw else 0.0}
-        # Include realized P&L from closed/settled positions (legacy A/C/D rolled into B for display)
+        strat_realized = fold_legacy_into_active(strat_realized_raw or {})
+        # Add realized P&L from closed/settled positions on top of the
+        # settlement-table aggregate.  Bucketed by the row's own strategy;
+        # legacy keys remain visible alongside active variants.
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
-            if rpnl is not None:
-                strat_realized["B"] += rpnl
+            if rpnl is None:
+                continue
+            key = p.get("strategy") or (active_keys[0] if active_keys else "B")
+            strat_realized[key] = strat_realized.get(key, 0.0) + rpnl
 
         # W-03 fix: use positions table as single source of truth for realized P&L.
         # Previously this summed daily_pnl_val (which includes settlement P&L) PLUS
@@ -304,7 +318,8 @@ def create_app(store, rebalancer, config) -> Flask:
             daily_maxes=d["state"].get("daily_maxes", {}),
             realized=d["total_realized"],
             strategy_summary=d.get("strategy_summary", []),
-            strat_realized=d.get("strat_realized", {"B": 0.0}),
+            strat_realized=d.get("strat_realized", empty_strategy_aggregation()),
+            strat_meta=strat_meta(),
             daily_loss_remaining=cfg.strategy.daily_loss_limit_usd - abs(d["total_realized"]),
             daily_loss_limit=cfg.strategy.daily_loss_limit_usd,
             decision_log=d["decision_log"],
@@ -320,15 +335,21 @@ def create_app(store, rebalancer, config) -> Flask:
         open_pos = _run_async(st.get_open_positions())
         closed_pos = _run_async(st.get_closed_positions(limit=200))
         exposure = _run_async(st.get_total_exposure())
+        active_keys = active_variant_keys()
+        active_set = set(active_keys)
+        fallback_strat = active_keys[0] if active_keys else "B"
         strategy_summary_raw = _run_async(st.get_strategy_summary()) if hasattr(st, 'get_strategy_summary') else []
-        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") == "B"]
+        strategy_summary = [s for s in strategy_summary_raw if s.get("strategy") in active_set]
         strat_realized_raw = _run_async(st.get_strategy_realized_pnl()) if hasattr(st, 'get_strategy_realized_pnl') else {}
-        strat_realized = {"B": sum(strat_realized_raw.values()) if strat_realized_raw else 0.0}
-        # Include realized P&L from closed/settled positions (legacy A/C/D rolled into B for display)
+        strat_realized = fold_legacy_into_active(strat_realized_raw or {})
+        # Add realized P&L from closed/settled positions on top of the
+        # settlement-table aggregate.  Bucketed by the row's own strategy.
         for p in closed_pos:
             rpnl = p.get("realized_pnl")
-            if rpnl is not None:
-                strat_realized["B"] += rpnl
+            if rpnl is None:
+                continue
+            key = p.get("strategy") or fallback_strat
+            strat_realized[key] = strat_realized.get(key, 0.0) + rpnl
 
         # Get current prices for P&L calculation.
         # Use the shared prices_fresh cache (same 30s TTL as /api/prices).
@@ -356,27 +377,30 @@ def create_app(store, rebalancer, config) -> Flask:
             else:
                 p["current_price"] = None
                 p["unrealized_pnl"] = None
-            p["strategy"] = p.get("strategy", "B")
+            p["strategy"] = p.get("strategy") or fallback_strat
             p["buy_reason"] = p.get("buy_reason", "")
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
 
-        # Enrich closed positions with parsed slot info + remap legacy strategies to B
+        # Enrich closed positions with parsed slot info — keep their original
+        # strategy key so legacy rows show up under their own column.
         for p in closed_pos:
             p["slot_short"], p["market_date"] = _parse_slot_label(p.get("slot_label", ""))
             p["buy_reason"] = p.get("buy_reason", "")
             p["exit_reason"] = p.get("exit_reason", "")
-            p["strategy"] = "B"  # B-only live; legacy A/C/D rolled into B for display
+            p["strategy"] = p.get("strategy") or fallback_strat
 
-        # Group by strategy — B-only live; everything in DB remapped to B for display
-        strategies = {"B": []}
-        strat_pnl = {"B": 0.0}  # unrealized
-        strat_exposure = {"B": 0.0}
+        # Group by strategy.  Active variants always get a (possibly empty)
+        # group; legacy strategies still in the DB only appear when they have
+        # at least one open or closed row.
+        strategies: dict[str, list] = {k: [] for k in active_keys}
+        strat_pnl: dict[str, float] = {k: 0.0 for k in active_keys}
+        strat_exposure: dict[str, float] = {k: 0.0 for k in active_keys}
         for p in open_pos:
-            p["strategy"] = "B"  # remap any legacy strategy to B
-            strategies["B"].append(p)
-            strat_exposure["B"] += p["size_usd"]
+            key = p["strategy"]
+            strategies.setdefault(key, []).append(p)
+            strat_exposure[key] = strat_exposure.get(key, 0.0) + p["size_usd"]
             if p["unrealized_pnl"] is not None:
-                strat_pnl["B"] += p["unrealized_pnl"]
+                strat_pnl[key] = strat_pnl.get(key, 0.0) + p["unrealized_pnl"]
 
         # Group by city
         cities = {}
@@ -402,6 +426,7 @@ def create_app(store, rebalancer, config) -> Flask:
             strat_realized=strat_realized,
             strat_exposure=strat_exposure,
             strategy_summary=strategy_summary,
+            strat_meta=strat_meta(),
         )
 
     @app.route("/markets")
@@ -546,21 +571,34 @@ def create_app(store, rebalancer, config) -> Flask:
         # Sort by time descending
         timeline.sort(key=lambda x: x.get("sort_key", ""), reverse=True)
 
-        # Per-strategy stats — B-only live; legacy A/C/D rolled into B for display
-        strat_pnl = {"B": 0.0}
-        strat_exposure = {"B": 0.0}
-        strat_counts = {"B": {"open": 0, "settled": 0}}
+        # Per-strategy stats — bucketed by the row's own strategy.  Active
+        # variants always get a (possibly zero-valued) row; legacy keys
+        # show up only when at least one open or closed position carries
+        # them.  No more "everything rolled into B" remap.
+        active_keys = active_variant_keys()
+        fallback_strat = active_keys[0] if active_keys else "B"
+        strat_pnl: dict[str, float] = {k: 0.0 for k in active_keys}
+        strat_exposure: dict[str, float] = {k: 0.0 for k in active_keys}
+        strat_counts: dict[str, dict] = {
+            k: {"open": 0, "settled": 0} for k in active_keys
+        }
         for p in open_pos:
-            strat_exposure["B"] += p["size_usd"]
-            strat_counts["B"]["open"] += 1
+            key = p.get("strategy") or fallback_strat
+            strat_counts.setdefault(key, {"open": 0, "settled": 0})
+            strat_exposure[key] = strat_exposure.get(key, 0.0) + p["size_usd"]
+            strat_counts[key]["open"] += 1
             current = gamma_prices.get(p["token_id"])
             if current:
-                strat_pnl["B"] += (current - p["entry_price"]) * p["shares"]
+                strat_pnl[key] = strat_pnl.get(key, 0.0) + (current - p["entry_price"]) * p["shares"]
         for p in closed_pos:
+            key = p.get("strategy") or fallback_strat
+            strat_counts.setdefault(key, {"open": 0, "settled": 0})
+            strat_exposure.setdefault(key, 0.0)
+            strat_pnl.setdefault(key, 0.0)
             if p.get("status") == "settled":
-                strat_counts["B"]["settled"] += 1
+                strat_counts[key]["settled"] += 1
             if p.get("realized_pnl") is not None:
-                strat_pnl["B"] += p["realized_pnl"]
+                strat_pnl[key] = strat_pnl.get(key, 0.0) + p["realized_pnl"]
 
         # Limit bumped from 80 → 120 because every closed position now
         # emits an extra ``closed_entry`` row (hidden until toggled).
@@ -582,6 +620,7 @@ def create_app(store, rebalancer, config) -> Flask:
             strat_pnl=strat_pnl,
             strat_exposure=strat_exposure,
             strat_counts=strat_counts,
+            strat_meta=strat_meta(),
         )
 
     @app.route("/analytics")
@@ -617,6 +656,7 @@ def create_app(store, rebalancer, config) -> Flask:
             mode=_mode(),
             pnl_history=pnl_history,
             settlements=settlements,
+            strat_meta=strat_meta(),
         )
 
     @app.route("/config")
@@ -629,6 +669,8 @@ def create_app(store, rebalancer, config) -> Flask:
             strategy=cfg.strategy,
             scheduling=cfg.scheduling,
             cities=cfg.cities,
+            variants=get_strategy_variants(),
+            strat_meta=strat_meta(),
         )
 
     @app.route("/temperatures")
