@@ -332,8 +332,12 @@ class TestPortfolioIntegration:
         executor = Executor(clob, portfolio)
         max_tracker = DailyMaxTracker()
 
-        # Inject a large daily loss
-        await portfolio._store.upsert_daily_pnl(date.today().isoformat(), -100.0, 0, 0)
+        # Inject a large daily loss.  Rebalancer's circuit breaker reads
+        # daily_pnl by UTC date (FIX-M1) — seeding with server-local
+        # date.today() silently misses the lookup on hosts where TZ != UTC.
+        await portfolio._store.upsert_daily_pnl(
+            datetime.now(timezone.utc).date().isoformat(), -100.0, 0, 0,
+        )
 
         rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker)
 

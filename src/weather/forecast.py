@@ -63,7 +63,8 @@ async def get_ensemble_forecast(
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get ensemble forecast from Open-Meteo (GFS + ICON + ECMWF)."""
-    target = target_date or date.today()
+    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
+    target = target_date or datetime.now(timezone.utc).date()
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -144,7 +145,8 @@ async def get_single_forecast(
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get single-model Open-Meteo forecast (last resort fallback)."""
-    target = target_date or date.today()
+    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
+    target = target_date or datetime.now(timezone.utc).date()
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -189,7 +191,8 @@ async def get_forecast(
     - Ensemble mean: 50% weight (multi-model consensus)
     - Confidence = ensemble std (data-driven uncertainty)
     """
-    target = target_date or date.today()
+    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
+    target = target_date or datetime.now(timezone.utc).date()
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
 

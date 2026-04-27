@@ -53,7 +53,12 @@ async def get_nws_forecast(
 
     Returns None on failure (caller should fallback to Open-Meteo).
     """
-    target = target_date or date.today()
+    # FIX (2026-04-28): default to UTC date, not server-local date.today().
+    # The rebalancer keys _cached_forecasts_by_date by UTC; mixing in a
+    # local-date forecast when system tz != UTC produced the
+    # "forecast.forecast_date != event.market_date" assertion in
+    # evaluate_exit_signals on dev (CST +0800) and any non-UTC host.
+    target = target_date or datetime.now(timezone.utc).date()
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=15, headers=NWS_HEADERS)
 
