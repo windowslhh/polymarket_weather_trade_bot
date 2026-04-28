@@ -56,6 +56,40 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many" in msg
 
 
+def _is_order_version_mismatch_error(exc: BaseException) -> bool:
+    """Polymarket exchange-cutover signal — see ``_force_refresh_clob_version``."""
+    return "order_version_mismatch" in str(exc)
+
+
+def _force_refresh_clob_version(client) -> bool:
+    """Flush the SDK's in-memory ``__cached_version`` so the *next* order is
+    built against the server's current order-schema version.
+
+    Why this exists: ``py_clob_client_v2`` 1.0.0 caches the value of
+    ``GET /version`` on first call and never re-reads it.  It *does* ship a
+    refresh path — ``post_order`` flips ``__resolve_version(force_update=True)``
+    on a ``order_version_mismatch`` *response dict* — but the helper at
+    ``http_helpers/helpers.py:78`` raises ``PolyApiException`` on any non-200,
+    so that branch is dead code in practice.  Result: a bot whose first
+    ``/version`` call landed in the 2026-04-28 cancel-only window cached
+    ``1`` and signed V1 orders against a V2-only server forever (HTTP 400
+    ``order_version_mismatch``) until human-restart.
+
+    We force the refresh ourselves via the name-mangled private accessor.
+    Returns True iff the cache was successfully flipped.
+    """
+    try:
+        client._ClobClient__resolve_version(force_update=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "force-refresh CLOB version cache failed: %s — next order will "
+            "re-use stale cache and likely fail again",
+            exc,
+        )
+        return False
+
+
 @dataclass
 class OrderResult:
     order_id: str
@@ -394,6 +428,17 @@ class ClobClient:
                     )
                     await asyncio.sleep(sleep_s)
                     continue
+                if _is_order_version_mismatch_error(e):
+                    refreshed = _force_refresh_clob_version(client)
+                    logger.warning(
+                        "order_version_mismatch on place_limit_order "
+                        "(attempt=%d/%d) — %s, retrying",
+                        attempt + 1, ORDER_MAX_ATTEMPTS,
+                        "force-refreshed CLOB version cache"
+                        if refreshed else "cache-refresh FAILED",
+                    )
+                    # Fall through to the standard inter-attempt backoff so
+                    # a transiently-flapping cutover doesn't get hammered.
                 logger.warning(
                     "place_limit_order failed (attempt=%d/%d): %s",
                     attempt + 1, ORDER_MAX_ATTEMPTS, e,

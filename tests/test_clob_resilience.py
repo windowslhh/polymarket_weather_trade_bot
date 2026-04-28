@@ -571,6 +571,88 @@ async def test_get_fill_summary_no_matching_trades_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_order_version_mismatch_force_refreshes_and_retries(monkeypatch):
+    """2026-04-28 cutover defense: a Polymarket exchange-version cutover poisons
+    ``ClobClient.__cached_version`` (the SDK caches ``GET /version`` on first
+    call and never re-reads it; its built-in refresh-on-mismatch path is dead
+    code because the HTTP helper raises before reaching it).  ``place_limit_order``
+    must (a) detect the ``order_version_mismatch`` error, (b) force-refresh the
+    cache via the name-mangled ``_ClobClient__resolve_version(force_update=True)``
+    accessor, and (c) retry once so the next attempt is built against the
+    post-cutover schema.
+    """
+    client = _make_client()
+    calls = [
+        RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'error': 'order_version_mismatch'}]"
+        ),
+        {"orderID": "after_refresh", "status": "matched"},
+    ]
+
+    def side_effect(*_):
+        v = calls.pop(0)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    client._client.create_and_post_order = MagicMock(side_effect=side_effect)
+    # The real SDK exposes the method as the name-mangled
+    # ``_ClobClient__resolve_version``.  Mock it so we can assert it was hit
+    # exactly once with ``force_update=True``.
+    client._client._ClobClient__resolve_version = MagicMock(return_value=2)
+
+    async def _noop(*_):
+        return None
+
+    monkeypatch.setattr(clob_mod.asyncio, "sleep", _noop)
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success
+    assert result.order_id == "after_refresh"
+    assert client._client.create_and_post_order.call_count == 2
+    client._client._ClobClient__resolve_version.assert_called_once_with(
+        force_update=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_order_version_mismatch_survives_refresh_failure(monkeypatch):
+    """If the cache-refresh itself raises (Polymarket /version endpoint flaking
+    in the middle of a cutover, network blip, etc.), we must NOT crash.  Log
+    and fall through to the standard retry — the next attempt will likely
+    fail too, but the bot should keep running and surface the error normally
+    once retries exhaust."""
+    client = _make_client()
+    client._client.create_and_post_order = MagicMock(
+        side_effect=RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'error': 'order_version_mismatch'}]"
+        ),
+    )
+    client._client._ClobClient__resolve_version = MagicMock(
+        side_effect=RuntimeError("upstream /version flaking"),
+    )
+
+    async def _noop(*_):
+        return None
+
+    monkeypatch.setattr(clob_mod.asyncio, "sleep", _noop)
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert not result.success
+    assert "order_version_mismatch" in result.message
+    # Refresh attempted once per failed attempt — the helper swallows the
+    # inner RuntimeError so the outer retry loop reaches its full count.
+    assert client._client._ClobClient__resolve_version.call_count == clob_mod.ORDER_MAX_ATTEMPTS
+    assert client._client.create_and_post_order.call_count == clob_mod.ORDER_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
 async def test_get_fill_summary_prefers_explicit_fee_field():
     """If the trade response carries an explicit ``fee_paid`` field,
     prefer it over computing from ``fee_rate_bps``."""
