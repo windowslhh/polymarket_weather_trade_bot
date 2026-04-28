@@ -201,6 +201,29 @@ class Store:
             # for legacy rows; UI falls back to ``entry_price``.
             ("positions", "match_price", "ALTER TABLE positions ADD COLUMN match_price REAL"),
             ("positions", "fee_paid_usd", "ALTER TABLE positions ADD COLUMN fee_paid_usd REAL"),
+            # 2026-04-28: on-chain redemption metadata.  The settler only knew
+            # how to mark positions ``settled`` in the DB; redemption (the call
+            # that converts settled NO ERC1155 shares back into USDC) wasn't
+            # implemented, so payouts sat in the funder Safe until manually
+            # cashed.  See ``src/settlement/redeemer.py`` for the redeem flow.
+            #
+            # condition_id    — bytes32 conditionId (per market, NOT per event);
+            #                   required argument to redeemPositions.
+            # neg_risk        — 1 = call NegRiskAdapter (Polymarket weather
+            #                   markets), 0 = call ConditionalTokens directly.
+            # redeem_tx_hash  — final on-chain tx hash on success; sentinel
+            #                   ``pending:<unix_ts>`` while a redeem tx is in
+            #                   flight (used by the race-protection guard).
+            # redeem_status   — NULL = never attempted, ``pending`` = tx in
+            #                   flight, ``success`` = redeemed, ``failed`` =
+            #                   gave up after redeem_attempt_count >= 3.
+            # redeem_attempt_count — count of failed redeem attempts; settler
+            #                   alerts and stops retrying when it hits 3.
+            ("positions", "condition_id", "ALTER TABLE positions ADD COLUMN condition_id TEXT"),
+            ("positions", "neg_risk", "ALTER TABLE positions ADD COLUMN neg_risk INTEGER DEFAULT 0"),
+            ("positions", "redeem_tx_hash", "ALTER TABLE positions ADD COLUMN redeem_tx_hash TEXT"),
+            ("positions", "redeem_status", "ALTER TABLE positions ADD COLUMN redeem_status TEXT"),
+            ("positions", "redeem_attempt_count", "ALTER TABLE positions ADD COLUMN redeem_attempt_count INTEGER DEFAULT 0"),
         ]
         for table, column, sql in migrations:
             try:
@@ -314,6 +337,78 @@ class Store:
             (exit_reason or None, exit_price, realized_pnl, position_id),
         )
         await self.db.commit()
+
+    # ── Redeem-state helpers ──────────────────────────────────────────
+    # The settler flips ``redeem_status`` NULL → 'pending' before invoking
+    # the redeemer; on receipt it writes the final tx hash + status.  All
+    # three transitions need atomic UPDATE … WHERE clauses so a crash
+    # mid-cycle leaves a recoverable state, not a silently-double-redeem.
+
+    async def claim_redeem_attempt(self, position_id: int) -> bool:
+        """Atomically reserve ``positions.id`` for a redeem attempt.
+
+        Returns True iff the row's redeem_status was NULL at exec time,
+        in which case it is now 'pending' with a sentinel tx_hash.  Returns
+        False if another caller (or a previous cycle) already claimed it —
+        caller MUST skip in that case to avoid double-redemption.
+        """
+        import time
+        sentinel = f"pending:{int(time.time())}"
+        cursor = await self.db.execute(
+            "UPDATE positions SET redeem_status = 'pending', redeem_tx_hash = ? "
+            "WHERE id = ? AND redeem_status IS NULL",
+            (sentinel, position_id),
+        )
+        await self.db.commit()
+        # aiosqlite rowcount: 0 = nothing matched (already claimed), 1 = success.
+        return (cursor.rowcount or 0) > 0
+
+    async def complete_redeem(
+        self, position_id: int, tx_hash: str,
+    ) -> None:
+        """Finalize a successful redeem: tx_hash + status='success'."""
+        await self.db.execute(
+            "UPDATE positions SET redeem_status = 'success', redeem_tx_hash = ? "
+            "WHERE id = ?",
+            (tx_hash, position_id),
+        )
+        await self.db.commit()
+
+    async def release_redeem_attempt(
+        self, position_id: int, max_attempts: int = 3,
+    ) -> int:
+        """Roll back a failed attempt; return the new attempt_count.
+
+        If attempt_count reaches ``max_attempts`` we set redeem_status
+        to 'failed' so the settler stops retrying and emits an alert;
+        otherwise we revert redeem_status back to NULL so the next
+        cycle re-tries.
+        """
+        await self.db.execute(
+            "UPDATE positions "
+            "SET redeem_attempt_count = COALESCE(redeem_attempt_count, 0) + 1, "
+            "    redeem_tx_hash = NULL "
+            "WHERE id = ?",
+            (position_id,),
+        )
+        async with self.db.execute(
+            "SELECT redeem_attempt_count FROM positions WHERE id = ?",
+            (position_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        attempt_count = int(row[0]) if row and row[0] is not None else 0
+        if attempt_count >= max_attempts:
+            await self.db.execute(
+                "UPDATE positions SET redeem_status = 'failed' WHERE id = ?",
+                (position_id,),
+            )
+        else:
+            await self.db.execute(
+                "UPDATE positions SET redeem_status = NULL WHERE id = ?",
+                (position_id,),
+            )
+        await self.db.commit()
+        return attempt_count
 
     async def update_exit_reason(self, position_id: int, exit_reason: str) -> None:
         """Set the exit reason on a position (standalone update, kept for backward compat)."""
