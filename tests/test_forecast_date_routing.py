@@ -137,91 +137,65 @@ def test_edge_history_includes_forecast_date(tmp_path):
     assert rows[0]["market_date"] == "2026-04-26"
 
 
-# ── Regression: default target_date must be UTC, not server-local ───────────
+# ── Regression: forecast fetchers refuse to default target_date ─────────────
 #
 # 2026-04-28: production bot on a CST+0800 host showed
 # "forecast.forecast_date=2026-04-28 != event.market_date=2026-04-27" because
 # get_forecast / get_*_forecast defaulted target_date to date.today() (local)
-# while the rebalancer keys _cached_forecasts_by_date by UTC.  These tests
-# pin the default to UTC so a tz-shifted dev machine cannot regress.
+# while the rebalancer keys _cached_forecasts_by_date by UTC.  An interim fix
+# made the default UTC — but UTC is *also* wrong for west-coast cities during
+# the ~5h window each day when UTC has rolled but local hasn't.  The
+# permanent fix is: there is no correct default.  Callers must pass an
+# explicit ``city_local_date(city)`` and we lock that in by making the
+# default raise.
 
-def _utc_today_under_local_skew(monkeypatch, local_skew_days: int):
-    """Patch the forecast module so date.today() and datetime.now(utc).date()
-    return *different* dates, simulating a host whose system tz is not UTC.
-
-    Returns (utc_today, local_today) — we expect the code under test to
-    pick utc_today.
-    """
-    import src.weather.forecast as fc_mod
-    import src.weather.nws as nws_mod
-
-    utc_today = date(2026, 4, 27)
-    local_today = utc_today + timedelta(days=local_skew_days)
-    fixed_utc_now = datetime(2026, 4, 27, 21, 0, tzinfo=timezone.utc)
-
-    class _FakeDate(date):
-        @classmethod
-        def today(cls):
-            return local_today
-
-    class _FakeDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                # Local "now" — match the local_today rollover
-                return datetime(local_today.year, local_today.month, local_today.day, 5, 0)
-            return fixed_utc_now.astimezone(tz)
-
-    for mod in (fc_mod, nws_mod):
-        monkeypatch.setattr(mod, "date", _FakeDate)
-        monkeypatch.setattr(mod, "datetime", _FakeDatetime)
-    return utc_today, local_today
-
-
-def test_get_forecast_default_target_uses_utc(monkeypatch):
-    """Default target_date for get_forecast picks UTC date over server-local."""
+def test_get_forecast_requires_target_date():
+    """get_forecast raises rather than guess a default — the rebalancer
+    must pass city_local_date(city) explicitly."""
     import asyncio
     from src.config import CityConfig
     import src.weather.forecast as fc_mod
 
-    utc_today, local_today = _utc_today_under_local_skew(monkeypatch, local_skew_days=1)
-    assert utc_today != local_today  # sanity: skew is real
+    city = CityConfig(name="TestCity", icao="KTST", lat=0.0, lon=0.0, tz="UTC")
+    with pytest.raises((TypeError, ValueError)):
+        asyncio.run(fc_mod.get_forecast(city))  # type: ignore[call-arg]
 
-    captured: dict = {}
 
-    async def _fake_nws(city, target, client):
-        captured["nws_target"] = target
-        return None
-
-    async def _fake_ensemble(city, target, client):
-        captured["ensemble_target"] = target
-        return None
-
-    async def _fake_single(city, target, client):
-        captured["single_target"] = target
-        return Forecast(
-            city=city.name, forecast_date=target,
-            predicted_high_f=70.0, predicted_low_f=55.0,
-            confidence_interval_f=3.0, source="single",
-            fetched_at=datetime.now(timezone.utc),
-        )
-
-    monkeypatch.setattr(fc_mod, "get_nws_forecast", _fake_nws)
-    monkeypatch.setattr(fc_mod, "get_ensemble_forecast", _fake_ensemble)
-    monkeypatch.setattr(fc_mod, "get_single_forecast", _fake_single)
+def test_get_ensemble_forecast_requires_target_date():
+    import asyncio
+    from src.config import CityConfig
+    import src.weather.forecast as fc_mod
 
     city = CityConfig(name="TestCity", icao="KTST", lat=0.0, lon=0.0, tz="UTC")
-    forecast = asyncio.run(fc_mod.get_forecast(city))
+    with pytest.raises((TypeError, ValueError)):
+        asyncio.run(fc_mod.get_ensemble_forecast(city))  # type: ignore[call-arg]
 
-    assert captured["nws_target"] == utc_today, (
-        f"NWS branch must use UTC date {utc_today}, got {captured['nws_target']}"
-    )
-    assert captured["ensemble_target"] == utc_today, (
-        f"Ensemble branch must use UTC date {utc_today}, got {captured['ensemble_target']}"
-    )
-    # The single-fallback's forecast_date is what propagates to the cache.
-    # Pre-fix this would equal local_today (date.today) and trip the
-    # forecast/market_date assertion downstream.
-    assert forecast.forecast_date == utc_today, (
-        f"Forecast date must be UTC {utc_today}, got {forecast.forecast_date}"
-    )
+
+def test_get_single_forecast_requires_target_date():
+    import asyncio
+    from src.config import CityConfig
+    import src.weather.forecast as fc_mod
+
+    city = CityConfig(name="TestCity", icao="KTST", lat=0.0, lon=0.0, tz="UTC")
+    with pytest.raises((TypeError, ValueError)):
+        asyncio.run(fc_mod.get_single_forecast(city))  # type: ignore[call-arg]
+
+
+def test_get_forecasts_batch_requires_target_date():
+    import asyncio
+    from src.config import CityConfig
+    import src.weather.forecast as fc_mod
+
+    city = CityConfig(name="TestCity", icao="KTST", lat=0.0, lon=0.0, tz="UTC")
+    with pytest.raises((TypeError, ValueError)):
+        asyncio.run(fc_mod.get_forecasts_batch([city]))  # type: ignore[call-arg]
+
+
+def test_get_nws_forecast_requires_target_date():
+    import asyncio
+    from src.config import CityConfig
+    import src.weather.nws as nws_mod
+
+    city = CityConfig(name="TestCity", icao="KTST", lat=0.0, lon=0.0, tz="UTC")
+    with pytest.raises((TypeError, ValueError)):
+        asyncio.run(nws_mod.get_nws_forecast(city))  # type: ignore[call-arg]

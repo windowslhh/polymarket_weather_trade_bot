@@ -39,7 +39,10 @@ from src.strategy.calibrator import calibrate_distance_dynamic, calibrate_distan
 from src.strategy.temperature import is_daily_max_final
 from src.strategy.sizing import compute_size
 from src.strategy.trend import ForecastTrend
-from src.weather.forecast import get_forecasts_batch
+from src.weather.forecast import (
+    city_local_date,
+    get_forecasts_for_city_local_window,
+)
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.metar import DailyMaxTracker, get_today_metar_history
 from src.weather.models import Observation
@@ -136,18 +139,18 @@ class Rebalancer:
         # correct-day forecast instead of today's by accident.  Populated
         # by run()/backfill, read by run_position_check + dashboard.
         #
-        # Known subtlety (H-9): the cache key is UTC today; cities on the
-        # west coast hit local midnight 5-8 hours *after* UTC rolls over.
-        # During that window (00:00-08:00 UTC), an event whose
-        # market_date we've already classified as D+1 can reach TRIM with
-        # forecast=None if the previous day's cache entry was evicted
-        # before today's got populated.  For the 60-min rebalance this
-        # is self-healing (the next cycle refills); for the 15-min
-        # position_check it can briefly skip TRIM.  Not fixed here
-        # because a city-local keying scheme would require carrying
-        # tz/city along every lookup — a larger refactor better done
-        # post go-live.  Operators see a "TRIM skip (missing forecast)"
-        # log line during the window.
+        # 2026-04-28: keys are *city-local* dates (via city_local_date),
+        # not UTC.  ``event.market_date`` is also city-local in
+        # ``markets/discovery``, so the lookup
+        # ``cache[event.market_date][city]`` lines up cleanly even
+        # during the 5-8 hour daily window when UTC and the city's
+        # local calendar disagree.  Pre-fix this used UTC today/D+1/D+2;
+        # west-coast cities populated under the wrong key during
+        # 00:00-08:00 UTC, the by-name fallback served a stale forecast
+        # whose forecast_date no longer matched the event, and
+        # evaluator.evaluate_exit_signals tripped its FIX-22 invariant
+        # (AssertionError) — taking out the 15-min TRIM/EXIT safety net.
+        # Different cities can populate different sets of date keys here.
         self._cached_forecasts_by_date: dict[date, dict[str, "Forecast"]] = {}
 
     def set_error_distributions(self, dists: dict[str, ForecastErrorDistribution]) -> None:
@@ -266,46 +269,45 @@ class Rebalancer:
             )
             logger.info("Backfilled %d total observations across %d cities", total, len(city_configs))
 
-            # Fetch forecasts so dashboard has data immediately (not after first rebalance)
-            import asyncio
-            today = datetime.now(timezone.utc).date()
-            forecasts = await get_forecasts_batch(city_configs)
-            self._cached_forecasts.update(forecasts)
+            # Fetch forecasts so dashboard has data immediately (not after first rebalance).
+            # 2026-04-28: city-local windowed fetch — each city's today/D+1/D+2 is
+            # keyed under that city's own local calendar so the by-date cache
+            # aligns with event.market_date (also city-local in discovery).
+            by_date = await get_forecasts_for_city_local_window(city_configs, days=3)
+            self._cached_forecasts_by_date = by_date
 
-            # Review H-4: return_exceptions=True so one day's failure doesn't
-            # drop the other.  Non-dict results are treated as empty.
-            fc_results = await asyncio.gather(
-                get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                get_forecasts_batch(city_configs, today + timedelta(days=2)),
-                return_exceptions=True,
-            )
-            forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
-            forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
-            for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
-                if isinstance(r, Exception):
-                    logger.warning("Backfill: %s forecast fetch failed — %s", label, r)
-
-            # FIX-01: seed by-date cache so run_position_check() can route
-            # forecasts by event.market_date even before the first full
-            # rebalance cycle has populated it.
-            self._cached_forecasts_by_date = {
-                today: dict(forecasts),
-                today + timedelta(days=1): dict(forecasts_d1),
-                today + timedelta(days=2): dict(forecasts_d2),
-            }
+            # Build the by-name fallback cache from each city's local "today"
+            # (offset_days=0).  Operators reading _cached_forecasts.get(city)
+            # outside a market_date context (e.g. the dashboard) get the city's
+            # current-day forecast, not whichever city happened to be processed
+            # last under a global UTC anchor.
+            by_name: dict[str, "Forecast"] = {}
+            for city in city_configs:
+                fc = by_date.get(city_local_date(city, offset_days=0), {}).get(city.name)
+                if fc is not None:
+                    by_name[city.name] = fc
+            self._cached_forecasts.update(by_name)
 
             self._last_forecasts = {}
-            for city, f in forecasts.items():
+            for city in city_configs:
+                fc_today = by_date.get(city_local_date(city, offset_days=0), {}).get(city.name)
+                if fc_today is None:
+                    continue
                 entry: dict = {
-                    "high": f.predicted_high_f, "low": f.predicted_low_f,
-                    "confidence": f.confidence_interval_f, "source": f.source,
+                    "high": fc_today.predicted_high_f, "low": fc_today.predicted_low_f,
+                    "confidence": fc_today.confidence_interval_f, "source": fc_today.source,
                 }
-                if city in forecasts_d1:
-                    entry["high_d1"] = forecasts_d1[city].predicted_high_f
-                if city in forecasts_d2:
-                    entry["high_d2"] = forecasts_d2[city].predicted_high_f
-                self._last_forecasts[city] = entry
-            logger.info("Backfilled forecasts for %d cities (today + D1/D2)", len(forecasts))
+                fc_d1 = by_date.get(city_local_date(city, offset_days=1), {}).get(city.name)
+                if fc_d1 is not None:
+                    entry["high_d1"] = fc_d1.predicted_high_f
+                fc_d2 = by_date.get(city_local_date(city, offset_days=2), {}).get(city.name)
+                if fc_d2 is not None:
+                    entry["high_d2"] = fc_d2.predicted_high_f
+                self._last_forecasts[city.name] = entry
+            logger.info(
+                "Backfilled forecasts for %d cities (today + D1/D2, city-local)",
+                len(by_name),
+            )
         except Exception:
             logger.exception("Failed to backfill METAR history and forecasts")
 
@@ -422,45 +424,46 @@ class Rebalancer:
             if not city_configs:
                 return
 
-            forecasts = await get_forecasts_batch(city_configs)
-            if forecasts:
-                self._cached_forecasts.update(forecasts)
-                # Review 🟡 #2: keep the by-date cache fresh so the 15-min
-                # TRIM in run_position_check reads same-day forecasts up to
-                # 15 min old (not up to 60 min from the last full cycle).
-                # Also refresh D+1/D+2 so held D+1 positions get fresh exit
-                # inputs when TRIM fires for them.
-                today = datetime.now(timezone.utc).date()
-                # Review H-4: return_exceptions=True so one day failing
-                # doesn't bubble up and drop the other.  The per-day
-                # isinstance check below filters out exception objects
-                # before they enter the by-date cache.
-                fc_results = await asyncio.gather(
-                    get_forecasts_batch(city_configs, today + timedelta(days=1)),
-                    get_forecasts_batch(city_configs, today + timedelta(days=2)),
-                    return_exceptions=True,
-                )
-                fc_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
-                fc_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
-                for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
-                    if isinstance(r, Exception):
-                        logger.debug("Forecast refresh %s skipped: %s", label, r)
-                # Replace today's entry outright (fresher is strictly
-                # better); merge-update D+1/D+2 so a transient fetch
-                # failure doesn't blow away still-valid cached data.
-                self._cached_forecasts_by_date[today] = dict(forecasts)
-                for delta, fc in ((1, fc_d1), (2, fc_d2)):
-                    if fc:
-                        self._cached_forecasts_by_date.setdefault(
-                            today + timedelta(days=delta), {},
-                        ).update(fc)
-                logger.info(
-                    "Forecast refresh: %d cities updated (%s)",
-                    len(forecasts),
-                    ", ".join(f"{c}: {f.predicted_high_f:.0f}°F" for c, f in forecasts.items()),
-                )
-            else:
+            # Review 🟡 #2: keep the by-date cache fresh so the 15-min
+            # TRIM in run_position_check reads same-day forecasts up to
+            # 15 min old (not up to 60 min from the last full cycle).
+            # Also refresh D+1/D+2 so held D+1 positions get fresh exit
+            # inputs when TRIM fires for them.
+            #
+            # 2026-04-28: city-local windowed fetch — see backfill helper.
+            by_date = await get_forecasts_for_city_local_window(city_configs, days=3)
+            if not by_date:
                 logger.warning("Forecast refresh: no forecasts returned")
+                return
+
+            # Replace today's entries outright (fresher is strictly better);
+            # merge-update D+1/D+2 so a transient fetch failure doesn't blow
+            # away still-valid cached data.  Today is the *city's* local
+            # today, computed per city — different cities can land on
+            # different keys here, which is the whole point of the FIX.
+            today_keys = {city_local_date(c, offset_days=0) for c in city_configs}
+            for d, city_map in by_date.items():
+                if d in today_keys:
+                    self._cached_forecasts_by_date[d] = dict(city_map)
+                else:
+                    self._cached_forecasts_by_date.setdefault(d, {}).update(city_map)
+
+            # Refresh by-name cache from each city's local-today entry.
+            today_by_name: dict[str, "Forecast"] = {}
+            for city in city_configs:
+                fc = by_date.get(city_local_date(city, offset_days=0), {}).get(city.name)
+                if fc is not None:
+                    today_by_name[city.name] = fc
+            self._cached_forecasts.update(today_by_name)
+
+            logger.info(
+                "Forecast refresh: %d cities updated (%s)",
+                len(today_by_name),
+                ", ".join(
+                    f"{c}: {f.predicted_high_f:.0f}°F"
+                    for c, f in today_by_name.items()
+                ),
+            )
         except Exception:
             logger.exception("Forecast refresh failed")
 
@@ -1358,53 +1361,52 @@ class Rebalancer:
         if clob_prices:
             logger.info("Refreshed %d slot prices from CLOB (TWAP-smoothed)", refreshed)
 
-        # 2. Fetch forecasts for all cities with active markets
+        # 2. Fetch forecasts for all cities with active markets.
+        # FIX-01 + 2026-04-28: city-local windowed fetch — each city's
+        # today/D+1/D+2 is keyed by that city's own local calendar.
+        # ``event.market_date`` (also city-local in discovery) is then a
+        # direct key into ``_cached_forecasts_by_date``.  Pre-fix this used
+        # UTC anchors and Bug #1 (Houston 2026-04-17) tripped during the
+        # 5-8 hour window each day when UTC and a city's local calendar
+        # disagreed.
         active_cities = {e.city for e in events}
         city_configs = [c for c in self._config.cities if c.name in active_cities]
         self._active_city_configs = city_configs  # save for refresh_metar
-        forecasts = await get_forecasts_batch(city_configs)
-        self._cached_forecasts.update(forecasts)  # keep cache fresh
-        logger.info("Fetched forecasts for %d cities", len(forecasts))
 
-        # FIX-01: fetch +1 / +2 day forecasts and route by event.market_date
-        # below.  Previously these were fetched for dashboard display only;
-        # the main evaluation loop fell back to today's forecast for
-        # tomorrow's events, producing Bug #1 (Houston 2026-04-17).
-        today = datetime.now(timezone.utc).date()
-        # Review H-4: return_exceptions=True so one day's failure doesn't
-        # drop the other.  Non-dict results are treated as empty.
-        fc_results = await asyncio.gather(
-            get_forecasts_batch(city_configs, today + timedelta(days=1)),
-            get_forecasts_batch(city_configs, today + timedelta(days=2)),
-            return_exceptions=True,
-        )
-        forecasts_d1 = fc_results[0] if isinstance(fc_results[0], dict) else {}
-        forecasts_d2 = fc_results[1] if isinstance(fc_results[1], dict) else {}
-        for label, r in (("D+1", fc_results[0]), ("D+2", fc_results[1])):
-            if isinstance(r, Exception):
-                logger.warning("Full cycle: %s forecast fetch failed — %s", label, r)
-        logger.info("Fetched +1/+2 day forecasts for trading + dashboard")
-
+        by_date = await get_forecasts_for_city_local_window(city_configs, days=3)
         # Rebuild the by-date cache on every full cycle so stale entries
         # from yesterday can't leak into today's D+1 routing.
-        self._cached_forecasts_by_date = {
-            today: dict(forecasts),
-            today + timedelta(days=1): dict(forecasts_d1),
-            today + timedelta(days=2): dict(forecasts_d2),
-        }
+        self._cached_forecasts_by_date = by_date
+
+        # By-name cache uses each city's local-today forecast.
+        today_by_name: dict[str, "Forecast"] = {}
+        for city in city_configs:
+            fc = by_date.get(city_local_date(city, offset_days=0), {}).get(city.name)
+            if fc is not None:
+                today_by_name[city.name] = fc
+        self._cached_forecasts.update(today_by_name)
+        logger.info(
+            "Fetched forecasts for %d cities (city-local today + D1/D2)",
+            len(today_by_name),
+        )
 
         # Save forecast state for dashboard (today + 2 days)
         self._last_forecasts = {}
-        for city, f in forecasts.items():
+        for city in city_configs:
+            fc_today = by_date.get(city_local_date(city, offset_days=0), {}).get(city.name)
+            if fc_today is None:
+                continue
             entry: dict = {
-                "high": f.predicted_high_f, "low": f.predicted_low_f,
-                "confidence": f.confidence_interval_f, "source": f.source,
+                "high": fc_today.predicted_high_f, "low": fc_today.predicted_low_f,
+                "confidence": fc_today.confidence_interval_f, "source": fc_today.source,
             }
-            if city in forecasts_d1:
-                entry["high_d1"] = forecasts_d1[city].predicted_high_f
-            if city in forecasts_d2:
-                entry["high_d2"] = forecasts_d2[city].predicted_high_f
-            self._last_forecasts[city] = entry
+            fc_d1 = by_date.get(city_local_date(city, offset_days=1), {}).get(city.name)
+            if fc_d1 is not None:
+                entry["high_d1"] = fc_d1.predicted_high_f
+            fc_d2 = by_date.get(city_local_date(city, offset_days=2), {}).get(city.name)
+            if fc_d2 is not None:
+                entry["high_d2"] = fc_d2.predicted_high_f
+            self._last_forecasts[city.name] = entry
 
         # 3. Fetch observations from settlement-consistent stations
         daily_maxes, city_observations = await self._fetch_observations(city_configs)

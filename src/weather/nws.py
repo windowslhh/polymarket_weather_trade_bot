@@ -46,19 +46,19 @@ async def _get_gridpoint_url(lat: float, lon: float, client: httpx.AsyncClient) 
 
 async def get_nws_forecast(
     city: CityConfig,
-    target_date: date | None = None,
+    target_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Fetch daily high temperature forecast from NWS.
 
     Returns None on failure (caller should fallback to Open-Meteo).
     """
-    # FIX (2026-04-28): default to UTC date, not server-local date.today().
-    # The rebalancer keys _cached_forecasts_by_date by UTC; mixing in a
-    # local-date forecast when system tz != UTC produced the
-    # "forecast.forecast_date != event.market_date" assertion in
-    # evaluate_exit_signals on dev (CST +0800) and any non-UTC host.
-    target = target_date or datetime.now(timezone.utc).date()
+    if target_date is None:
+        raise ValueError(
+            "target_date is required — pass city_local_date(city) so the cache "
+            "key aligns with event.market_date (which is also city-local)."
+        )
+    target = target_date
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=15, headers=NWS_HEADERS)
 
@@ -114,9 +114,11 @@ async def get_nws_forecast(
 
 async def get_nws_forecasts_batch(
     cities: list[CityConfig],
-    target_date: date | None = None,
+    target_date: date,
 ) -> dict[str, Forecast]:
     """Fetch NWS forecasts for multiple cities. Returns available forecasts."""
+    if target_date is None:
+        raise ValueError("target_date is required (use city_local_date)")
     import asyncio
 
     async with httpx.AsyncClient(timeout=15, headers=NWS_HEADERS) as client:

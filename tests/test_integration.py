@@ -365,21 +365,28 @@ class TestPortfolioIntegration:
             _make_market_event("New York", _make_slots_for_city(75.0)),
             _make_market_event("Dallas", _make_slots_for_city(88.0)),
         ]
-        forecasts = {
-            "New York": Forecast("New York", date.today(), 75.0, 60.0, 4.0, "mock", datetime.now(timezone.utc)),
-            "Dallas": Forecast("Dallas", date.today(), 88.0, 72.0, 4.0, "mock", datetime.now(timezone.utc)),
+        # _make_market_event sets market_date=date.today(); forecasts must
+        # land under the same key so _forecast_for_event resolves.  This
+        # matches the production lookup
+        # ``_cached_forecasts_by_date[event.market_date][event.city]``.
+        market_date = date.today()
+        by_date_window = {
+            market_date: {
+                "New York": Forecast("New York", market_date, 75.0, 60.0, 4.0, "mock", datetime.now(timezone.utc)),
+                "Dallas": Forecast("Dallas", market_date, 88.0, 72.0, 4.0, "mock", datetime.now(timezone.utc)),
+            },
         }
 
         rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker)
 
         with (
             patch("src.strategy.rebalancer.discover_weather_markets", new_callable=AsyncMock) as mock_discover,
-            patch("src.strategy.rebalancer.get_forecasts_batch", new_callable=AsyncMock) as mock_forecasts,
+            patch("src.strategy.rebalancer.get_forecasts_for_city_local_window", new_callable=AsyncMock) as mock_forecasts,
             patch("src.strategy.rebalancer.fetch_settlement_temp", new_callable=AsyncMock) as mock_settle,
             patch("src.strategy.rebalancer.validate_station_config", return_value=[]),
         ):
             mock_discover.return_value = events
-            mock_forecasts.return_value = forecasts
+            mock_forecasts.return_value = by_date_window
             mock_settle.return_value = None  # No observation data (just forecast-based trading)
 
             signals = await rebalancer.run()
