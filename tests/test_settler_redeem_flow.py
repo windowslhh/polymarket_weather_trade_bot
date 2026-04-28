@@ -81,13 +81,15 @@ class _FakeRedeemer:
 
     def __init__(self, redeem_results: list[RedeemResult]):
         self._queue = list(redeem_results)
-        self.calls: list[tuple[str, bool]] = []
+        self.calls: list[tuple[str, bool, str]] = []
 
     async def check_condition_resolved_async(self, cid: str):
         return True, "no"
 
-    async def redeem_position(self, condition_id: str, neg_risk: bool) -> RedeemResult:
-        self.calls.append((condition_id, neg_risk))
+    async def redeem_position(
+        self, condition_id: str, neg_risk: bool, token_id: str,
+    ) -> RedeemResult:
+        self.calls.append((condition_id, neg_risk, token_id))
         return self._queue.pop(0)
 
 
@@ -118,8 +120,10 @@ async def test_settler_invokes_redeemer_and_marks_settled():
                 store, redeemer=redeemer, alerter=None,
             )
 
-        # Redeemer was called with the row's condition_id + neg_risk flag.
-        assert redeemer.calls == [("0xredeemcid", True)]
+        # Redeemer was called with the row's condition_id + neg_risk
+        # + token_id (CLOB asset_id) so the new CLOB-API balance lookup
+        # has what it needs.
+        assert redeemer.calls == [("0xredeemcid", True, "tok_winner")]
 
         # Position now settled with redeem metadata.
         async with store.db.execute(

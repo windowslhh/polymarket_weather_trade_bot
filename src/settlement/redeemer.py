@@ -14,11 +14,22 @@ and submits.
 
 Hardenings vs. the trade-bot reference (``polymarket_trade_bot/src/client.py``):
 
-  a. **on-chain balance check** — read ``ConditionalTokens.balanceOf(funder,
-     positionId)`` first; redeem against the on-chain amount, never the
-     DB-recorded ``shares``.  Catches partial fills, manual redeems, and
-     stale state.  ``positionId`` is computed from ``conditionId + indexSet``
-     per the Gnosis docs (see ``compute_position_id`` below).
+  a. **CLOB balance check** — query the CLOB ``get_balance_allowance``
+     endpoint with ``AssetType.CONDITIONAL`` + ``token_id`` to read the
+     funder's NO share balance; redeem against that on-chain amount,
+     never the DB-recorded ``shares``.  Catches partial fills, manual
+     redeems, and stale state.
+
+     Why CLOB instead of ``ConditionalTokens.balanceOf``: negRisk markets
+     don't index ERC1155 balances under the standard CT positionId, so
+     the obvious ``compute_position_id(USDC, conditionId, NO_indexSet)``
+     path returns 0 for every negRisk position — which is what produced
+     the 2026-04-28 false-positive ``already_redeemed`` on Miami 88-89
+     and Chicago 66-67 (real on-chain balance was non-zero, USDC was
+     still recoverable, but the redeemer skipped the tx).  The CLOB API
+     resolves the right collateral / collection internally regardless of
+     negRisk flavor, and trade-bot has been using it in production for
+     months — see ``polymarket_trade_bot/src/client.py::get_conditional_balance``.
 
   b. **gas cap** — abort if estimated gas cost exceeds ``$0.50`` (default).
      Polygon gas spikes during congestion can wipe out ~$3 redemptions; an
@@ -212,11 +223,17 @@ class Redeemer:
         self,
         funder_address: str,
         private_key: str,
+        clob_client=None,
         polygon_rpc_urls: list[str] | None = None,
         gas_cap_usd: float = DEFAULT_GAS_CAP_USD,
     ) -> None:
         self._funder = funder_address
         self._private_key = private_key
+        # ClobClient wrapper (src.markets.clob_client.ClobClient) — we
+        # hop through it for the negRisk-aware CONDITIONAL balance check
+        # rather than calling ConditionalTokens.balanceOf directly.  See
+        # module docstring (a) for the rationale.  Tests inject a stub.
+        self._clob = clob_client
         self._rpcs = polygon_rpc_urls or _POLYGON_RPCS
         self._gas_cap_usd = gas_cap_usd
         self._w3 = None  # lazy
@@ -286,28 +303,43 @@ class Redeemer:
         ).call()
         return int(position_id)
 
-    def _on_chain_no_balance(self, condition_id: str, w3) -> int:
-        """Read funder's ERC1155 NO balance for ``condition_id``.
+    def _query_no_balance(self, token_id: str) -> int:
+        """Funder's NO share balance for a CLOB ``token_id``.
 
-        NegRiskAdapter splits map outcomes as YES=indexSet=1, NO=indexSet=2
-        on the underlying CT.  We sum the relevant balance using indexSet=2
-        (NO).  Returns 0 on any RPC failure — caller treats 0 as
-        ``no_balance`` (idempotent — never a false positive redemption).
+        Returns raw 6-decimals USDC equivalent (1 share == 1_000_000).
+        Routes through the injected ClobClient wrapper, which calls
+        ``get_balance_allowance(asset_type=CONDITIONAL, token_id=...)``.
+
+        See module docstring (a) for why this replaced the pre-2026-04-28
+        ConditionalTokens.balanceOf path: that path always returned 0 for
+        negRisk markets, producing false-positive ``already_redeemed`` on
+        Miami 88-89 + Chicago 66-67 with USDC still on chain.
+
+        Returns 0 if no clob_client was injected (test/paper paths) or on
+        any query failure — caller treats 0 as ``already_redeemed``,
+        idempotent: a transient CLOB outage skips this cycle and the next
+        cycle retries.  Worst case is a deferred redeem, never a wrong tx.
         """
+        if self._clob is None:
+            logger.warning(
+                "Redeemer: no clob_client injected — cannot query balance "
+                "for token=%s, returning 0 (defer)",
+                token_id[:16] + "...",
+            )
+            return 0
         try:
-            position_id = self.compute_position_id(
-                USDC_ADDRESS, condition_id, 2, w3,
+            # ClobClient.get_conditional_balance is async; we're inside a
+            # blocking _redeem_sync running in asyncio.to_thread, so we
+            # need a fresh event loop for the await.  asyncio.run() works
+            # because to_thread guarantees no loop is currently running
+            # in this thread.
+            return asyncio.run(
+                self._clob.get_conditional_balance(token_id),
             )
-            ct = w3.eth.contract(
-                address=w3.to_checksum_address(CT_ADDRESS),
-                abi=_CT_HELPER_ABI,
-            )
-            funder = w3.to_checksum_address(self._funder)
-            return int(ct.functions.balanceOf(funder, position_id).call())
         except Exception as exc:
             logger.warning(
-                "balanceOf lookup failed for cid=%s: %s — assuming 0",
-                condition_id[:16] + "...", exc,
+                "CLOB balance lookup failed for token=%s: %s — assuming 0",
+                token_id[:16] + "...", exc,
             )
             return 0
 
@@ -354,11 +386,17 @@ class Redeemer:
             )
         return target, calldata
 
-    def _redeem_sync(self, condition_id: str, neg_risk: bool) -> RedeemResult:
+    def _redeem_sync(
+        self, condition_id: str, neg_risk: bool, token_id: str,
+    ) -> RedeemResult:
         """Blocking redeem implementation; wrapped by ``redeem_position``.
 
         Pulled out as a method so async callers can ``asyncio.to_thread``
         without leaking tx-construction logic into the event loop.
+
+        ``token_id`` is the CLOB token id (a.k.a. ``asset_id``) of the NO
+        share — used by ``_query_no_balance`` to look up the funder's
+        on-chain balance via the CLOB API.
         """
         if not self._funder:
             return RedeemResult(status="no_funder", error="FUNDER_ADDRESS not set")
@@ -367,7 +405,7 @@ class Redeemer:
             from eth_account import Account
 
             w3 = self._get_w3()
-            no_balance = self._on_chain_no_balance(condition_id, w3)
+            no_balance = self._query_no_balance(token_id)
             if no_balance == 0:
                 # Idempotent: nothing to redeem.  Caller maps to success.
                 return RedeemResult(status="already_redeemed", redeemed_amount=0)
@@ -451,11 +489,15 @@ class Redeemer:
             return RedeemResult(status="rpc_error", error=str(exc))
 
     async def redeem_position(
-        self, condition_id: str, neg_risk: bool,
+        self, condition_id: str, neg_risk: bool, token_id: str,
     ) -> RedeemResult:
-        """Async wrapper — drives the sync impl in a thread."""
+        """Async wrapper — drives the sync impl in a thread.
+
+        ``token_id`` is the CLOB token id of the NO share (a.k.a.
+        ``asset_id``) and is required for the CLOB-API balance check.
+        """
         return await asyncio.to_thread(
-            self._redeem_sync, condition_id, neg_risk,
+            self._redeem_sync, condition_id, neg_risk, token_id,
         )
 
     def check_condition_resolved(self, condition_id: str) -> tuple[bool, str | None]:

@@ -16,6 +16,13 @@ got wrong for weather:
      row before invoking us; the redeemer itself is single-shot.  A
      happy-path test confirms tx_hash flows back to the result.
 
+  4. CLOB-API balance path (added 2026-04-28) — the original
+     ``ConditionalTokens.balanceOf`` lookup returned 0 for negRisk
+     markets and produced a false-positive ``already_redeemed`` on
+     Miami 88-89 + Chicago 66-67.  The new path queries
+     ``ClobClient.get_conditional_balance(token_id)`` instead and is
+     covered by ``test_clob_balance_*`` below.
+
 The web3 layer is mocked end-to-end so this suite never makes a real
 RPC call (deterministic + offline).
 """
@@ -31,6 +38,25 @@ from src.settlement.redeemer import (
     RedeemResult,
     USDC_ADDRESS,
 )
+
+
+class _FakeClob:
+    """Stand-in for ``src.markets.clob_client.ClobClient`` with the single
+    method the Redeemer needs.  ``balance`` is the raw 6-decimals NO
+    balance to return; if ``raise_exc`` is set, ``get_conditional_balance``
+    raises it instead.
+    """
+
+    def __init__(self, balance: int = 0, raise_exc: Exception | None = None):
+        self._balance = balance
+        self._raise = raise_exc
+        self.calls: list[str] = []
+
+    async def get_conditional_balance(self, token_id: str) -> int:
+        self.calls.append(token_id)
+        if self._raise is not None:
+            raise self._raise
+        return self._balance
 
 
 # ── Fake w3 plumbing ──────────────────────────────────────────────────
@@ -128,6 +154,7 @@ def test_neg_risk_amounts_order_no_first_zero():
     r = Redeemer(
         funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
         private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=10_000_000),
     )
 
     class _Sig:
@@ -144,6 +171,7 @@ def test_neg_risk_amounts_order_no_first_zero():
         result = r._redeem_sync(
             condition_id="0x" + "ab" * 32,
             neg_risk=True,
+            token_id="tok_no",
         )
 
     assert result.status == "success", f"unexpected status: {result}"
@@ -177,6 +205,7 @@ def test_tx_hash_with_leading_zero_nibble_preserved():
     r = Redeemer(
         funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
         private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=10_000_000),
     )
 
     class _Sig:
@@ -193,6 +222,7 @@ def test_tx_hash_with_leading_zero_nibble_preserved():
         result = r._redeem_sync(
             condition_id="0x" + "ab" * 32,
             neg_risk=True,
+            token_id="tok_no",
         )
 
     assert result.status == "success", f"unexpected status: {result}"
@@ -216,6 +246,7 @@ def test_gas_cap_defers_when_too_expensive():
     r = Redeemer(
         funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
         private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=5_000_000),
         gas_cap_usd=0.0001,  # absurdly tight cap → always defer
     )
 
@@ -223,6 +254,7 @@ def test_gas_cap_defers_when_too_expensive():
         result = r._redeem_sync(
             condition_id="0x" + "ab" * 32,
             neg_risk=True,
+            token_id="tok_no",
         )
 
     assert result.status == "gas_too_high"
@@ -230,18 +262,20 @@ def test_gas_cap_defers_when_too_expensive():
 
 
 def test_no_balance_returns_already_redeemed():
-    """On-chain ``balanceOf`` returns 0 → idempotent skip.  No tx is sent."""
+    """CLOB ``get_conditional_balance`` returns 0 → idempotent skip.  No tx is sent."""
     fake_w3 = _make_fake_w3(no_balance=0)
 
     r = Redeemer(
         funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
         private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=0),
     )
 
     with patch.object(r, "_get_w3", return_value=fake_w3):
         result = r._redeem_sync(
             condition_id="0x" + "ab" * 32,
             neg_risk=True,
+            token_id="tok_no",
         )
 
     assert result.status == "already_redeemed"
@@ -251,9 +285,12 @@ def test_no_balance_returns_already_redeemed():
 
 
 def test_no_funder_returns_no_funder_status():
-    r = Redeemer(funder_address="", private_key="0x" + "11" * 32)
+    r = Redeemer(
+        funder_address="", private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=10_000_000),
+    )
     result = r._redeem_sync(
-        condition_id="0x" + "ab" * 32, neg_risk=True,
+        condition_id="0x" + "ab" * 32, neg_risk=True, token_id="tok_no",
     )
     assert result.status == "no_funder"
     assert result.error and "FUNDER_ADDRESS" in result.error
@@ -266,6 +303,7 @@ def test_tx_revert_returns_tx_reverted():
     r = Redeemer(
         funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
         private_key="0x" + "11" * 32,
+        clob_client=_FakeClob(balance=5_000_000),
     )
 
     class _Sig:
@@ -280,7 +318,7 @@ def test_tx_revert_returns_tx_reverted():
          patch("eth_account.Account.from_key", return_value=MagicMock(address="0xsigner")), \
          patch("eth_account.Account.unsafe_sign_hash", return_value=_Sig()):
         result = r._redeem_sync(
-            condition_id="0x" + "ab" * 32, neg_risk=True,
+            condition_id="0x" + "ab" * 32, neg_risk=True, token_id="tok_no",
         )
 
     assert result.status == "tx_reverted"
@@ -313,6 +351,105 @@ def test_check_condition_resolved_returns_winner_yes_no():
         is_resolved, winner = r.check_condition_resolved("0x" + "ab" * 32)
     assert is_resolved is True
     assert winner == "no"
+
+
+def test_clob_balance_path_used_not_balanceof():
+    """Regression for 2026-04-28: the redeemer must source the NO balance
+    from ``ClobClient.get_conditional_balance(token_id)`` — *not* from
+    ``ConditionalTokens.balanceOf(funder, positionId)``.  The pre-fix path
+    returned 0 for negRisk markets and falsely marked Miami 88-89 +
+    Chicago 66-67 ``already_redeemed``.
+
+    We assert the fake CLOB was called with the right token_id and that
+    the redeemer used the CLOB's balance (not whatever w3.balanceOf
+    might have returned) when assembling the calldata.
+    """
+    captured: dict = {}
+    # _make_fake_w3 wires balanceOf to a default 5_000_000 — if the
+    # redeemer regresses to using it, the calldata would reflect 5M
+    # instead of the CLOB's 7M.
+    fake_w3 = _make_fake_w3(no_balance=5_000_000, captured=captured)
+    clob = _FakeClob(balance=7_000_000)
+
+    r = Redeemer(
+        funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
+        private_key="0x" + "11" * 32,
+        clob_client=clob,
+    )
+
+    class _Sig:
+        class _IntLike:
+            def to_bytes(self, n, byteorder):
+                return b"\x00" * n
+        r = _IntLike()
+        s = _IntLike()
+        v = 27
+
+    with patch.object(r, "_get_w3", return_value=fake_w3), \
+         patch("eth_account.Account.from_key", return_value=MagicMock(address="0xsigner")), \
+         patch("eth_account.Account.unsafe_sign_hash", return_value=_Sig()):
+        result = r._redeem_sync(
+            condition_id="0x" + "ab" * 32, neg_risk=True,
+            token_id="my_no_token_42",
+        )
+
+    assert result.status == "success"
+    assert result.redeemed_amount == 7_000_000
+    # CLOB was queried with the supplied token_id, not the condition_id.
+    assert clob.calls == ["my_no_token_42"]
+    # Calldata reflects the CLOB-sourced balance.
+    _, args = captured["last_encode_abi_call"]
+    _cid_bytes, amounts = args
+    assert amounts == [0, 7_000_000]
+
+
+def test_clob_balance_exception_treated_as_zero_no_tx():
+    """If the CLOB raises (timeout / network), we must NOT fire a
+    redeem against an unknown balance.  Treat as ``already_redeemed``
+    (idempotent skip) — next cycle retries.
+    """
+    fake_w3 = _make_fake_w3()
+    clob = _FakeClob(raise_exc=RuntimeError("clob timeout"))
+
+    r = Redeemer(
+        funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
+        private_key="0x" + "11" * 32,
+        clob_client=clob,
+    )
+
+    with patch.object(r, "_get_w3", return_value=fake_w3):
+        result = r._redeem_sync(
+            condition_id="0x" + "ab" * 32, neg_risk=True,
+            token_id="tok_no",
+        )
+
+    assert result.status == "already_redeemed"
+    assert result.redeemed_amount == 0
+    fake_w3.eth.send_raw_transaction.assert_not_called()
+
+
+def test_no_clob_client_treated_as_zero_balance():
+    """Defensive: the live wiring always injects a ClobClient; if a future
+    refactor forgets to pass it, the redeemer must NOT fall back to a
+    false-positive redemption.  Returning 0 → ``already_redeemed`` is the
+    safe default; an alert / manual check will surface the misconfig.
+    """
+    fake_w3 = _make_fake_w3()
+
+    r = Redeemer(
+        funder_address="0xfffffffffffffffffffffffffffffffffffffffe",
+        private_key="0x" + "11" * 32,
+        clob_client=None,
+    )
+
+    with patch.object(r, "_get_w3", return_value=fake_w3):
+        result = r._redeem_sync(
+            condition_id="0x" + "ab" * 32, neg_risk=True,
+            token_id="tok_no",
+        )
+
+    assert result.status == "already_redeemed"
+    fake_w3.eth.send_raw_transaction.assert_not_called()
 
 
 def test_check_condition_resolved_pending_returns_false():

@@ -293,7 +293,14 @@ async def _settle_winner(
         return False
 
     neg_risk = bool(position.get("neg_risk", 0))
-    result = await redeemer.redeem_position(cid, neg_risk)
+    # The redeemer needs the NO token_id for its CLOB-API balance check
+    # (negRisk shares aren't indexed under the standard ConditionalTokens
+    # positionId, so the previous balanceOf path returned 0 — see
+    # redeemer.py module docstring).  positions.token_id is the CLOB
+    # asset_id we bought; it's the right input.
+    result = await redeemer.redeem_position(
+        cid, neg_risk, token_id=position["token_id"],
+    )
 
     if result.status in ("success", "already_redeemed"):
         tx_hash = result.tx_hash or "already_redeemed"

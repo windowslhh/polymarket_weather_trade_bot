@@ -215,6 +215,43 @@ class ClobClient:
             logger.exception("Failed to get midpoint for %s", token_id)
             return None
 
+    async def get_conditional_balance(self, token_id: str) -> int:
+        """Funder's on-chain ERC1155 balance for a CLOB ``token_id``.
+
+        Returns raw 6-decimals USDC equivalent (1 share == 1_000_000).
+        Mirrors ``polymarket_trade_bot.client.get_conditional_balance``:
+        bypasses ConditionalTokens ``positionId`` encoding (which differs
+        for negRisk markets — direct ``balanceOf`` on the standard CT
+        with USDC as collateral always returns 0 for negRisk shares,
+        which is what produced the false ``already_redeemed`` on the
+        2026-04-28 Miami / Chicago redemptions).  The CLOB API knows how
+        to look up balances per token_id regardless of negRisk flavor.
+
+        Returns 0 on any failure — caller treats 0 as "nothing to redeem"
+        idempotently (worst case: defer one cycle and retry).
+        """
+        client = self._get_client()
+        try:
+            from py_clob_client_v2.clob_types import (
+                AssetType, BalanceAllowanceParams,
+            )
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+            )
+            result = await asyncio.to_thread(
+                client.get_balance_allowance, params,
+            )
+            if not isinstance(result, dict):
+                return 0
+            return int(result.get("balance", 0))
+        except Exception:
+            logger.exception(
+                "get_conditional_balance failed for token=%s",
+                token_id[:16] + "...",
+            )
+            return 0
+
     async def place_limit_order(
         self,
         token_id: str,

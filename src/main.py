@@ -246,6 +246,7 @@ async def run(args: argparse.Namespace) -> None:
             redeemer = Redeemer(
                 funder_address=config.funder_address,
                 private_key=config.eth_private_key,
+                clob_client=clob,
             )
             logger.info(
                 "Redeemer initialized (funder=%s)",
