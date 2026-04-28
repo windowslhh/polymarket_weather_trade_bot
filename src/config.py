@@ -29,18 +29,22 @@ class StrategyConfig:
     min_no_ev: float = 0.03
     max_position_per_slot_usd: float = 5.0
     max_exposure_per_city_usd: float = 50.0
-    max_total_exposure_usd: float = 1000.0
-    # Phase A (2026-04-26): B-only after C / D' retired.  Held at 75
-    # rather than rolled back to 50: B alone runs kelly=0.5 forecast
-    # entries plus full-Kelly locked wins across 30 cities, and an
-    # adverse weather streak (multiple cities flipping against held NO
-    # positions in the same UTC day) can plausibly accumulate ~$50 of
-    # MTM/realized drawdown.  A tighter cap risks halting trading
-    # prematurely on noise — the $75 ceiling is 37.5% of the $200 live
-    # capital, deep enough that hitting it actually means something is
-    # wrong.  See docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md
-    # for fee-floor reasoning.
-    daily_loss_limit_usd: float = 75.0
+    # 2026-04-28: dropped 1000 → 200 to match the live wallet's actual
+    # capital pool.  Kelly sizing already keeps per-position USD small
+    # ($1-10), so the practical effect is letting the global ceiling
+    # bind on real aggregate exposure instead of a 5× notional capacity
+    # that never existed.
+    max_total_exposure_usd: float = 200.0
+    # 2026-04-28: tightened 75 → 50 to align with the $200 live wallet
+    # (max_total_exposure dropped 1000 → 200 in the same change).  $50
+    # is a 25% drawdown — still wide enough to absorb an adverse
+    # weather streak across 30 cities of kelly=0.5 forecast entries +
+    # full-Kelly locked wins, but tight enough that hitting it actually
+    # means something is wrong.  Prior 75 was sized against a notional
+    # $200 cap that wasn't enforced.  See
+    # docs/fixes/2026-04-17-lockedwin-price-cap-rollback.md for
+    # fee-floor reasoning.
+    daily_loss_limit_usd: float = 50.0
     kelly_fraction: float = 0.5
     min_market_volume: float = 500.0
     max_slot_spread: float = 0.15
@@ -232,17 +236,25 @@ def get_strategy_variants() -> dict[str, dict]:
             "kelly_fraction": 0.5,
             "max_positions_per_event": 4,
             "min_no_ev": 0.05,
-            "max_position_per_slot_usd": 5.0,
-            # 2026-04-28: D running solo (B/C disabled); restored to $50/city
-            # so the variant has room to compound across the day instead of
-            # being capped at 2 entries.  Global $1000 ceiling and the $75
-            # daily-loss breaker remain in force.
+            # 2026-04-28 micro-tune: bumped 5 → 10 so half-Kelly sizing
+            # at typical NO prices (0.5–0.8) clears Polymarket's hard
+            # 5-share minimum (min_order_size_shares=5.0).  At $5/slot,
+            # Kelly was producing 4.0–4.3 shares — every signal tripped
+            # SIZE_BELOW_MIN_SHARES and the bot went ~10h without an
+            # entry.  Cumulative exposure still bounded by
+            # max_total_exposure_usd=200; full-Kelly locked wins remain
+            # capped at max_locked_win_per_slot_usd=10.
+            "max_position_per_slot_usd": 10.0,
+            # 2026-04-28: D running solo (B/C disabled); $50/city so the
+            # variant has room to compound across the day instead of being
+            # capped at 2 entries.  Global $200 exposure ceiling and the
+            # $50 daily-loss breaker remain in force.
             "max_exposure_per_city_usd": 50.0,
             "locked_win_kelly_fraction": 1.0,
             "max_locked_win_per_slot_usd": 10.0,
             "_meta": {
                 "label": "D (Aggressive)",
-                "description": "max_no_price=0.80 — control group, +10pt cap",
+                "description": "max_no_price=0.80, slot $10 — clears 5-share min",
                 "color": "#ef4444",     # red-500
                 "tag_class": "tag-danger",
             },
