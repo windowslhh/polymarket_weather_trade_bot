@@ -92,7 +92,7 @@ async def test_batch_uses_ensemble():
         "icon": [74.0, 77.0],
     })
     with patch("src.weather.forecast.fetch_with_retry", return_value=resp):
-        results = await get_forecasts_batch([_city()])
+        results = await get_forecasts_batch([_city()], date(2026, 4, 5))
 
     assert "TestCity" in results
     assert results["TestCity"].model_count == 2

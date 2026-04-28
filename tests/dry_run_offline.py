@@ -242,14 +242,20 @@ async def run_dry_run():
             return generate_observation(city_cfg)
         return None
 
+    # 2026-04-28: rebalancer now consumes get_forecasts_for_city_local_window
+    # which returns ``dict[date, dict[city_name, Forecast]]`` keyed by each
+    # city's local calendar date.  The mocked events use ``market_date=date.today()``
+    # uniformly so a single date key is sufficient.
+    forecasts_by_date = {date.today(): forecasts}
+
     with (
         patch("src.strategy.rebalancer.discover_weather_markets", new_callable=AsyncMock) as mock_disc,
-        patch("src.strategy.rebalancer.get_forecasts_batch", new_callable=AsyncMock) as mock_fc,
+        patch("src.strategy.rebalancer.get_forecasts_for_city_local_window", new_callable=AsyncMock) as mock_fc,
         patch("src.strategy.rebalancer.fetch_settlement_temp", side_effect=mock_fetch_settlement),
         patch("src.strategy.rebalancer.validate_station_config", return_value=[]),
     ):
         mock_disc.return_value = events
-        mock_fc.return_value = forecasts
+        mock_fc.return_value = forecasts_by_date
 
         # Run the full rebalancer cycle
         signals = await rebalancer.run()

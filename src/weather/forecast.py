@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -59,12 +60,16 @@ def _get_cached_forecast(city_name: str) -> Forecast | None:
 
 async def get_ensemble_forecast(
     city: CityConfig,
-    target_date: date | None = None,
+    target_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get ensemble forecast from Open-Meteo (GFS + ICON + ECMWF)."""
-    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
-    target = target_date or datetime.now(timezone.utc).date()
+    if target_date is None:
+        raise ValueError(
+            "target_date is required — pass city_local_date(city) for the "
+            "city-local 'today' rather than relying on a global default."
+        )
+    target = target_date
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -141,12 +146,16 @@ async def get_ensemble_forecast(
 
 async def get_single_forecast(
     city: CityConfig,
-    target_date: date | None = None,
+    target_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> Forecast | None:
     """Get single-model Open-Meteo forecast (last resort fallback)."""
-    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
-    target = target_date or datetime.now(timezone.utc).date()
+    if target_date is None:
+        raise ValueError(
+            "target_date is required — pass city_local_date(city) for the "
+            "city-local 'today' rather than relying on a global default."
+        )
+    target = target_date
     params = {
         "latitude": city.lat,
         "longitude": city.lon,
@@ -181,7 +190,7 @@ async def get_single_forecast(
 
 async def get_forecast(
     city: CityConfig,
-    target_date: date | None = None,
+    target_date: date,
     client: httpx.AsyncClient | None = None,
 ) -> Forecast:
     """Multi-source forecast with priority chain: NWS → Ensemble → Single → Cache.
@@ -191,8 +200,12 @@ async def get_forecast(
     - Ensemble mean: 50% weight (multi-model consensus)
     - Confidence = ensemble std (data-driven uncertainty)
     """
-    # FIX (2026-04-28): UTC default — see nws.get_nws_forecast for context.
-    target = target_date or datetime.now(timezone.utc).date()
+    if target_date is None:
+        raise ValueError(
+            "target_date is required — pass city_local_date(city) for the "
+            "city-local 'today' rather than relying on a global default."
+        )
+    target = target_date
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
 
@@ -268,9 +281,21 @@ async def get_forecast(
 
 async def get_forecasts_batch(
     cities: list[CityConfig],
-    target_date: date | None = None,
+    target_date: date,
 ) -> dict[str, Forecast]:
-    """Fetch multi-source forecasts for all cities concurrently."""
+    """Fetch multi-source forecasts for all cities concurrently for a single
+    explicit target_date.
+
+    Note: callers that want today/D+1/D+2 across cities in different time
+    zones should use ``get_forecasts_for_city_local_window`` instead — this
+    helper anchors all cities to one shared date, which only makes sense
+    when the caller has already resolved the per-city local calendar.
+    """
+    if target_date is None:
+        raise ValueError(
+            "target_date is required — use get_forecasts_for_city_local_window "
+            "for the cross-city today/D+1/D+2 sweep instead of relying on a default."
+        )
     import asyncio
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -284,3 +309,90 @@ async def get_forecasts_batch(
         else:
             forecasts[city.name] = result
     return forecasts
+
+
+# ──────────────────────────────────────────────────────────────────────
+# City-local forecast indexing (2026-04-28)
+#
+# The rebalancer keys ``_cached_forecasts_by_date`` by ``event.market_date``
+# which is itself constructed in city-local time over in markets/discovery.
+# Anchoring forecast fetches by UTC date opens a 5-8 hour window each day
+# where west-coast cities have already rolled their local calendar but
+# UTC has not (or vice versa); the lookup
+# ``cache[event.market_date][city]`` then misses, the rebalancer falls
+# back to a stale by-name forecast whose ``forecast_date`` no longer
+# matches the event, and the FIX-22 invariant in
+# ``evaluator.evaluate_exit_signals`` raises AssertionError, taking out
+# the 15-min position-check (TRIM/EXIT) safety net for the duration of
+# the window.  ``city_local_date`` and
+# ``get_forecasts_for_city_local_window`` close the race by fetching
+# each city's forecast under that city's *own* local date keys.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def city_local_date(city: CityConfig, *, offset_days: int = 0) -> date:
+    """Return the city's local calendar date, optionally offset by N days.
+
+    Falls back to UTC with a warning if ``city.tz`` is empty or not a
+    valid IANA timezone — the caller still gets *a* date, but the
+    operator gets a loud signal that a misconfigured city is silently
+    drifting back to the old UTC-anchored behaviour.  Discovery uses
+    the same fallback, so a city with broken tz at least stays
+    self-consistent (cache key matches market_date).
+    """
+    if not city.tz:
+        logger.warning(
+            "city_local_date: city=%s has no tz, falling back to UTC", city.name,
+        )
+        return (datetime.now(timezone.utc) + timedelta(days=offset_days)).date()
+    try:
+        tz = ZoneInfo(city.tz)
+    except Exception as exc:  # ZoneInfoNotFoundError + ValueError
+        logger.warning(
+            "city_local_date: city=%s tz=%r invalid (%s), falling back to UTC",
+            city.name, city.tz, exc,
+        )
+        return (datetime.now(timezone.utc) + timedelta(days=offset_days)).date()
+    return (datetime.now(tz) + timedelta(days=offset_days)).date()
+
+
+async def get_forecasts_for_city_local_window(
+    cities: list[CityConfig],
+    *,
+    days: int = 3,
+) -> dict[date, dict[str, Forecast]]:
+    """Fetch forecasts across each city's *own* local today / D+1 / ... / D+(days-1).
+
+    Returns a ``{date: {city_name: Forecast}}`` cache.  Cities in
+    different time zones contribute to different sets of date keys:
+    a NYC event with ``market_date=2026-04-25`` finds its forecast
+    under ``cache[2026-04-25]["New York"]`` even when the bot's UTC
+    clock has already rolled to 2026-04-26 and an LA event for the
+    same UTC instant still resolves to ``market_date=2026-04-25``.
+
+    Failures for individual (city, date) pairs are logged and skipped
+    so callers can still trade for the cities that succeeded.
+    """
+    import asyncio
+
+    if not cities or days <= 0:
+        return {}
+
+    plan: list[tuple[CityConfig, date]] = []
+    for city in cities:
+        for i in range(days):
+            plan.append((city, city_local_date(city, offset_days=i)))
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        tasks = [get_forecast(city, target, client) for city, target in plan]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    out: dict[date, dict[str, Forecast]] = {}
+    for (city, target), result in zip(plan, results):
+        if isinstance(result, Exception):
+            logger.warning(
+                "Forecast failed for %s on %s: %s", city.name, target, result,
+            )
+            continue
+        out.setdefault(target, {})[city.name] = result
+    return out
