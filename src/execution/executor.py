@@ -136,17 +136,18 @@ class Executor:
             # size_usd for logging: approximate current market value
             size_usd = shares * price
 
-            # Polymarket min-order gate (2026-04-28).  A SELL of 4 shares
-            # would be 400'd by the CLOB; better to skip and let the
-            # settler clean up at resolution than wedge the alert channel.
+            # Polymarket min-order gate (2026-04-29).  Q1's GTC→FAK
+            # cutover changed SELL to taker semantics: the 5-share floor
+            # is GTC-only, FAK uses the $1 notional minimum instead.
+            # Keeping the share gate would permanently block legitimate
+            # stop-loss exits of sub-5-share positions; if Polymarket
+            # still 400's at the new minimum, the existing exception
+            # path handles it cleanly.
             strat_cfg = getattr(
                 getattr(self._clob, "_config", None), "strategy", None,
             )
-            min_shares = getattr(strat_cfg, "min_order_size_shares", 0.0)
             min_amount = getattr(strat_cfg, "min_order_amount_usd", 0.0)
-            if isinstance(min_shares, (int, float)) and shares < min_shares:
-                reason_code = "SIZE_BELOW_MIN_SHARES"
-            elif isinstance(min_amount, (int, float)) and size_usd < min_amount:
+            if isinstance(min_amount, (int, float)) and size_usd < min_amount:
                 reason_code = "AMOUNT_BELOW_MIN_USD"
             else:
                 reason_code = None
