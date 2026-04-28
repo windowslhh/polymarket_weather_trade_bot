@@ -81,6 +81,91 @@ async def _fetch_one_batch(
     return out
 
 
+async def _fetch_one_batch_full(
+    client: httpx.AsyncClient, batch: list[str], batch_idx: int,
+) -> dict[str, dict]:
+    """Same as ``_fetch_one_batch`` but returns the full per-market dict.
+
+    Used by ``refresh_gamma_market_data`` when the caller needs the
+    market's lifecycle fields (``closed`` / ``outcomePrices``) to
+    classify state, not just the cached price.
+
+    Maps the per-market dict against EVERY token_id it carries (YES + NO)
+    so the caller can look up by either side without reconstructing the
+    relationship.
+    """
+    out: dict[str, dict] = {}
+    try:
+        resp = await client.get(
+            _GAMMA_MARKETS_URL,
+            params=[("clob_token_ids", tid) for tid in batch],
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        logger.warning(
+            "Gamma market-data batch fetch failed (batch %d, %d tokens)",
+            batch_idx, len(batch), exc_info=True,
+        )
+        return out
+    if not isinstance(data, list):
+        return out
+    for mkt in data:
+        toks = mkt.get("clobTokenIds", [])
+        if isinstance(toks, str):
+            try:
+                toks = json.loads(toks)
+            except Exception:
+                toks = []
+        for tid in toks:
+            if tid:
+                out[tid] = mkt
+    return out
+
+
+async def refresh_gamma_market_data(
+    token_ids: Iterable[str],
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> dict[str, dict]:
+    """Batch-fetch full per-market dicts from Gamma, keyed by token_id.
+
+    Companion to ``refresh_gamma_prices_only``: same network shape,
+    same partial-failure semantics (per-batch errors logged, gather
+    continues).  Returns the raw per-market dict including ``closed``,
+    ``outcomePrices``, ``conditionId`` so callers can run lifecycle
+    classification (see ``src/strategy/market_state.py``).
+
+    Both YES and NO token_ids of a market map to the same dict.
+    """
+    tokens = list({tid: None for tid in token_ids})
+    out: dict[str, dict] = {}
+    if not tokens:
+        return out
+    batches = [
+        tokens[i:i + batch_size]
+        for i in range(0, len(tokens), batch_size)
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            results = await asyncio.gather(
+                *(_fetch_one_batch_full(client, b, idx) for idx, b in enumerate(batches)),
+                return_exceptions=True,
+            )
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Gamma market-data gather caught: %r", r)
+                continue
+            out.update(r)
+    except Exception:
+        logger.warning(
+            "Gamma market-data refresh failed at the client level; returning %d "
+            "tokens already collected", len(out), exc_info=True,
+        )
+    return out
+
+
 async def refresh_gamma_prices_only(
     token_ids: Iterable[str],
     *,

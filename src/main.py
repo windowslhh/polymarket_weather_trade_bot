@@ -233,7 +233,35 @@ async def run(args: argparse.Namespace) -> None:
     portfolio = PortfolioTracker(store)
     executor = Executor(clob, portfolio)
     max_tracker = DailyMaxTracker()
-    rebalancer = Rebalancer(config, clob, portfolio, executor, max_tracker, error_dists)
+
+    # Redeemer is only meaningful in live mode (paper/dry-run skip the
+    # on-chain call entirely).  Build it once here so the settler can
+    # pull it from rebalancer; falls through to None if FUNDER_ADDRESS
+    # is missing — the settler logs and the dashboard still records
+    # settlement P&L, just without the Safe execTransaction.
+    redeemer = None
+    if not config.dry_run and not config.paper:
+        if config.funder_address and config.eth_private_key:
+            from src.settlement.redeemer import Redeemer
+            redeemer = Redeemer(
+                funder_address=config.funder_address,
+                private_key=config.eth_private_key,
+            )
+            logger.info(
+                "Redeemer initialized (funder=%s)",
+                config.funder_address[:10] + "..." + config.funder_address[-6:],
+            )
+        else:
+            logger.warning(
+                "Redeemer not initialized: live mode but FUNDER_ADDRESS or "
+                "ETH_PRIVATE_KEY missing — winners will mark settled in DB "
+                "but require manual on-chain redeem.",
+            )
+
+    rebalancer = Rebalancer(
+        config, clob, portfolio, executor, max_tracker, error_dists,
+        redeemer=redeemer,
+    )
 
     # FIX-08: restore persistent exit cooldowns before trading starts.
     # Without this, a crash inside a cooldown window would reset the

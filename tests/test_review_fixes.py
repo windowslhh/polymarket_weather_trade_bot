@@ -377,9 +377,13 @@ class TestSizingNetOdds:
         """Sizing produces correct result with standard pricing."""
         event = _make_event()
         slot = _make_slot(price_no=0.90)
+        # Phase 5: this fixture intentionally produces ~1.25 USD / 1.4
+        # shares to exercise the Kelly math; disable the min-order floor
+        # so the math result is what's under test.
         cfg = StrategyConfig(
             kelly_fraction=0.5, max_position_per_slot_usd=5.0,
             max_exposure_per_city_usd=50.0, max_total_exposure_usd=500.0,
+            min_order_size_shares=0.0, min_order_amount_usd=0.0,
         )
         sig = TradeSignal(
             TokenType.NO, Side.BUY, slot, event,

@@ -84,4 +84,23 @@ def compute_size(
     if size_usd < 0.10:
         return 0.0
 
-    return round(size_usd, 2)
+    # Polymarket CLOB rejects orders below 5 shares OR $1 notional (2026-04-28).
+    # Pre-compute the would-be share count from the *rounded* USD size so the
+    # gate matches what the executor will actually submit — otherwise a 4.99
+    # share signal could squeak past sizing and be 400'd by Polymarket.
+    rounded = round(size_usd, 2)
+    shares = rounded / price if price > 0 else 0.0
+    if shares < config.min_order_size_shares:
+        logger.info(
+            "Sizing skip [SIZE_BELOW_MIN_SHARES]: %.4f shares < min %.2f (size=$%.2f, price=%.4f)",
+            shares, config.min_order_size_shares, rounded, price,
+        )
+        return 0.0
+    if rounded < config.min_order_amount_usd:
+        logger.info(
+            "Sizing skip [AMOUNT_BELOW_MIN_USD]: $%.4f < min $%.2f (shares=%.2f, price=%.4f)",
+            rounded, config.min_order_amount_usd, shares, price,
+        )
+        return 0.0
+
+    return rounded

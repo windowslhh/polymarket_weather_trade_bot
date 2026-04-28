@@ -22,6 +22,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "flask>=3.0.0",
+    # web3 for on-chain settlement redemption (NegRiskAdapter / ConditionalTokens).
+    # Used by ``src/settlement/redeemer.py`` to convert settled NO shares back
+    # into USDC via Gnosis Safe execTransaction; py-clob-client doesn't expose
+    # redeemPositions itself.  See ``src/settlement/redeemer.py``.
+    "web3>=6.0.0",
 ]
 
 [project.optional-dependencies]

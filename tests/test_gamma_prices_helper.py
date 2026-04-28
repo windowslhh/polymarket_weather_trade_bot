@@ -252,6 +252,10 @@ def test_module_constants_sane():
                 "logging", "json", "httpx",
                 # cycle-fix-9: parallel-batch implementation pulled in
                 # ``asyncio`` and ``Iterable`` from typing.
-                "asyncio", "Iterable"}
+                "asyncio", "Iterable",
+                # Phase 4 (2026-04-28): full per-market data fetcher used
+                # by the position-check market-state classifier.  Sibling
+                # to ``refresh_gamma_prices_only``.
+                "refresh_gamma_market_data"}
     unexpected = set(public) - expected
     assert not unexpected, f"unexpected public names: {unexpected}"

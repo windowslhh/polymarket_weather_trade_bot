@@ -22,7 +22,8 @@ from src.config import (
 from src.execution.executor import Executor
 from src.markets.clob_client import ClobClient
 from src.markets.discovery import discover_weather_markets, _parse_temp_bounds
-from src.markets.gamma_prices import refresh_gamma_prices_only
+from src.markets.gamma_prices import refresh_gamma_market_data, refresh_gamma_prices_only
+from src.strategy.market_state import MarketState, classify_market
 from src.markets.models import TempSlot, TradeSignal, WeatherMarketEvent
 from src.markets.price_buffer import PriceBuffer
 from src.portfolio.tracker import PortfolioTracker
@@ -80,11 +81,16 @@ class Rebalancer:
         executor: Executor,
         max_tracker: DailyMaxTracker | None = None,
         error_distributions: dict[str, ForecastErrorDistribution] | None = None,
+        redeemer: "Redeemer | None" = None,  # noqa: F821 (forward ref to type)
     ) -> None:
         self._config = config
         self._clob = clob
         self._portfolio = portfolio
         self._executor = executor
+        # Redeemer is optional — paper / dry-run / startup-without-wallet
+        # leave it None and the settler skips the on-chain call (still
+        # writes settlement P&L to the DB).
+        self._redeemer = redeemer
         self._max_tracker = max_tracker or DailyMaxTracker()
         # Register local timezones so DailyMaxTracker groups by local date
         # Also build city_name → ZoneInfo map for post-peak evaluator logic
@@ -472,7 +478,11 @@ class Rebalancer:
     async def run_settlement_only(self) -> None:
         """Lightweight settlement check — runs every 15 min, no trading."""
         try:
-            settlement_results = await check_settlements(self._portfolio.store)
+            settlement_results = await check_settlements(
+                self._portfolio.store,
+                redeemer=self._redeemer,
+                alerter=self._alerter,
+            )
             for sr in settlement_results:
                 await self._alerter.send(
                     "info",
@@ -583,7 +593,23 @@ class Rebalancer:
                 # Fetch fresh Gamma prices for all open position token IDs so that
                 # exit/trim decisions use prices no older than 15 minutes rather
                 # than the stale values from the last full rebalance (up to 60 min).
+                #
+                # Phase 4 (2026-04-28): also fetch full per-market data so we can
+                # classify each held market's lifecycle state and short-circuit
+                # the evaluator on RESOLVED_WINNER / RESOLVED_LOSER / RESOLVING.
+                # Pre-Phase 4 the strategy layer treated already-closed markets
+                # as tradeable and produced SELL orders that Polymarket rejected
+                # every 15 min — empty retry-and-fail loop.
                 held_token_ids = list({p["token_id"] for p in all_positions if p.get("token_id")})
+                # Phase 4: market_states stays None unless we successfully
+                # fetch Gamma market data — that way a Gamma outage does
+                # NOT silently flip every held slot to UNKNOWN→SKIP and
+                # disable TRIM/EXIT.  Any non-empty result populates the
+                # map for the tokens we got data for; tokens missing from
+                # the map fall through to UNKNOWN inside the evaluator,
+                # which is the desired behaviour when ONE token's payload
+                # was dropped by Gamma but others succeeded.
+                position_check_market_states: dict[str, MarketState] | None = None
                 if held_token_ids:
                     try:
                         fresh_gamma = await refresh_gamma_prices_only(held_token_ids)
@@ -599,6 +625,31 @@ class Rebalancer:
                             logger.warning("Position check: Gamma price refresh returned no prices")
                     except Exception:
                         logger.warning("Position check: price refresh failed, using cached prices")
+
+                    try:
+                        market_data = await refresh_gamma_market_data(held_token_ids)
+                    except Exception:
+                        market_data = {}
+                        logger.warning(
+                            "Position check: Gamma market-data refresh failed, "
+                            "lifecycle filter degraded to legacy mode",
+                            exc_info=True,
+                        )
+                    if market_data:
+                        position_check_market_states = {}
+                        for tid in held_token_ids:
+                            gd = market_data.get(tid)
+                            position_check_market_states[tid] = classify_market(
+                                tid, gd, self._last_gamma_prices.get(tid, 0.5),
+                            )
+                        state_counts: dict[str, int] = defaultdict(int)
+                        for s in position_check_market_states.values():
+                            state_counts[s.value] += 1
+                        if state_counts:
+                            logger.info(
+                                "Position check: market states %s",
+                                ", ".join(f"{k}={v}" for k, v in sorted(state_counts.items())),
+                            )
                 # ─────────────────────────────────────────────────────────────────
 
                 # Refresh forecasts + METAR in parallel for minimum latency
@@ -768,6 +819,7 @@ class Rebalancer:
                     locked_signals = evaluate_locked_win_signals(
                         event_obj, daily_max, strat_cfg, held_token_ids_set,
                         days_ahead=days_ahead, daily_max_final=_dm_final,
+                        market_states=position_check_market_states,
                     )
 
                     # FIX-01: use the forecast for *this event's* market_date.
@@ -792,6 +844,7 @@ class Rebalancer:
                         trend=city_trend,
                         days_ahead=days_ahead, forecast=forecast, error_dist=error_dist,
                         local_hour=local_hour,
+                        market_states=position_check_market_states,
                     )
 
                     # FIX-02: run TRIM evaluation at 15-min cadence so price-stop
@@ -826,6 +879,7 @@ class Rebalancer:
                             locked_win_token_ids=locked_win_token_ids,
                             daily_max_f=daily_max,
                             entry_ev_map=entry_ev_map,
+                            market_states=position_check_market_states,
                         )
 
                     # P0-3 FIX: Query exposure once before loop, accumulate in-memory
@@ -1414,6 +1468,48 @@ class Rebalancer:
         # Save daily max temps for dashboard (update, don't overwrite — keep non-market cities)
         self._last_daily_maxes.update(daily_maxes)
 
+        # Phase 4 lifecycle classification (60-min parity with run_position_check):
+        # fetch per-market data for every NO token in the active event set, classify
+        # into MarketState, and pass the dict to every evaluator below.  Without
+        # this, a market that flipped closed=true between full cycles would still
+        # produce SELL/TRIM/EXIT signals every 60 min until the next 15-min
+        # position_check rebuilt the state map — which is log/decision_log noise,
+        # not a money loss (CLOB rejects the orders), but the noise hides real
+        # issues during incidents.  Mirrors the run_position_check block at
+        # rebalancer.py:612-652.
+        cycle_market_states: dict[str, MarketState] | None = None
+        cycle_no_token_ids = list({
+            slot.token_id_no
+            for event in events
+            for slot in event.slots
+            if slot.token_id_no
+        })
+        if cycle_no_token_ids:
+            try:
+                cycle_market_data = await refresh_gamma_market_data(cycle_no_token_ids)
+            except Exception:
+                cycle_market_data = {}
+                logger.warning(
+                    "Cycle: Gamma market-data refresh failed, "
+                    "lifecycle filter degraded to legacy mode",
+                    exc_info=True,
+                )
+            if cycle_market_data:
+                cycle_market_states = {}
+                for tid in cycle_no_token_ids:
+                    cycle_market_states[tid] = classify_market(
+                        tid, cycle_market_data.get(tid),
+                        self._last_gamma_prices.get(tid, 0.5),
+                    )
+                state_counts: dict[str, int] = defaultdict(int)
+                for s in cycle_market_states.values():
+                    state_counts[s.value] += 1
+                if state_counts:
+                    logger.info(
+                        "Cycle: market states %s",
+                        ", ".join(f"{k}={v}" for k, v in sorted(state_counts.items())),
+                    )
+
         # 4. Evaluate signals for each event
         all_signals: list[TradeSignal] = []
         cycle_at = datetime.now(timezone.utc).isoformat()
@@ -1654,6 +1750,7 @@ class Rebalancer:
                     daily_max_f=daily_max, local_hour=local_hour,
                     hours_to_settlement=hours_to_settle,
                     rejects=no_rejects,
+                    market_states=cycle_market_states,
                 )
 
                 # Sample up to N rejects per strategy for decision_log observability.
@@ -1684,6 +1781,7 @@ class Rebalancer:
                 locked_signals = evaluate_locked_win_signals(
                     event, daily_max, strat_cfg, held_token_ids, days_ahead,
                     daily_max_final=_dm_final_main,
+                    market_states=cycle_market_states,
                 )
 
                 # Identify locked-win positions and entry prices from DB
@@ -1712,6 +1810,7 @@ class Rebalancer:
                     forecast=forecast, error_dist=error_dist,
                     hours_to_settlement=hours_to_settle,
                     local_hour=local_hour,
+                    market_states=cycle_market_states,
                 )
                 trim_signals = evaluate_trim_signals(
                     event, forecast, held_no_slots, strat_cfg, error_dist,
@@ -1719,6 +1818,7 @@ class Rebalancer:
                     locked_win_token_ids=locked_win_token_ids,
                     daily_max_f=daily_max,
                     entry_ev_map=entry_ev_map,
+                    market_states=cycle_market_states,
                 )
 
                 # Size and tag entry signals with strategy label

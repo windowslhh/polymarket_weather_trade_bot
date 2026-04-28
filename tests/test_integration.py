@@ -48,6 +48,12 @@ def _make_config(dry_run: bool = True, paper: bool = False) -> AppConfig:
             max_total_exposure_usd=1000.0,
             daily_loss_limit_usd=50.0,
             kelly_fraction=0.5,
+            # Disable the production min-order size gate: $5 slot cap × 0.95
+            # NO price ≈ 5 shares, which sits right at the floor and rounds
+            # to zero in some cases.  Tests covering the gate itself live in
+            # test_size_gate.py.
+            min_order_size_shares=0.0,
+            min_order_amount_usd=0.0,
         ),
         scheduling=SchedulingConfig(),
         cities=[
@@ -143,6 +149,13 @@ class TestFullLogicChain:
             max_exposure_per_city_usd=50.0,
             max_total_exposure_usd=1000.0,
             kelly_fraction=0.5,
+            # Disable the min-order size gate: this fixture pairs a $5 slot
+            # cap with a 0.95 NO price (~5 shares), which the production
+            # 5-share floor would round to zero.  Keep the gate's logic
+            # tested elsewhere (test_size_gate.py) and let this test focus
+            # on Kelly + exposure-cap math.
+            min_order_size_shares=0.0,
+            min_order_amount_usd=0.0,
         )
 
         # High EV signal

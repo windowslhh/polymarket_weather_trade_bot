@@ -37,6 +37,13 @@ from src.weather.models import Forecast, Observation
 
 
 def _make_config(**overrides) -> AppConfig:
+    # Phase 5 (2026-04-28): the production min-order floor (5 shares /
+    # $1) would clobber these fixtures' deliberately-small sizes; the
+    # entry-scan tests pin the routing path, not the floor.  Disable
+    # the floor here so those tests keep exercising the cycle they
+    # were written for.  ``test_size_gate.py`` covers the floor itself.
+    overrides.setdefault("min_order_size_shares", 0.0)
+    overrides.setdefault("min_order_amount_usd", 0.0)
     return AppConfig(
         strategy=StrategyConfig(
             no_distance_threshold_f=8,
