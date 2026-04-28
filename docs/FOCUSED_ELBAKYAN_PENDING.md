@@ -140,3 +140,53 @@ opportunistically.
    them in one PR.
 
 This file should be deleted once the audit is acted on.
+
+---
+
+## Follow-up issues observed during 2026-04-28 hotfix verification
+
+These are *new* bugs surfaced by the first two post-restart rebalance cycles.
+They are unrelated to the city-local cache key fix (which verified clean) and
+need their own follow-up sessions.
+
+### A. CLOB price > 0.999 — EXIT signal at price 0.9995 rejected
+
+```
+2026-04-28 09:42:13 SELL NO Chicago 66-67°F @ 0.9995 ($2.48, ~2.48 shares) EV=-0.2520
+2026-04-28 09:42:14 [WARNING] place_limit_order failed: invalid price (0.9995), min: 0.001 - max: 0.999
+```
+
+The strategy generated an EXIT at 0.9995 (locked-loss exit when daily max
+crosses slot upper) but CLOB v2 rejects any price > 0.999.  The order
+retried 3× and failed.  **Impact**: Chicago 66-67°F slot is stuck — even
+though the exit signal is correct, the bot can't unwind via taker.  Workaround
+when fixing: clamp ``signal.price`` to ``min(signal.price, 0.999)`` at the
+executor level, or have ``evaluator.evaluate_exit_signals`` cap the exit
+price at the CLOB max.  Root cause is the locked-loss-exit path computing
+the live offer price without clamping; this same logic on the entry side
+already caps at ``locked_win_max_price=0.90``.
+
+### B. CLOB size < 5 shares — BUY signal at $0.19 / 0.36 shares rejected
+
+```
+2026-04-28 09:42:16 BUY NO Miami 86-87°F @ 0.5200 ($0.19, ~0.37 shares) EV=0.4169
+2026-04-28 09:42:17 [WARNING] place_limit_order failed: Size (0.36) lower than the minimum: 5
+```
+
+Same class of bug as the pre-kill log entries (Miami 86-87 @ size 0.31 from
+the 08:53 rebalance).  Half-Kelly sizing on a thin per-slot cap
+(`max_position_per_slot_usd=$5` × `kelly_fraction=0.5` × residual room
+under per-city cap) produces sub-$1 USD which translates to <5 shares at
+mid-range NO prices.  CLOB v2 enforces a minimum of 5 shares per order.
+**Impact**: legitimate high-EV BUY signals get rejected.  Two equally
+valid fixes: (1) raise the per-slot floor so every BUY produces ≥5 shares
+at the upper price bound, or (2) skip BUYs that round to <5 shares with
+a `MIN_SIZE_BELOW_CLOB_FLOOR` REJECT log line for visibility.
+
+A pre-existing session was working on (B) but was aborted; restart that
+work in a new session.  (A) is independent and should be a quick guard
+in `executor.py` plus a regression test.
+
+Both issues should be addressed before the bot is deployed to VPS at
+scale — they don't crash the bot but they silently waste signal generation.
+
