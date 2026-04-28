@@ -1,6 +1,7 @@
 """Tests for strategy evaluator and sizing."""
 import importlib
 import time
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import pytest
@@ -282,8 +283,15 @@ class TestEvaluateExitSignals:
 class TestSizing:
     def test_basic_sizing(self):
         signal = _make_signal(win_prob=0.95, price=0.92)
+        # Phase 5 (2026-04-28) added the Polymarket min-order floor (5
+        # shares OR $1).  This test exercises the Kelly sizing math at
+        # the default cap, where the calculated size legitimately falls
+        # below 5 shares — so we disable the floor for the assertion.
+        # See ``tests/test_size_gate.py`` for the floor's own coverage.
+        cfg = replace(StrategyConfig(),
+                      min_order_size_shares=0.0, min_order_amount_usd=0.0)
         size = compute_size(signal, city_exposure_usd=0, total_exposure_usd=0,
-                           config=StrategyConfig())
+                           config=cfg)
         assert size > 0
         assert size <= 5.0  # max per slot
 
@@ -838,14 +846,22 @@ class TestSizingAdvanced:
     def test_partial_city_capacity(self):
         """When city has some exposure, size is capped by remaining capacity."""
         signal = _make_signal(win_prob=0.95, price=0.80)
-        config = StrategyConfig(max_exposure_per_city_usd=10.0, max_position_per_slot_usd=5.0)
+        # Phase 5: disable the min-order floor; this test pins the
+        # cap-driven size, not the floor.
+        config = StrategyConfig(
+            max_exposure_per_city_usd=10.0, max_position_per_slot_usd=5.0,
+            min_order_size_shares=0.0, min_order_amount_usd=0.0,
+        )
         size = compute_size(signal, city_exposure_usd=8.0, total_exposure_usd=8.0, config=config)
         assert 0 < size <= 2.0  # only $2 remaining in city cap
 
     def test_partial_global_capacity(self):
         """When global exposure near limit, size is capped by remaining global capacity."""
         signal = _make_signal(win_prob=0.95, price=0.80)
-        config = StrategyConfig(max_total_exposure_usd=10.0, max_position_per_slot_usd=5.0)
+        config = StrategyConfig(
+            max_total_exposure_usd=10.0, max_position_per_slot_usd=5.0,
+            min_order_size_shares=0.0, min_order_amount_usd=0.0,
+        )
         size = compute_size(signal, city_exposure_usd=0, total_exposure_usd=9.0, config=config)
         assert 0 < size <= 1.0
 

@@ -130,6 +130,16 @@ class StrategyConfig:
         "Miami", "San Francisco", "Tampa", "Orlando",
     }))
     thin_liquidity_exposure_ratio: float = 0.5
+    # 2026-04-28: Polymarket CLOB rejects orders below 5 shares OR $1 of
+    # notional.  Pre-Phase 5 the bot would happily produce sub-minimum
+    # signals (sizing rounding, full-Kelly on small slots) and Polymarket
+    # would 400-out every one of them — wasted retries, dirty alert
+    # channel.  Both gates run on BUY (in sizing) and SELL (in the
+    # executor) paths so the rejection happens once, in DB+log, instead
+    # of once per network round-trip.
+    min_order_size_shares: float = 5.0
+    min_order_amount_usd: float = 1.0
+
     # FIX-17 (2026-04-24): per-variant city filter.  Empty = all cities
     # allowed (default for B/C).  D' uses this to restrict its narrow
     # high-EV profile to cities whose historical forecast error is small
@@ -223,7 +233,11 @@ def get_strategy_variants() -> dict[str, dict]:
             "max_positions_per_event": 4,
             "min_no_ev": 0.05,
             "max_position_per_slot_usd": 5.0,
-            "max_exposure_per_city_usd": 10.0,
+            # 2026-04-28: D running solo (B/C disabled); restored to $50/city
+            # so the variant has room to compound across the day instead of
+            # being capped at 2 entries.  Global $1000 ceiling and the $75
+            # daily-loss breaker remain in force.
+            "max_exposure_per_city_usd": 50.0,
             "locked_win_kelly_fraction": 1.0,
             "max_locked_win_per_slot_usd": 10.0,
             "_meta": {

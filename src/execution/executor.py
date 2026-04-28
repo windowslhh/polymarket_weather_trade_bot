@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 
 from src.markets.clob_client import ClobClient
 from src.markets.models import Side, TradeSignal
@@ -134,6 +135,52 @@ class Executor:
                 return
             # size_usd for logging: approximate current market value
             size_usd = shares * price
+
+            # Polymarket min-order gate (2026-04-28).  A SELL of 4 shares
+            # would be 400'd by the CLOB; better to skip and let the
+            # settler clean up at resolution than wedge the alert channel.
+            strat_cfg = getattr(
+                getattr(self._clob, "_config", None), "strategy", None,
+            )
+            min_shares = getattr(strat_cfg, "min_order_size_shares", 0.0)
+            min_amount = getattr(strat_cfg, "min_order_amount_usd", 0.0)
+            if isinstance(min_shares, (int, float)) and shares < min_shares:
+                reason_code = "SIZE_BELOW_MIN_SHARES"
+            elif isinstance(min_amount, (int, float)) and size_usd < min_amount:
+                reason_code = "AMOUNT_BELOW_MIN_USD"
+            else:
+                reason_code = None
+            if reason_code is not None:
+                logger.warning(
+                    "SELL skipped (%s): %.4f shares × %.4f = $%.4f (event=%s slot=%s)",
+                    reason_code, shares, price, size_usd,
+                    signal.event.event_id, signal.slot.outcome_label,
+                )
+                try:
+                    cycle_at = datetime.now(timezone.utc).isoformat()
+                    await self._portfolio.store.insert_decision_log(
+                        cycle_at=cycle_at,
+                        city=signal.event.city,
+                        event_id=signal.event.event_id,
+                        signal_type=signal.token_type.value,
+                        slot_label=signal.slot.outcome_label,
+                        forecast_high_f=None,
+                        daily_max_f=None,
+                        trend_state="",
+                        win_prob=signal.estimated_win_prob,
+                        expected_value=signal.expected_value,
+                        price=price,
+                        size_usd=size_usd,
+                        action="SKIP",
+                        reason=f"[{signal.strategy}] SELL_REJECT: {reason_code}",
+                        strategy=signal.strategy,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to insert SELL_REJECT decision_log for %s",
+                        signal.slot.outcome_label,
+                    )
+                return
         else:
             shares = size_usd / price if price > 0 else 0
 
