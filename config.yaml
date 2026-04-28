@@ -10,13 +10,16 @@ strategy:
   # src/config.py.  Thin-liquidity cities (Miami / SF / Tampa / Orlando)
   # get the cap × thin_liquidity_exposure_ratio (default 0.5).
   max_exposure_per_city_usd: 50.0
-  # Maximum total USD exposure across all cities — single live variant
-  # (B) so this is the literal portfolio ceiling.  Kelly sizing keeps
-  # per-position sizes to $1–5 so the real-world total trends well below.
-  max_total_exposure_usd: 1000.0
-  # Daily loss circuit breaker (USD).  Sized for $200 live capital — a
-  # 37.5% drawdown trips the breaker and pauses entries until UTC rollover.
-  daily_loss_limit_usd: 75.0
+  # Maximum total USD exposure across all cities — set to the actual
+  # live wallet balance (2026-04-28).  Kelly sizing keeps per-position
+  # sizes to $1–10 so the global ceiling binds on aggregate exposure
+  # rather than per-trade — caps notional at the real capital pool.
+  max_total_exposure_usd: 200.0
+  # Daily loss circuit breaker (USD).  $50 = 25% of the $200 live
+  # capital — wide enough to absorb an adverse weather streak across
+  # 30 cities of half-Kelly forecast entries + full-Kelly locked wins,
+  # tight enough that hitting it actually means something is wrong.
+  daily_loss_limit_usd: 50.0
   # Kelly fraction multiplier (0.5 = half Kelly)
   kelly_fraction: 0.5
   # Minimum market volume (USD) to consider

@@ -160,8 +160,8 @@ class TestStrategyParamsHelper:
 
 class TestGlobalDefaults:
 
-    def test_daily_loss_limit_75(self):
-        assert StrategyConfig().daily_loss_limit_usd == 75.0
+    def test_daily_loss_limit_50(self):
+        assert StrategyConfig().daily_loss_limit_usd == 50.0
 
     def test_locked_win_max_price_090(self):
         assert StrategyConfig().locked_win_max_price == 0.90

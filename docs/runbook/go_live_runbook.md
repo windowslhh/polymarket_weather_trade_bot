@@ -228,7 +228,7 @@ only):
 
 ```yaml
 strategy:
-  daily_loss_limit_usd: 25            # tighter than prod 75
+  daily_loss_limit_usd: 25            # tighter than prod 50
   locked_win_max_price: 0.90          # unchanged
   max_total_exposure_usd: 50          # cap aggregate at $50
   # Per-variant city caps (override get_strategy_variants)
@@ -411,7 +411,7 @@ Run this list at the moment of cutover from $50 smoke to $200 live.
       ```
       Expect: no output
 - [ ] `config.yaml` switched to production values:
-      - [ ] `daily_loss_limit_usd: 75`
+      - [ ] `daily_loss_limit_usd: 50`
       - [ ] `locked_win_max_price: 0.90`
       - [ ] `max_total_exposure_usd: 200`
       - [ ] B `max_exposure_per_city_usd: 20`
@@ -544,7 +544,7 @@ docker compose ps   # → healthy
 | `stop_grace_period` | `90s` | Blocker #1 |
 | HEALTHCHECK `start-period` | `120s` | 🟡 #2 |
 | Container uid | `1000` | FIX-M5 |
-| `daily_loss_limit_usd` (live) | `75` | FIX-17 |
+| `daily_loss_limit_usd` (live) | `50` | 2026-04-28 (was 75) |
 | `daily_loss_limit_usd` (smoke) | `25` | This runbook |
 | `locked_win_max_price` | `0.90` | FIX-17 |
 | `max_total_exposure_usd` (live) | `200` | This runbook |
