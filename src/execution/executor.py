@@ -255,42 +255,13 @@ class Executor:
                 idempotency_key, result.message or "unknown CLOB failure"
             )
             logger.error("Order failed: %s", result.message)
-            # A1 (2026-04-28): when the v2 SDK reports the order was *posted*
-            # (real ``order_id``) but ``status='unmatched'``, it's resting on
-            # the Polymarket book and could match later — at which point the
-            # bot has no record of it (orders row is 'failed', no positions
-            # row) and the operator gets a phantom fill.  ``mark_order_failed``
-            # alone leaves the zombie alive — failed rows are NOT picked up by
-            # the reconciler's ``get_pending_orders``.  Best-effort cancel
-            # here closes the loop synchronously.  cancel failures are
-            # non-fatal: log a warning and rely on the next bot restart's
-            # reconciler probe path as a safety net.  We deliberately do NOT
-            # touch ``order_id == ""`` rows — those mean the wrapper never
-            # got a CLOB handle (timeout / rejected / network), so there's
-            # nothing to cancel.
-            if result.order_id:
-                try:
-                    cancelled = await self._clob.cancel_order(result.order_id)
-                except Exception:
-                    logger.exception(
-                        "A1: cancel_order raised for zombie order %s — order "
-                        "may still be resting on Polymarket; reconciler will "
-                        "resolve on next restart",
-                        result.order_id,
-                    )
-                else:
-                    if cancelled:
-                        logger.info(
-                            "A1: cancelled zombie order %s (was %s)",
-                            result.order_id, result.message,
-                        )
-                    else:
-                        logger.warning(
-                            "A1: cancel_order returned False for %s — order "
-                            "may still be resting on Polymarket; reconciler "
-                            "will resolve on next restart",
-                            result.order_id,
-                        )
+            # No active cancel needed.  The wrapper sends FAK orders (see
+            # ``clob_client.place_limit_order``), so the Polymarket server
+            # has already killed any unfilled remainder server-side before
+            # we observed success=False — there is no resting order to
+            # cancel.  The earlier A1 best-effort cancel that ran here was
+            # only correct for the GTC-era "unmatched-and-resting" failure
+            # mode, which FAK eliminates by design.
             return
 
         if signal.side == Side.BUY:

@@ -233,9 +233,13 @@ async def test_v2_create_and_post_order_receives_typed_OrderArgs(monkeypatch):
     # 2. options=None lets the server pick tick size dynamically.
     assert options is None
 
-    # 3. OrderType must be GTC (the default — passing it explicitly
-    #    is the v2 contract).
-    assert order_type == OrderType.GTC
+    # 3. OrderType must be FAK (Fill And Kill).  2026-04-28: switched
+    #    from GTC because GTC + Gamma last-trade price let our limit
+    #    orders rest on the book as makers, which (a) violated the
+    #    taker-only EV / fee model and (b) triggered the now-removed
+    #    A1 self-cancel logic.  FAK forces immediate fill-or-kill so
+    #    no resting state is possible.
+    assert order_type == OrderType.FAK
 
 
 @pytest.mark.asyncio
@@ -347,21 +351,31 @@ async def test_get_last_trade_price_handles_legacy_float_response():
 # ──────────────────────────────────────────────────────────────────────
 # 2026-04-28: ghost-position prevention.  v2 ``create_and_post_order``
 # returns the same {"orderID": ...} dict shape for both immediately
-# matched fills AND orders that posted but didn't match.  The bot was
-# trusting any non-empty orderID as a successful fill, which produced
+# matched fills AND orders that posted but didn't fully fill.  The bot
+# was trusting any non-empty orderID as a successful fill, which produced
 # ghost rows in ``positions`` for orders that only sat on the book.
+#
+# Same-day update: switched from ``OrderType.GTC`` to ``OrderType.FAK``
+# (see clob_client.py).  FAK kills any unfilled remainder server-side,
+# so the residual statuses we have to recognise here are the kill
+# variants (``cancelled`` / ``killed``) rather than GTC's ``unmatched``
+# / ``live`` — but the wrapper's success criterion (``status='matched'``
+# OR tx hashes present) is unchanged, so a failure-mode test parametrises
+# cleanly across both.
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_unmatched_order_returns_failure_no_position():
-    """An order with ``status='unmatched'`` posted but never crossed; the
-    wrapper must surface success=False so the executor records the orders
-    row as 'failed' (no positions row created).  Recovery is delegated to
-    the startup reconciler's ``probe_order_status`` path."""
+@pytest.mark.parametrize("kill_status", ["cancelled", "killed", "unmatched"])
+async def test_unfilled_order_returns_failure_no_position(kill_status):
+    """An order whose unfilled remainder is killed by FAK (or, for back-compat
+    with the GTC-era status string, an ``unmatched`` resting state we shouldn't
+    see in practice but must still recognise) must surface success=False so the
+    executor records the orders row as 'failed' (no positions row created).
+    """
     client = _make_client()
     client._client.create_and_post_order = MagicMock(
-        return_value={"orderID": "0xabc", "status": "unmatched"},
+        return_value={"orderID": "0xabc", "status": kill_status},
     )
 
     result = await client.place_limit_order(
@@ -370,8 +384,12 @@ async def test_unmatched_order_returns_failure_no_position():
 
     assert result.success is False
     assert result.order_id == "0xabc"
-    assert "unmatched" in result.message.lower()
-    # Must NOT retry — unmatched is a terminal classification, not a
+    # Wrapper now reports "order not filled (status=...)" so the message
+    # is accurate under FAK semantics; the kill-status string is echoed
+    # back so logs / decision_log retain the diagnostic.
+    assert "not filled" in result.message.lower()
+    assert kill_status in result.message.lower()
+    # Must NOT retry — kill / no-fill is a terminal classification, not a
     # transient failure.  Hammering the CLOB would post duplicate orders.
     assert client._client.create_and_post_order.call_count == 1
 
@@ -435,7 +453,7 @@ async def test_tx_hashes_without_status_succeeds():
 
 
 @pytest.mark.asyncio
-async def test_no_status_no_tx_hashes_returns_unmatched():
+async def test_no_status_no_tx_hashes_returns_failure():
     """An ``orderID`` with neither matched-status nor tx hashes is the
     same un-filled signal — must NOT create a positions row.  Pre-fix the
     wrapper accepted this as success on the strength of the orderID alone
@@ -452,7 +470,7 @@ async def test_no_status_no_tx_hashes_returns_unmatched():
 
     assert result.success is False
     assert result.order_id == "0xabc"
-    assert "unmatched" in result.message.lower()
+    assert "not filled" in result.message.lower()
 
 
 # ──────────────────────────────────────────────────────────────────────

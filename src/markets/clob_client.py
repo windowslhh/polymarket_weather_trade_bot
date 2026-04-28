@@ -327,6 +327,28 @@ class ClobClient:
         # so the server picks the tick size dynamically — Polymarket's
         # weather slots have used 0.01 ticks consistently and we don't
         # want a hard-coded value to drift if microstructure changes.
+        #
+        # 2026-04-28: switched from ``OrderType.GTC`` to ``OrderType.FAK``.
+        # Rationale: our EV / fee model assumes taker semantics
+        # (``gates.py::entry_fee_per_dollar`` is computed at the taker
+        # rate, never the maker rebate), and the BUY price we pass is
+        # ``Gamma outcomePrices[1]`` — the *last-trade* price, not the
+        # best ask.  When the live book's best ask is above last-trade,
+        # a GTC limit at last-trade rests on the book as a maker.  Two
+        # downstream bugs emerged:
+        #   (1) The wrapper's matched-detection (``status='matched'``
+        #       vs anything else) treated resting orders as failures,
+        #       which produced a "failed" orders row + a phantom fill
+        #       risk if the resting order later matched.
+        #   (2) The previous A1 fix in ``executor.py`` then cancelled
+        #       our own legitimate resting maker order.
+        # FAK ("Fill And Kill") forces the server to immediately fill
+        # whatever crosses and kill the remainder.  No resting state is
+        # possible, so the status ladder collapses to:
+        #   - matched / partial-fill (with tx hashes) → success
+        #   - cancelled / killed (no fill)            → failure
+        # That aligns with the taker-only EV model and removes the
+        # "phantom resting order" class of bug at its source.
         from py_clob_client_v2 import OrderArgs, OrderType, Side
 
         order_side = Side.BUY if side.upper() == "BUY" else Side.SELL
@@ -349,24 +371,25 @@ class ClobClient:
                         client.create_and_post_order,
                         order_args,
                         None,  # PartialCreateOrderOptions: server picks tick
-                        OrderType.GTC,
+                        OrderType.FAK,
                     )
                 order_id = (
                     order.get("orderID", "") if isinstance(order, dict) else str(order)
                 )
                 # Ghost-position guard (2026-04-28): v2 ``create_and_post_order``
                 # returns the same dict shape for both immediately-matched fills
-                # and unmatched resting orders.  Pre-fix, the wrapper treated
-                # any non-empty ``orderID`` as a successful fill, so executor
-                # would write a positions row for an order that only sat on
-                # the book — producing a ghost row whose live "position" was
-                # actually never owned (e.g. Miami 86-87 NO @0.565 on
+                # and orders that didn't fully fill.  Pre-fix, the wrapper
+                # treated any non-empty ``orderID`` as a successful fill, so
+                # executor would write a positions row for an order that only
+                # sat on the book — producing a ghost row whose live "position"
+                # was actually never owned (e.g. Miami 86-87 NO @0.565 on
                 # 2026-04-28).  Real fills carry ``status=='matched'`` AND/OR
-                # at least one transactionsHashes entry; resting/unmatched
-                # orders carry ``status=='unmatched'`` (or 'live') with no
-                # tx hashes.  Treat anything else as un-filled and let the
-                # startup reconciler resolve the open order on the next
-                # restart via ``probe_order_status``.
+                # at least one transactionsHashes entry.  Under FAK (the order
+                # type we use, see above) any unfilled remainder is killed by
+                # the server, so the residual statuses are typically
+                # ``cancelled`` / ``killed`` rather than the GTC-era ``live``
+                # / ``unmatched`` — but the detection logic is the same shape
+                # ("not matched, no tx hashes → failure").
                 if isinstance(order, dict):
                     status = str(order.get("status", "")).lower()
                     tx_hashes = (
@@ -390,14 +413,15 @@ class ClobClient:
                         message="CLOB returned empty order_id",
                     )
                 if not matched:
-                    # Order posted but did not immediately match.  Surface as
-                    # success=False so the executor records the orders row as
-                    # 'failed' (no positions row created) — the reconciler's
-                    # ``probe_order_status`` path will pick the live order up
-                    # later and either confirm a fill or close the loop.
+                    # FAK: server has already killed any unfilled remainder,
+                    # so there is no resting order to reconcile or cancel.
+                    # Surface as success=False so the executor records the
+                    # orders row as 'failed' (no positions row created); on
+                    # the next cycle the strategy layer will re-evaluate and
+                    # re-emit if the entry condition still holds.
                     return OrderResult(
                         order_id=order_id, success=False,
-                        message=f"unmatched (status={status or 'unknown'})",
+                        message=f"order not filled (status={status or 'unknown'})",
                     )
                 return OrderResult(order_id=order_id, success=True)
             except TimeoutError as e:
