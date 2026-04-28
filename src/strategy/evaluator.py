@@ -36,6 +36,11 @@ from src.strategy.gates import (
     entry_fee_per_dollar,
     post_peak_confidence,
 )
+from src.strategy.market_state import (
+    MarketState,
+    STATE_REJECT_REASONS,
+    classify_market,
+)
 from src.strategy.trend import TrendState
 from src.weather.historical import ForecastErrorDistribution
 from src.weather.models import Forecast, Observation
@@ -110,6 +115,58 @@ def _run_gate_chain(kind: SignalKind, ctx: GateContext) -> GateResult | None:
     return None
 
 
+# Per-cycle dedup so an UNKNOWN / RESOLVED_WINNER slot doesn't append a
+# decision_log REJECT row on every gate-evaluation pass within the same
+# rebalance.  Keyed by ``(token_id, reason_code)``.  The set is intended
+# to be cleared by the caller between cycles; if not, it bounds at the
+# total number of held tokens × 4 reasons → tiny memory footprint.
+_state_reject_seen: set[tuple[str, str]] = set()
+
+
+def reset_state_reject_dedup() -> None:
+    """Clear the per-cycle dedup set.  Call once at the top of a cycle."""
+    _state_reject_seen.clear()
+
+
+def _check_market_state(
+    slot,
+    market_states: dict[str, MarketState] | None,
+    rejects: list[dict] | None,
+) -> MarketState:
+    """Return the slot's MarketState, appending a (deduped) decision_log
+    REJECT row when the slot is non-OPEN.
+
+    When ``market_states`` is None — the legacy path used by tests and
+    older callers — every slot is treated as OPEN: no behaviour change.
+    """
+    if market_states is None:
+        return MarketState.OPEN
+    state = market_states.get(slot.token_id_no, MarketState.UNKNOWN)
+    if state is MarketState.OPEN:
+        return state
+    reason = STATE_REJECT_REASONS[state]
+    key = (slot.token_id_no, reason)
+    if key not in _state_reject_seen:
+        _state_reject_seen.add(key)
+        if rejects is not None:
+            rejects.append({
+                "slot_label": slot.outcome_label,
+                "token_id_no": slot.token_id_no,
+                "price_no": slot.price_no,
+                "reason": reason,
+            })
+        if state is MarketState.UNKNOWN:
+            logger.warning(
+                "Slot %s [%s]: market state UNKNOWN (no Gamma data) — skipping",
+                slot.outcome_label, slot.token_id_no[:16] + "...",
+            )
+        else:
+            logger.debug(
+                "Slot %s: skipping (state=%s)", slot.outcome_label, state.value,
+            )
+    return state
+
+
 def evaluate_no_signals(
     event: WeatherMarketEvent,
     forecast: Forecast,
@@ -122,6 +179,7 @@ def evaluate_no_signals(
     local_hour: int | None = None,
     hours_to_settlement: float | None = None,
     rejects: list[dict] | None = None,
+    market_states: dict[str, MarketState] | None = None,
 ) -> list[TradeSignal]:
     """Thin wrapper over ``GATE_MATRIX[SignalKind.FORECAST_NO]``.
 
@@ -155,6 +213,10 @@ def evaluate_no_signals(
     signals: list[TradeSignal] = []
     held = frozenset(held_token_ids or ())
     for slot in event.slots:
+        # Pre-gate market lifecycle filter: a closed market can't take
+        # new BUY orders, so don't bother running the entry gates on it.
+        if _check_market_state(slot, market_states, rejects) is not MarketState.OPEN:
+            continue
         ctx = GateContext(
             slot=slot, event=event, config=config, forecast=forecast, error_dist=error_dist,
             daily_max_f=daily_max_f, local_hour=local_hour, hours_to_settlement=hours_to_settlement,
@@ -192,6 +254,7 @@ def evaluate_locked_win_signals(
     days_ahead: int = 0,
     *,
     daily_max_final: bool = False,
+    market_states: dict[str, MarketState] | None = None,
 ) -> list[TradeSignal]:
     """Thin wrapper over ``GATE_MATRIX[SignalKind.LOCKED_WIN]``.
 
@@ -211,6 +274,11 @@ def evaluate_locked_win_signals(
     held = frozenset(held_token_ids or ())
     signals: list[TradeSignal] = []
     for slot in event.slots:
+        # Same lifecycle short-circuit as evaluate_no_signals — a closed
+        # market won't accept a new locked-win BUY either.  Locked-win
+        # has no decision_log REJECT sink so we just skip silently here.
+        if _check_market_state(slot, market_states, rejects=None) is not MarketState.OPEN:
+            continue
         ctx = GateContext(
             slot=slot, event=event, config=config, daily_max_f=daily_max_f,
             daily_max_final=daily_max_final, days_ahead=days_ahead, held_token_ids=held,
@@ -238,6 +306,7 @@ def evaluate_trim_signals(
     locked_win_token_ids: set[str] | None = None,
     daily_max_f: float | None = None,
     entry_ev_map: dict[str, float] | None = None,
+    market_states: dict[str, MarketState] | None = None,
 ) -> list[TradeSignal]:
     """Thin wrapper over ``GATE_MATRIX[SignalKind.TRIM]``.
 
@@ -264,6 +333,12 @@ def evaluate_trim_signals(
     trigger_gates = gates[1:]
 
     for slot in held_no_slots:
+        # Lifecycle short-circuit: a held position whose market has
+        # resolved (winner or loser) doesn't need a TRIM — the settler
+        # owns it from here.  RESOLVING / UNKNOWN also skip so we don't
+        # send a SELL into a closed book and clog the retry loop.
+        if _check_market_state(slot, market_states, rejects=None) is not MarketState.OPEN:
+            continue
         ctx = GateContext(
             slot=slot, event=event, config=config,
             forecast=forecast, error_dist=error_dist, daily_max_f=daily_max_f,
@@ -395,6 +470,7 @@ def evaluate_exit_signals(
     error_dist: ForecastErrorDistribution | None = None,
     hours_to_settlement: float | None = None,
     local_hour: int | None = None,
+    market_states: dict[str, MarketState] | None = None,
 ) -> list[TradeSignal]:
     """Three-layer hybrid exit logic for held NO positions.
 
@@ -426,6 +502,11 @@ def evaluate_exit_signals(
 
     signals: list[TradeSignal] = []
     for slot in held_no_slots:
+        # Lifecycle short-circuit (same rationale as TRIM).  A SELL on a
+        # closed market is rejected by Polymarket — wasted retry.  The
+        # settler will pick up the position via per-market detection.
+        if _check_market_state(slot, market_states, rejects=None) is not MarketState.OPEN:
+            continue
         ctx = GateContext(
             slot=slot, event=event, config=config, forecast=forecast, error_dist=error_dist,
             daily_max_f=daily_max_f, local_hour=local_hour,
