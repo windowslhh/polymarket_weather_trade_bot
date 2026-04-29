@@ -28,6 +28,36 @@ try:
 except Exception as exc:  # noqa: BLE001
     logger.warning("v2-8 httpx monkey-patch failed: %s", exc)
 
+# v2-9 (2026-04-29): tighten maker_amount precision to 2 decimals.
+# Polymarket's CLOB now 400s BUY orders whose maker_amount carries
+# more than 2 fractional digits — observed message:
+#   "invalid amounts, the market buy orders maker amount supports a
+#    max accuracy of 2 decimals, taker amount a max of 4 decimals"
+# (server rule tightened post-2026-04-28 cutover; previously the
+# server was lenient and the SDK's local rounding silently fit).
+# The SDK's ``ROUNDING_CONFIG["0.01"]`` ships ``amount=4`` — for
+# 0.01-tick markets ``round_down(size,2) * round_normal(price,2)``
+# can produce up to 4 decimals (e.g. 7.41 × 0.55 → 4.0755), which
+# the SDK ships as-is and the gateway rejects.  Forcing
+# ``amount=2`` for every tick size means the SDK's own
+# ``round_down(raw_amt, amount)`` step (already in
+# ``get_order_amounts``) clamps maker_amount to cents BEFORE the
+# wire payload is built.  SELL is also affected via the same
+# ``round_config.amount`` field, but SELL's taker_amount (USDC) is
+# capped server-side at 4 decimals — clamping to 2 is over-strict
+# but still server-valid; the per-order USDC delta is ≤ $0.005,
+# below our $1 SELL gate so functionally invisible.  Idempotent at
+# import time, runs before any ``_get_client`` lazy-init.
+try:
+    from py_clob_client_v2.order_builder import builder as _v2_builder
+    from py_clob_client_v2.order_builder.builder import RoundConfig as _RC
+    for _ts, _cfg in list(_v2_builder.ROUNDING_CONFIG.items()):
+        _v2_builder.ROUNDING_CONFIG[_ts] = _RC(
+            price=_cfg.price, size=_cfg.size, amount=2,
+        )
+except Exception as exc:  # noqa: BLE001
+    logger.warning("v2-9 ROUNDING_CONFIG monkey-patch failed: %s", exc)
+
 # FIX-04: network resilience knobs. Kept module-level so tests can monkeypatch
 # them without touching the client.
 ORDER_TIMEOUT_S = 30.0
@@ -75,10 +105,20 @@ def _force_refresh_clob_version(client) -> bool:
     ``1`` and signed V1 orders against a V2-only server forever (HTTP 400
     ``order_version_mismatch``) until human-restart.
 
-    We force the refresh ourselves via the name-mangled private accessor.
+    Belt-and-suspenders: nullify the name-mangled cache attribute *first*,
+    then call ``__resolve_version(force_update=True)``.  If a future SDK
+    refactor renames or breaks the ``force_update`` branch, the explicit
+    ``= None`` ensures the next ``__resolve_version()`` call still re-fetches
+    via the cache-empty path.  Both writes use the SDK's name-mangled
+    private symbols (``_ClobClient__cached_version``,
+    ``_ClobClient__resolve_version``); changes to those names will trip
+    the broad ``except`` and surface a warning instead of silent stale-cache
+    behavior.
+
     Returns True iff the cache was successfully flipped.
     """
     try:
+        client._ClobClient__cached_version = None
         client._ClobClient__resolve_version(force_update=True)
         return True
     except Exception as exc:  # noqa: BLE001

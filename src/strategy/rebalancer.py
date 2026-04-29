@@ -462,9 +462,19 @@ class Rebalancer:
                     today_by_name[city.name] = fc
             self._cached_forecasts.update(today_by_name)
 
+            # Bug D (2026-04-29): explicit "[15-min held-only]" tag so
+            # this line can't be confused with the 60-min full-rebalance
+            # forecast log a few thousand lines below — both refresh the
+            # same cache, but only the 60-min path discovers / re-evals
+            # every active city, while this 15-min path is intentionally
+            # scoped to cities with open positions (commit e047f1a).
+            # Pre-fix log read "Forecast refresh: 3 cities updated …",
+            # which a monitor glance mistook for "only 3/9 cities have
+            # forecasts" — flagging a phantom forecast regression.
             logger.info(
-                "Forecast refresh: %d cities updated (%s)",
+                "Forecast refresh [15-min held-only]: %d/%d held cities updated (%s)",
                 len(today_by_name),
+                len(city_configs),
                 ", ".join(
                     f"{c}: {f.predicted_high_f:.0f}°F"
                     for c, f in today_by_name.items()
@@ -1439,9 +1449,18 @@ class Rebalancer:
             if fc is not None:
                 today_by_name[city.name] = fc
         self._cached_forecasts.update(today_by_name)
+        # Bug D (2026-04-29): explicit "[60-min full]" tag so this line
+        # can't be confused with the 15-min held-only refresh in
+        # ``refresh_forecasts``.  ``len(today_by_name) / len(city_configs)``
+        # is the meaningful signal — the denominator is "cities with
+        # active markets discovered this cycle", not the bot's full
+        # ``self._config.cities`` roster (some configured cities have no
+        # active Polymarket event today).
         logger.info(
-            "Fetched forecasts for %d cities (city-local today + D1/D2)",
+            "Rebalance forecasts [60-min full]: %d/%d active cities updated"
+            " (city-local today + D1/D2)",
             len(today_by_name),
+            len(city_configs),
         )
 
         # Save forecast state for dashboard (today + 2 days)

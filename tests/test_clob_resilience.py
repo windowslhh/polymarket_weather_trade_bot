@@ -670,6 +670,168 @@ async def test_order_version_mismatch_survives_refresh_failure(monkeypatch):
     assert client._client.create_and_post_order.call_count == clob_mod.ORDER_MAX_ATTEMPTS
 
 
+# ──────────────────────────────────────────────────────────────────────
+# v2-9 (2026-04-29): Polymarket tightened the BUY maker_amount precision
+# rule post-cutover.  Server now 400s with "max accuracy of 2 decimals"
+# when SDK ships the default 4-decimal precision (e.g. 7.41 × 0.55 =
+# 4.0755 in USDC).  We monkey-patch ``ROUNDING_CONFIG`` at import to
+# clamp ``amount`` to 2 across every tick size; these tests pin both the
+# patch *being applied* and the resulting maker_amount *being 2-decimal-
+# clean for problem inputs*.  A revert that drops the patch reverts the
+# 3/3-BUY-rejection bug from the 2026-04-29 incident.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_v2_9_rounding_config_amount_clamped_to_2():
+    """The v2-9 monkey-patch must run at import time and set
+    ``ROUNDING_CONFIG[ts].amount == 2`` for every tick size, while
+    leaving ``price`` and ``size`` precisions untouched."""
+    from py_clob_client_v2.order_builder import builder as _v2_builder
+    for ts, cfg in _v2_builder.ROUNDING_CONFIG.items():
+        assert cfg.amount == 2, (
+            f"ROUNDING_CONFIG[{ts!r}].amount must be clamped to 2 by "
+            f"the v2-9 patch (got {cfg.amount}); a value > 2 reverts "
+            "the 'invalid amounts, max accuracy of 2 decimals' BUY "
+            "rejection bug from 2026-04-29."
+        )
+        # Defensive: price/size precision must NOT be clobbered — they
+        # control tick-size validation upstream of amount rounding.
+        assert cfg.price >= 1
+        assert cfg.size == 2
+
+
+@pytest.mark.parametrize(
+    # (size_shares, price, tick) — the first row is the live-bot example
+    # from 2026-04-29 that triggered "invalid amounts, max accuracy of 2
+    # decimals" against `7.41 × 0.5550 = $4.11255`.
+    "size_shares,price,tick",
+    [
+        (7.41, 0.5550, "0.01"),
+        (7.41, 0.55, "0.01"),
+        (9.01, 0.555, "0.01"),
+        (3.27, 0.91, "0.01"),
+        (12.34, 0.789, "0.001"),
+    ],
+)
+def test_v2_9_buy_maker_amount_quantized_to_cents(size_shares, price, tick):
+    """End-to-end: feed problem inputs through the SDK's ``get_order_amounts``
+    builder (which is what ``create_and_post_order`` calls under the hood)
+    and verify the resulting maker_amount fits in 2 decimal places of USDC.
+
+    The maker_amount the SDK emits is a USDC-decimals integer (×1e6) — so
+    "2 decimals of USDC" means it must be a multiple of 10_000 (1 cent =
+    10_000 micro-USDC).  Same precision the gateway enforces.
+    """
+    from py_clob_client_v2.order_builder import builder as _v2_builder
+    from py_clob_client_v2.order_builder.constants import BUY
+
+    round_config = _v2_builder.ROUNDING_CONFIG[tick]
+    builder = _v2_builder.OrderBuilder.__new__(_v2_builder.OrderBuilder)
+    _, maker_amount, _ = builder.get_order_amounts(
+        BUY, size_shares, price, round_config,
+    )
+
+    # maker_amount is in 6-decimal USDC.  2-decimal USDC ↔ multiple of
+    # 10_000 micro-USDC.  Anything finer than a cent leaks into the wire
+    # and trips the gateway's precision check.
+    assert isinstance(maker_amount, int)
+    assert maker_amount % 10_000 == 0, (
+        f"maker_amount={maker_amount} (={maker_amount / 1e6:.6f} USDC) "
+        f"is not 2-decimal-clean for size={size_shares} price={price} "
+        f"tick={tick} — server will reject with 'max accuracy of 2 decimals'"
+    )
+
+
+def test_v2_9_sell_taker_amount_within_server_limits():
+    """SELL's taker_amount (USDC) is also routed through ``round_config.amount``
+    — pinning the patch's side-effect: SELL taker is ≤ 4 decimals (server
+    cap for SELL takers).  The patch's 2-decimal clamp is over-strict but
+    still server-valid; pin that it stays valid."""
+    from py_clob_client_v2.order_builder import builder as _v2_builder
+    from py_clob_client_v2.order_builder.constants import SELL
+
+    round_config = _v2_builder.ROUNDING_CONFIG["0.01"]
+    builder = _v2_builder.OrderBuilder.__new__(_v2_builder.OrderBuilder)
+    _, _, taker_amount = builder.get_order_amounts(
+        SELL, 7.41, 0.555, round_config,
+    )
+
+    # SELL taker (USDC) ≤ 4 decimals server-side; with v2-9's amount=2
+    # clamp it'll actually be ≤ 2 decimals (multiple of 10_000 micro-USDC).
+    assert isinstance(taker_amount, int)
+    # Must be a multiple of 100 (4 decimals = 1e2 micro-USDC) — pre-v2-9
+    # baseline.  Stricter assertion (multiple of 10_000) verifies the
+    # patch is actively in effect for SELL too.
+    assert taker_amount % 100 == 0, (
+        f"taker_amount={taker_amount} exceeds server's 4-decimal cap "
+        f"for SELL — would 400 with 'max accuracy of 4 decimals'"
+    )
+    assert taker_amount % 10_000 == 0, (
+        f"v2-9 patch should also clamp SELL taker_amount to 2 decimals "
+        f"(over-strict but still server-valid); got {taker_amount}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bug B hardening (2026-04-29): the version-cache reset is now belt-and-
+# suspenders — we nullify ``_ClobClient__cached_version`` *first* and
+# *then* call ``_ClobClient__resolve_version(force_update=True)``.  If a
+# future SDK refactor breaks the force_update branch, the explicit None
+# write still triggers the "cache empty → re-fetch" branch on the next
+# call.  Pin this ordering so a regression that drops the None-write
+# can't reach live without the test catching it.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_nullifies_cached_version_attribute(monkeypatch):
+    """The wrapper must set ``_ClobClient__cached_version = None`` BEFORE
+    calling ``_ClobClient__resolve_version(force_update=True)`` — verifies
+    the belt-and-suspenders ordering by inspecting the SDK attr at the
+    moment ``__resolve_version`` is invoked."""
+    client = _make_client()
+    # Seed a stale cached version on the inner SDK mock.
+    client._client._ClobClient__cached_version = 1
+
+    observed_cache_at_call: list = []
+
+    def _resolve(*, force_update: bool):
+        # Snapshot the cache value the moment __resolve_version is called.
+        observed_cache_at_call.append(
+            client._client._ClobClient__cached_version,
+        )
+        return 2
+
+    client._client._ClobClient__resolve_version = _resolve
+
+    client._client.create_and_post_order = MagicMock(
+        side_effect=[
+            RuntimeError(
+                "PolyApiException[status_code=400, "
+                "error_message={'error': 'order_version_mismatch'}]"
+            ),
+            {"orderID": "after_refresh", "status": "matched"},
+        ],
+    )
+
+    async def _noop(*_):
+        return None
+
+    monkeypatch.setattr(clob_mod.asyncio, "sleep", _noop)
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.5, size=10,
+    )
+
+    assert result.success
+    # The cache attribute was None at the instant __resolve_version ran
+    # — proving the belt-and-suspenders write happened first.
+    assert observed_cache_at_call == [None], (
+        "force-refresh must null out _ClobClient__cached_version BEFORE "
+        "calling _ClobClient__resolve_version; observed snapshots: "
+        f"{observed_cache_at_call}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_fill_summary_prefers_explicit_fee_field():
     """If the trade response carries an explicit ``fee_paid`` field,
