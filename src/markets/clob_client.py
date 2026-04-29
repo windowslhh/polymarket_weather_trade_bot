@@ -153,10 +153,18 @@ class FillSummary:
     received), so the dashboard's "entry" column reflects the slippage-adjusted
     cost rather than the limit price the bot submitted.  ``fee_paid_usd`` is
     the per-share fee × shares matched, taker-side only.
+
+    Bug C (2026-04-29): ``net_shares`` is the on-chain ERC1155 balance the bot
+    actually received after the Polymarket BUY taker fee was deducted from
+    the token side.  Equals ``trade.size`` when ``fee_rate_bps == 0``, else
+    ``trade.size × (1 − taker_rate × (1 − price))`` per matched trade, summed.
+    Use this to populate ``positions.shares`` so DB matches chain (the prior
+    formula ``size_usd / limit_price`` drifted by both slippage and fee).
     """
     shares: float
     match_price: float
     fee_paid_usd: float
+    net_shares: float
 
 
 class ClobClient:
@@ -580,6 +588,7 @@ class ClobClient:
         total_shares = 0.0
         total_usdc = 0.0
         total_fee = 0.0
+        total_net_shares = 0.0
         for t in matching:
             try:
                 size = float(t.get("size", 0) or 0)
@@ -590,19 +599,38 @@ class ClobClient:
                 continue
             total_shares += size
             total_usdc += size * price
+            # Bug C (2026-04-29): Polymarket BUY taker fee is deducted in
+            # shares from the token side, not USDC.  Compute the per-trade
+            # fee twice — once in USDC (legacy field, still useful for P&L
+            # reporting) and once in shares (what's actually missing on
+            # chain).  Prefer explicit ``fee_paid`` when present (source-
+            # of-truth, no derivation), else derive from ``fee_rate_bps``.
+            #   trade_fee_usdc = size × taker_rate × price × (1 − price)
+            #   trade_fee_shares = trade_fee_usdc / price = size × taker_rate × (1 − price)
+            # Verified 2026-04-29 against id=6 Denver: bps=1000, size=3.08,
+            # price=0.78 → fee_shares = 3.08 × 0.05 × 0.22 = 0.03388, on-chain
+            # = 3.08 − 0.03388 = 3.04612 (raw 3046120) ✓.
+            trade_fee_usdc = 0.0
             explicit_fee = t.get("fee_paid") or t.get("fee_paid_usd")
             if explicit_fee is not None:
                 try:
-                    total_fee += float(explicit_fee)
-                    continue
+                    trade_fee_usdc = float(explicit_fee)
                 except (TypeError, ValueError):
-                    pass
-            try:
-                bps_combined = float(t.get("fee_rate_bps", 0) or 0)
-            except (TypeError, ValueError):
-                bps_combined = 0.0
-            taker_rate = (bps_combined / 2.0) / 10000.0
-            total_fee += size * taker_rate * price * (1.0 - price)
+                    explicit_fee = None
+            if explicit_fee is None:
+                try:
+                    bps_combined = float(t.get("fee_rate_bps", 0) or 0)
+                except (TypeError, ValueError):
+                    bps_combined = 0.0
+                taker_rate = (bps_combined / 2.0) / 10000.0
+                trade_fee_usdc = size * taker_rate * price * (1.0 - price)
+            total_fee += trade_fee_usdc
+            # On-chain net shares for this trade: gross size minus the fee
+            # converted back to shares at the trade's own price.  Falls
+            # naturally to ``size`` when fee is zero (zero-fee tier or
+            # missing bps).
+            trade_fee_shares = trade_fee_usdc / price if price > 0 else 0.0
+            total_net_shares += size - trade_fee_shares
 
         if total_shares <= 0:
             return None
@@ -610,6 +638,7 @@ class ClobClient:
             shares=total_shares,
             match_price=total_usdc / total_shares,
             fee_paid_usd=total_fee,
+            net_shares=total_net_shares,
         )
 
     async def cancel_order(self, order_id: str) -> bool:

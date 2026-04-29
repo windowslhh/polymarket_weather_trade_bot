@@ -588,6 +588,102 @@ async def test_get_fill_summary_no_matching_trades_returns_none():
     assert summary is None
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Bug C (2026-04-29): net_shares — on-chain ERC1155 balance the bot
+# actually receives after the BUY taker fee is deducted in shares from
+# the token side.  Replays the prod Denver id=6 trade to pin the math.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_net_shares_denver_replay():
+    """Replay the 2026-04-29 Denver id=6 trade JSON: bps=1000, size=3.08,
+    price=0.78 → on-chain balanceOf was 3,046,120 raw (3.046120 shares).
+    The matcher returns gross size=3.08; fee in shares = 0.03388, so
+    net_shares = 3.04612 — must match within 6-decimal precision.
+    """
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {
+            "taker_order_id": "0xDENVER",
+            "size": "3.08",
+            "price": "0.78",
+            "fee_rate_bps": 1000,
+        },
+    ])
+    summary = await client.get_fill_summary(token_id="tok", order_id="0xDENVER")
+    assert summary is not None
+    assert summary.shares == 3.08  # gross unchanged
+    # Fee in USDC: 3.08 × 0.05 × 0.78 × 0.22 = 0.026426400000…
+    # Fee in shares: 0.0264264 / 0.78 = 0.033880…
+    # Net: 3.08 − 0.033880 = 3.046120 (== chain balanceOf 3_046_120 raw)
+    assert abs(summary.net_shares - 3.046120) < 1e-6
+    assert abs(summary.fee_paid_usd - 0.0264264) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_net_shares_zero_fee_tier():
+    """Chicago id=9 / Miami id=7 had ``fee_rate_bps=0`` (zero-fee tier).
+    Net shares must equal gross; the formula collapses cleanly with no
+    division-by-zero or rounding artefacts."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {
+            "taker_order_id": "0xCHI",
+            "size": "8.3",
+            "price": "0.5",
+            "fee_rate_bps": 0,
+        },
+    ])
+    summary = await client.get_fill_summary(token_id="tok", order_id="0xCHI")
+    assert summary is not None
+    assert summary.shares == 8.3
+    assert summary.net_shares == 8.3
+    assert summary.fee_paid_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_net_shares_partial_fills_summed():
+    """Two partial fills at different prices sum their per-trade nets.
+    Verifies we don't try to derive net via a single weighted-avg fee
+    (which would lose precision when prices differ)."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {"taker_order_id": "0xORDER", "size": "6.0", "price": "0.685", "fee_rate_bps": 1000},
+        {"taker_order_id": "0xORDER", "size": "4.0", "price": "0.690", "fee_rate_bps": 1000},
+    ])
+    summary = await client.get_fill_summary(token_id="tok", order_id="0xORDER")
+    assert summary is not None
+    # Per-trade net: size − (size × 0.05 × (1 − price))
+    # T1: 6.0 − 6.0 × 0.05 × 0.315 = 6.0 − 0.0945 = 5.9055
+    # T2: 4.0 − 4.0 × 0.05 × 0.310 = 4.0 − 0.0620 = 3.9380
+    expected_net = 5.9055 + 3.9380
+    assert abs(summary.net_shares - expected_net) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_get_fill_summary_net_shares_explicit_fee_field():
+    """When the trade response carries an explicit ``fee_paid`` (USDC),
+    derive net_shares from that field, not from the bps formula —
+    matches the hierarchy already in get_fill_summary's fee path."""
+    client = _make_client()
+    client._client.get_trades = MagicMock(return_value=[
+        {
+            "taker_order_id": "0xORDER",
+            "size": "5.0",
+            "price": "0.50",
+            "fee_paid": "0.05",  # explicit USDC fee
+            "fee_rate_bps": 1000,  # ignored when fee_paid present
+        },
+    ])
+    summary = await client.get_fill_summary(token_id="tok", order_id="0xORDER")
+    assert summary is not None
+    # fee_paid = 0.05 USDC → fee_in_shares = 0.05 / 0.50 = 0.10
+    # net = 5.0 − 0.10 = 4.90
+    assert abs(summary.net_shares - 4.90) < 1e-9
+    assert abs(summary.fee_paid_usd - 0.05) < 1e-9
+
+
 @pytest.mark.asyncio
 async def test_order_version_mismatch_force_refreshes_and_retries(monkeypatch):
     """2026-04-28 cutover defense: a Polymarket exchange-version cutover poisons

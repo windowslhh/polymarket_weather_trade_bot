@@ -124,13 +124,58 @@ class Executor:
         if signal.side == Side.SELL:
             # SELL signals carry suggested_size_usd=0 (sizing is unknown at signal time).
             # Look up the actual held shares so we sell the real position, not 0 shares.
-            shares = await self._portfolio.get_total_shares_for_token(
+            db_shares = await self._portfolio.get_total_shares_for_token(
                 signal.event.event_id, signal.token_id, signal.strategy,
             )
+            # Bug C Phase 1 (2026-04-29): clamp SELL size by on-chain ERC1155
+            # balance.  The DB ``shares`` column is computed at fill time as
+            # ``size_usd / limit_price`` which ignores both fill slippage and
+            # the Polymarket BUY taker fee (deducted in shares from the token
+            # side).  When DB > chain, the matcher 400's "not enough balance"
+            # — Denver 2026-04-29 SELL was the trigger.  Phase 2 fixes the DB
+            # writer to record on-chain net shares directly, but legacy rows
+            # still drift; this clamp is the permanent safety net.
+            #
+            # Paper-mode short-circuit: paper has no real chain position so
+            # ``get_conditional_balance`` returns 0 (the wrapper currently
+            # swallows errors and 0's as well — see clob_client.py:300-335).
+            # Without this short-circuit, paper SELLs would silently skip
+            # because ``min(db, 0) == 0``.  Trust DB shares in paper.
+            clob_config = getattr(self._clob, "_config", None)
+            is_paper = getattr(clob_config, "paper", False) is True
+            if is_paper:
+                shares = db_shares
+            else:
+                on_chain_raw = -1
+                try:
+                    on_chain_raw = await self._clob.get_conditional_balance(
+                        signal.token_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "SELL chain balance query failed token=%s: %s "
+                        "— fallback to db_shares=%.6f",
+                        signal.token_id[:12], exc, db_shares,
+                    )
+                    on_chain_raw = -1  # sentinel for fallback
+                if on_chain_raw < 0:
+                    shares = db_shares
+                else:
+                    on_chain_shares = on_chain_raw / 1_000_000.0
+                    shares = min(db_shares, on_chain_shares)
+                    if on_chain_shares < db_shares:
+                        drift = db_shares - on_chain_shares
+                        drift_pct = (drift / db_shares * 100.0) if db_shares > 0 else 0.0
+                        logger.warning(
+                            "SELL clamped to chain bal token=%s db=%.6f "
+                            "chain=%.6f drift=%.6f (%.2f%%)",
+                            signal.token_id[:12], db_shares, on_chain_shares,
+                            drift, drift_pct,
+                        )
             if shares <= 0:
                 logger.warning(
-                    "SELL signal for %s but no open shares found (already closed?), skipping",
-                    signal.slot.outcome_label,
+                    "SELL signal for %s but no shares to sell (db=%.4f), skipping",
+                    signal.slot.outcome_label, db_shares,
                 )
                 return
             # size_usd for logging: approximate current market value
@@ -276,6 +321,7 @@ class Executor:
             # back to the limit price.
             match_price: float | None = None
             fee_paid_usd: float | None = None
+            actual_shares: float | None = None
             try:
                 summary = await self._clob.get_fill_summary(
                     token_id=signal.token_id,
@@ -291,6 +337,11 @@ class Executor:
             if summary is not None:
                 match_price = summary.match_price
                 fee_paid_usd = summary.fee_paid_usd
+                # Bug C (2026-04-29): record on-chain net shares so DB matches
+                # ERC1155 balance.  Old formula ``size_usd / limit_price``
+                # drifted by both fill slippage and the BUY taker fee
+                # (Polymarket deducts fee in shares from the token side).
+                actual_shares = summary.net_shares
 
             await self._portfolio.record_fill_atomic(
                 idempotency_key=idempotency_key,
@@ -312,6 +363,7 @@ class Executor:
                 entry_win_prob=signal.estimated_win_prob,
                 match_price=match_price,
                 fee_paid_usd=fee_paid_usd,
+                actual_shares=actual_shares,
             )
         else:  # Side.SELL
             await store.finalize_sell_order(idempotency_key, result.order_id)

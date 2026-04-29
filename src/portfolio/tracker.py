@@ -83,6 +83,7 @@ class PortfolioTracker:
         entry_win_prob: float | None = None,
         match_price: float | None = None,
         fee_paid_usd: float | None = None,
+        actual_shares: float | None = None,
     ) -> int:
         """Atomically promote a pending order to filled + insert the position.
 
@@ -92,8 +93,19 @@ class PortfolioTracker:
         ``fee_paid_usd`` is the taker-side fee.  Both are optional so paper
         mode and legacy callers keep working — the dashboard falls back to
         ``entry_price`` when ``match_price`` is NULL.
+
+        Bug C (2026-04-29): ``actual_shares`` is the on-chain net share count
+        from ``FillSummary.net_shares`` — what actually arrived in the
+        ERC1155 after the BUY taker fee was deducted in shares.  Prefer it
+        when present so ``positions.shares`` matches chain (prevents the
+        SELL "not enough balance" 400 that motivated this fix).  Falls back
+        to the legacy ``size_usd / price`` formula for paper mode and any
+        callsite that hasn't been updated.
         """
-        shares = size_usd / price if price > 0 else 0
+        if actual_shares is not None and actual_shares > 0:
+            shares = actual_shares
+        else:
+            shares = size_usd / price if price > 0 else 0
         position_id = await self._store.finalize_buy_order(
             idempotency_key=idempotency_key,
             order_id=order_id,

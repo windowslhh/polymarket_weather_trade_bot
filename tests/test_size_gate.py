@@ -246,3 +246,204 @@ async def test_sell_above_thresholds_proceeds_to_clob():
 
     clob.place_limit_order.assert_called_once()
     await store.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Bug C Phase 1 (2026-04-29): SELL clamp by on-chain ERC1155 balance.
+# DB shares can be > on-chain (the BUY taker fee was deducted in shares
+# from the token side; legacy rows wrote ``size_usd / limit_price``).
+# Without the clamp, the matcher 400's "not enough balance".
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sell_clamps_to_on_chain_when_db_overshoots():
+    """DB says 3.0838 shares, chain has 3.046120 — order must use the
+    chain figure so Polymarket doesn't reject with 'not enough balance'.
+
+    Replays the 2026-04-29 Denver id=6 incident.
+    """
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    # Chain returns raw 6-decimal: 3.046120 shares == 3,046,120 raw.
+    clob.get_conditional_balance = AsyncMock(return_value=3_046_120)
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok_id", success=True),
+    )
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_drift", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.775, size_usd=2.39,
+        shares=3.0838709677, strategy="D", buy_reason="seed",
+    )
+    # Price 0.50 keeps 3.046 × $0.50 = $1.52 above the $1 min-amount gate,
+    # so the clamp behaviour is exercised end-to-end through to CLOB.
+    sig = _sell_signal_with_token("tok_drift", price_no=0.50)
+    await executor.execute_signals([sig])
+
+    # Verify the order used the on-chain count, not DB.
+    clob.place_limit_order.assert_called_once()
+    call_kwargs = clob.place_limit_order.call_args.kwargs
+    assert abs(call_kwargs["size"] - 3.046120) < 1e-6, (
+        f"SELL size should be clamped to chain balance, got {call_kwargs['size']}"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sell_skips_when_on_chain_zero():
+    """If chain has 0 shares (already redeemed / never settled mid-cycle),
+    the SELL must skip without hitting CLOB — even if DB still shows
+    open shares.  Prevents 400's after a redeemer race."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    clob.get_conditional_balance = AsyncMock(return_value=0)
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_gone", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.50, size_usd=5.0,
+        shares=10.0, strategy="D", buy_reason="seed",
+    )
+    sig = _sell_signal_with_token("tok_gone", price_no=0.30)
+    await executor.execute_signals([sig])
+
+    clob.place_limit_order.assert_not_called()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sell_falls_back_to_db_when_chain_query_raises():
+    """RPC failure must NOT block legitimate SELLs — fall back to DB
+    shares with a warning.  The pre-fix behavior is the safe fallback."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    clob.get_conditional_balance = AsyncMock(
+        side_effect=RuntimeError("RPC timeout"),
+    )
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok_id", success=True),
+    )
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_fallback", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.50, size_usd=5.0,
+        shares=10.0, strategy="D", buy_reason="seed",
+    )
+    sig = _sell_signal_with_token("tok_fallback", price_no=0.40)
+    await executor.execute_signals([sig])
+
+    clob.place_limit_order.assert_called_once()
+    call_kwargs = clob.place_limit_order.call_args.kwargs
+    assert call_kwargs["size"] == 10.0, (
+        "On RPC failure SELL must fall back to DB shares, "
+        f"got {call_kwargs['size']}"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sell_paper_mode_skips_chain_clamp_uses_db_shares():
+    """Bug C Phase 1 paper-mode short-circuit (2026-04-29): paper has no
+    real chain position so ``get_conditional_balance`` returns 0 (the
+    wrapper at clob_client.py:300-335 swallows errors and yields 0).
+    Without the short-circuit ``min(db, 0) == 0`` would silently kill
+    every paper SELL — masking strategy regressions in CI/dryrun.
+    """
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    clob._config.paper = True
+    # Even if paper somehow returns 0 from chain, we must trust DB.
+    clob.get_conditional_balance = AsyncMock(return_value=0)
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="paper_id", success=True),
+    )
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_paper", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.45, size_usd=10.0,
+        shares=20.0, strategy="D", buy_reason="seed",
+    )
+    sig = _sell_signal_with_token("tok_paper", price_no=0.40)
+    await executor.execute_signals([sig])
+
+    clob.place_limit_order.assert_called_once()
+    call_kwargs = clob.place_limit_order.call_args.kwargs
+    assert call_kwargs["size"] == 20.0, (
+        f"Paper SELL must use db_shares=20.0, got {call_kwargs['size']}"
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sell_paper_mode_does_not_call_get_conditional_balance():
+    """Paper short-circuit must avoid the chain RPC entirely — no
+    keychain creds / no Polygon RPC needed for paper runs."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    clob._config.paper = True
+    clob.get_conditional_balance = AsyncMock(return_value=0)
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="paper_id", success=True),
+    )
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_p2", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.45, size_usd=10.0,
+        shares=20.0, strategy="D", buy_reason="seed",
+    )
+    sig = _sell_signal_with_token("tok_p2", price_no=0.40)
+    await executor.execute_signals([sig])
+
+    clob.get_conditional_balance.assert_not_called()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sell_uses_db_when_chain_balance_higher():
+    """If chain > DB (somehow — shouldn't happen post-fix, but defensive),
+    don't sell more than DB has tracked.  Otherwise we'd sell tokens we
+    don't know about → P&L mis-attribution."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    cfg = replace(StrategyConfig(),
+                  min_order_size_shares=5.0, min_order_amount_usd=1.0)
+    clob = _FakeClob(cfg)
+    # Chain: 100 shares.  DB: 50.  min(50, 100) = 50.
+    clob.get_conditional_balance = AsyncMock(return_value=100_000_000)
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="ok_id", success=True),
+    )
+    executor = Executor(clob, tracker)
+
+    await store.insert_position(
+        event_id="ev_sell", token_id="tok_under", token_type="NO", city="Chicago",
+        slot_label="80°F to 84°F", side="BUY", entry_price=0.50, size_usd=25.0,
+        shares=50.0, strategy="D", buy_reason="seed",
+    )
+    sig = _sell_signal_with_token("tok_under", price_no=0.40)
+    await executor.execute_signals([sig])
+
+    clob.place_limit_order.assert_called_once()
+    call_kwargs = clob.place_limit_order.call_args.kwargs
+    assert call_kwargs["size"] == 50.0
+    await store.close()

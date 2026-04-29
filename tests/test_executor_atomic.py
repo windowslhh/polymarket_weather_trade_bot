@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.execution.executor import Executor
-from src.markets.clob_client import OrderResult
+from src.markets.clob_client import FillSummary, OrderResult
 from src.markets.models import Side, TempSlot, TokenType, TradeSignal, WeatherMarketEvent
 from src.portfolio.store import Store
 from src.portfolio.tracker import PortfolioTracker
@@ -95,6 +95,73 @@ async def test_happy_path_records_order_and_position():
     assert positions[0]["source_order_id"] == "clob_abc123"
     assert positions[0]["status"] == "open"
 
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_buy_with_fill_summary_writes_net_shares_to_db():
+    """Bug C Phase 2 (2026-04-29): when ``get_fill_summary`` returns a
+    FillSummary with ``net_shares`` set, ``record_fill_atomic`` must
+    persist that count to ``positions.shares`` instead of the legacy
+    ``size_usd / limit_price`` formula.  Replays Denver id=6: limit
+    0.45, gross fill 3.08, fee deducted in shares → net 3.046120.
+    The position row must read 3.046120 so the on-chain SELL succeeds.
+    """
+    store, _ = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = AsyncMock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="clob_buyfill", success=True),
+    )
+    clob.get_fill_summary = AsyncMock(return_value=FillSummary(
+        shares=3.08,
+        match_price=0.78,
+        fee_paid_usd=0.0264264,
+        net_shares=3.046120,
+    ))
+    executor = Executor(clob, tracker)
+
+    await executor.execute_signals([_build_signal()])
+
+    async with store.db.execute(
+        "SELECT shares, match_price, fee_paid_usd FROM positions"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert len(rows) == 1
+    assert abs(rows[0]["shares"] - 3.046120) < 1e-9, (
+        f"Expected on-chain net shares 3.046120, got {rows[0]['shares']}"
+    )
+    assert rows[0]["match_price"] == 0.78
+    assert abs(rows[0]["fee_paid_usd"] - 0.0264264) < 1e-9
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_buy_without_fill_summary_falls_back_to_legacy_formula():
+    """When ``get_fill_summary`` returns None (paper mode, SDK error,
+    propagation lag) the legacy ``size_usd / limit_price`` formula must
+    still produce a valid ``positions.shares`` so paper-mode tests and
+    fallback paths keep working."""
+    store, _ = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = AsyncMock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(order_id="clob_legacy", success=True),
+    )
+    clob.get_fill_summary = AsyncMock(return_value=None)
+    executor = Executor(clob, tracker)
+
+    sig = _build_signal()
+    await executor.execute_signals([sig])
+
+    async with store.db.execute(
+        "SELECT shares, match_price FROM positions"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert len(rows) == 1
+    # Legacy formula: 10.0 / 0.45 = 22.2222...
+    assert abs(rows[0]["shares"] - (10.0 / 0.45)) < 1e-9
+    assert rows[0]["match_price"] is None
     await store.close()
 
 
