@@ -32,28 +32,94 @@ DEFAULT_CONFIDENCE_F = 4.0
 
 # FIX-12: fallback cache now carries a timestamp so stale-on-failure reuse is
 # bounded.  Before, an API outage lasting longer than a day would keep the bot
-# trading on yesterday's forecast.  The 3-hour TTL is generous enough to ride
-# out transient Open-Meteo hiccups without freezing decisions on a dead cache.
-FORECAST_CACHE_TTL_HOURS = 3.0
-_last_forecast_cache: dict[str, tuple[datetime, Forecast]] = {}
+# trading on yesterday's forecast.
+#
+# 2026-05-01: split the single FORECAST_CACHE_TTL_HOURS into two windows
+# and re-key by ``(city_name, target_date)``.  Two bugs in the original
+# design:
+#
+#   1. **Cache key was city-only.**  ``get_forecasts_for_city_local_window``
+#      fetches today / D+1 / D+2 per city back-to-back; each successful
+#      fetch overwrote the previous date's entry under the same city key.
+#      The cache was never useful for in-cycle dedup, and the
+#      "all APIs failed → use cached" fallback served whichever date
+#      happened to fetch last (typically D+2) under the today key,
+#      tripping evaluator's FIX-22 forecast_date != market_date assertion
+#      and silently breaking the 15-min position-check during outages.
+#
+#   2. **One TTL conflated two needs.**  3h was right for stale-on-failure
+#      reuse but too long for in-cycle dedup; we want to skip the network
+#      when the same (city, date) was just fetched a few minutes ago, not
+#      hours.  Split into ``FRESH`` (45 min — slightly less than the
+#      60-min rebalance cycle, comfortably more than the 15-min position
+#      check) for hot-path dedup, and ``STALE`` (3h, unchanged) for the
+#      "every API down" fallback path.
+#
+# Net effect: 27 (city, date) fetches per cycle drop to ~9 once the
+# warm cache populates (only "today" rotates within the FRESH window
+# on a 60-min cycle; D+1/D+2 stay valid).  Combined with the
+# MAX_CONCURRENT=2 throttle in http_utils, the 1015 / 31h Open-Meteo
+# 429 deluge should fall to near-zero.
+FORECAST_CACHE_FRESH_HOURS = 0.75
+FORECAST_CACHE_STALE_HOURS = 3.0
+# Back-compat alias.  Some external callers / older tests still import
+# ``FORECAST_CACHE_TTL_HOURS`` expecting the failure-fallback semantics
+# (the only window the original constant ever guarded).  Keep it
+# pointing at the STALE window so those imports keep behaving the way
+# they did pre-split.
+FORECAST_CACHE_TTL_HOURS = FORECAST_CACHE_STALE_HOURS
+_last_forecast_cache: dict[tuple[str, date], tuple[datetime, Forecast]] = {}
 
 
-def _cache_forecast(city_name: str, forecast: Forecast) -> None:
-    """Store a successful forecast with its wall-clock timestamp."""
+def _cache_forecast(
+    city_name: str, target_date: date, forecast: Forecast,
+) -> None:
+    """Store a successful forecast with its wall-clock timestamp.
+
+    Keyed by ``(city_name, target_date)`` so today / D+1 / D+2 entries
+    for the same city co-exist instead of overwriting.
+    """
     from datetime import datetime, timezone as _tz
-    _last_forecast_cache[city_name] = (datetime.now(_tz.utc), forecast)
+    _last_forecast_cache[(city_name, target_date)] = (
+        datetime.now(_tz.utc), forecast,
+    )
 
 
-def _get_cached_forecast(city_name: str) -> Forecast | None:
-    """Return the cached forecast only if it's inside the TTL window."""
+def _get_cached_forecast(
+    city_name: str,
+    target_date: date,
+    *,
+    fresh_only: bool = False,
+) -> Forecast | None:
+    """Return the cached forecast for ``(city_name, target_date)`` if
+    it's inside the appropriate TTL window.
+
+    ``fresh_only=True`` uses ``FORECAST_CACHE_FRESH_HOURS`` (in-cycle
+    dedup; the hot path that skips network when we just fetched this
+    pair).  ``fresh_only=False`` (default) uses
+    ``FORECAST_CACHE_STALE_HOURS`` for the all-APIs-failed fallback.
+
+    On any miss (no entry, or entry past the active window) the entry
+    is evicted only when *past the stale window* — a fresh-only miss
+    keeps the entry around so the stale-fallback path can still find
+    it on the same call later in ``get_forecast``.
+    """
     from datetime import datetime, timedelta, timezone as _tz
-    entry = _last_forecast_cache.get(city_name)
+    key = (city_name, target_date)
+    entry = _last_forecast_cache.get(key)
     if entry is None:
         return None
     ts, forecast = entry
-    if datetime.now(_tz.utc) - ts > timedelta(hours=FORECAST_CACHE_TTL_HOURS):
-        # Evict to prevent unbounded staleness reuse.
-        _last_forecast_cache.pop(city_name, None)
+    age = datetime.now(_tz.utc) - ts
+    window = timedelta(
+        hours=FORECAST_CACHE_FRESH_HOURS if fresh_only
+        else FORECAST_CACHE_STALE_HOURS,
+    )
+    if age > window:
+        # Only evict when the entry is past the stale window.  A
+        # fresh-window miss leaves the row intact for the fallback path.
+        if age > timedelta(hours=FORECAST_CACHE_STALE_HOURS):
+            _last_forecast_cache.pop(key, None)
         return None
     return forecast
 
@@ -206,6 +272,19 @@ async def get_forecast(
             "city-local 'today' rather than relying on a global default."
         )
     target = target_date
+
+    # 2026-05-01: in-cycle dedup.  The 60-min full rebalance and 15-min
+    # position-check both call get_forecasts_for_city_local_window, which
+    # fans out 9 cities × 3 days = 27 (city, date) pairs every cycle.
+    # If a recent successful fetch is sitting in cache within the FRESH
+    # window, return it without touching the network — turns the 27
+    # Open-Meteo requests/cycle into mostly cache hits as warm cache
+    # populates.  Stale-on-failure path still uses the STALE window
+    # below.  We don't open ``client`` until we know we'll use it.
+    cached_fresh = _get_cached_forecast(city.name, target, fresh_only=True)
+    if cached_fresh is not None:
+        return cached_fresh
+
     should_close = client is None
     client = client or httpx.AsyncClient(timeout=30)
 
@@ -259,19 +338,26 @@ async def get_forecast(
             else:
                 # Last resort: cached forecast — FIX-12 enforces a TTL so
                 # we don't reuse a multi-day-old forecast when every live
-                # source stays broken.
-                cached = _get_cached_forecast(city.name)
+                # source stays broken.  2026-05-01: cache is now keyed by
+                # (city, target) so this lookup matches the date the
+                # caller actually asked for, not whichever date the same
+                # city happened to fetch last (the pre-fix bug that fed
+                # D+2 forecasts into today-shaped lookups during outages).
+                cached = _get_cached_forecast(city.name, target)
                 if cached:
                     logger.warning(
-                        "Forecast %s: Using cached forecast (all APIs failed, "
-                        "within %.1fh TTL)", city.name, FORECAST_CACHE_TTL_HOURS,
+                        "Forecast %s %s: Using cached forecast (all APIs "
+                        "failed, within %.1fh stale TTL)",
+                        city.name, target.isoformat(),
+                        FORECAST_CACHE_STALE_HOURS,
                     )
                     forecast = cached
                 else:
                     raise RuntimeError(f"All forecast sources failed for {city.name}")
 
-        # Update cache with fresh timestamp
-        _cache_forecast(city.name, forecast)
+        # Update cache with fresh timestamp.  Keyed by (city, target) so
+        # today / D+1 / D+2 entries for the same city co-exist.
+        _cache_forecast(city.name, target, forecast)
         return forecast
 
     finally:

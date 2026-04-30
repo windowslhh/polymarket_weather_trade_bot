@@ -13,7 +13,19 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-MAX_CONCURRENT = 5
+# 2026-05-01: dropped 5 → 2 to stay inside Open-Meteo's free-tier 5 req/s
+# cap.  At MAX_CONCURRENT=5 each slot did request (~200-500ms) + 0.2s
+# sleep before releasing, giving 5 / (0.4–0.7s) ≈ 7-12 req/s effective —
+# above the cap, so a 27-task ``asyncio.gather`` over 9 cities × 3 days
+# caused bursty 429 storms (1015× over 31h on 2026-04-29 / 04-30) even
+# though sustained volume (~75 req/h) was nowhere near the 600/h ceiling.
+# At MAX_CONCURRENT=2 effective rate drops to 2 / 0.55 ≈ 3.6 req/s, fits
+# under both the 5/s and 60/min caps.  Cycle-time penalty: 27 fetches now
+# drain in ~7s vs ~3s before — acceptable given the 60-min rebalance
+# cadence.  fetch_with_retry is Open-Meteo-only (NWS uses raw httpx in
+# nws.py without going through this semaphore), so this throttle doesn't
+# slow the parallel weather.gov leg.
+MAX_CONCURRENT = 2
 REQUEST_DELAY = 0.2
 MAX_RETRIES = 4
 BASE_BACKOFF = 1.0
