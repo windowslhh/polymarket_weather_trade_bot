@@ -277,6 +277,59 @@ class ClobClient:
         client = self._get_client()
         return await asyncio.to_thread(client.get_order_book, token_id)
 
+    async def get_top_of_book(
+        self, token_id: str,
+    ) -> tuple[float | None, float | None]:
+        """Returns ``(best_bid, best_ask)`` or ``(None, None)`` on empty book / error.
+
+        Polymarket ``/book`` returns ``bids`` sorted desc by price and
+        ``asks`` sorted asc.  An empty side maps to ``None`` so callers
+        can treat it as a thin-liquidity skip rather than a hard error.
+
+        Used by ``place_limit_order`` to convert a midpoint-derived limit
+        into a cross-the-spread limit (see FAK-cross-pricing fix:
+        midpoint + FAK is mathematically guaranteed to never fill, so
+        we replace ``price`` with ``best_ask + 1tick`` for BUY /
+        ``best_bid - 1tick`` for SELL just before submission).
+        """
+        if self._config.dry_run or self._config.paper:
+            return None, None  # paper/dry-run never reach FAK; defensive
+        client = self._get_client()
+        try:
+            book = await asyncio.to_thread(client.get_order_book, token_id)
+        except Exception as exc:
+            logger.warning(
+                "get_top_of_book failed token=%s: %s", token_id[:12], exc,
+            )
+            return None, None
+        # py_clob_client_v2 may return an OrderBookSummary object or a
+        # plain dict depending on SDK version — normalise to dict-like.
+        if not isinstance(book, dict):
+            book = getattr(book, "__dict__", {}) or {}
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        bb: float | None = None
+        ba: float | None = None
+        if bids:
+            try:
+                top_bid = bids[0]
+                bb = float(
+                    top_bid["price"] if isinstance(top_bid, dict)
+                    else getattr(top_bid, "price", 0.0)
+                )
+            except (KeyError, ValueError, TypeError):
+                bb = None
+        if asks:
+            try:
+                top_ask = asks[0]
+                ba = float(
+                    top_ask["price"] if isinstance(top_ask, dict)
+                    else getattr(top_ask, "price", 0.0)
+                )
+            except (KeyError, ValueError, TypeError):
+                ba = None
+        return bb, ba
+
     async def get_midpoint(self, token_id: str) -> float | None:
         """Get the midpoint price for a token.
 
@@ -400,9 +453,107 @@ class ClobClient:
         from py_clob_client_v2 import OrderArgs, OrderType, Side
 
         order_side = Side.BUY if side.upper() == "BUY" else Side.SELL
+
+        # FAK-cross-pricing fix (2026-04-30): the ``price`` we receive from
+        # the strategy layer is a CLOB-midpoint or last-trade price (see
+        # ``get_prices_batch`` → ``get_midpoint`` fallback chain).  Submitting
+        # a FAK order at midpoint is mathematically guaranteed to never fill:
+        # for any positive spread, midpoint < best_ask AND midpoint > best_bid,
+        # so the FAK matcher finds nothing to cross and the server either
+        # 400's "no orders found to match" or 200's status=delayed and kills
+        # async.  Both paths surfaced in production 2026-04-29 (1/19 BUY fill,
+        # 0/16 SELL fill in the FAK era).
+        #
+        # The fix is structural: pre-flight the order book, then replace
+        # ``price`` with ``best_ask + 1 tick`` (BUY) or ``best_bid - 1 tick``
+        # (SELL).  The 1-tick safety margin absorbs sub-RTT book moves; FAK
+        # kills any unfilled remainder server-side so the extra tick is never
+        # actually paid (server fills at the resting maker price, not our
+        # cap).
+        #
+        # Two skip paths short-circuit before submission:
+        #   - THIN_LIQUIDITY_NO_ASK / NO_BID: book is empty on the side we'd
+        #     cross.  Bailing here avoids a guaranteed FAK reject and the
+        #     accompanying retry storm.
+        #   - SLIPPAGE_TOO_HIGH: cross_price diverges from midpoint by more
+        #     than ``max_taker_slippage`` (default 5%).  Catches Atlanta-style
+        #     near-settled books where last-trade is 0.20 but the only
+        #     remaining bid is 0.001 — taking that fill would crystallise a
+        #     loss the strategy didn't price in.
+        TICK = 0.01
+        MAX_TAKER_SLIPPAGE = getattr(self._config, "max_taker_slippage", 0.05)
+
+        bb, ba = await self.get_top_of_book(token_id)
+
+        if side.upper() == "BUY":
+            if ba is None:
+                logger.info(
+                    "BUY skipped THIN_LIQUIDITY_NO_ASK token=%s mid=%.4f "
+                    "size=%.4f%s",
+                    token_id[:12], price, size, key_suffix,
+                )
+                return OrderResult(
+                    order_id="", success=False,
+                    message="THIN_LIQUIDITY_NO_ASK",
+                )
+            cross_price = round(ba + TICK, 2)
+            if cross_price > 1.0:
+                cross_price = 1.0  # Polymarket prices cap at 1.0 USDC
+            slip = (cross_price - price) / max(price, TICK)
+            if slip > MAX_TAKER_SLIPPAGE:
+                logger.info(
+                    "BUY skipped SLIPPAGE_TOO_HIGH token=%s mid=%.4f "
+                    "ask=%.4f cross=%.4f slip=%.2f%% gate=%.2f%%%s",
+                    token_id[:12], price, ba, cross_price,
+                    slip * 100, MAX_TAKER_SLIPPAGE * 100, key_suffix,
+                )
+                return OrderResult(
+                    order_id="", success=False,
+                    message=(
+                        f"SLIPPAGE_TOO_HIGH ask={ba:.4f} mid={price:.4f}"
+                    ),
+                )
+        else:  # SELL
+            if bb is None:
+                logger.info(
+                    "SELL skipped THIN_LIQUIDITY_NO_BID token=%s mid=%.4f "
+                    "size=%.4f%s",
+                    token_id[:12], price, size, key_suffix,
+                )
+                return OrderResult(
+                    order_id="", success=False,
+                    message="THIN_LIQUIDITY_NO_BID",
+                )
+            cross_price = round(bb - TICK, 2)
+            if cross_price < TICK:
+                cross_price = TICK  # don't go below min tick
+            slip = (price - cross_price) / max(price, TICK)
+            if slip > MAX_TAKER_SLIPPAGE:
+                logger.info(
+                    "SELL skipped SLIPPAGE_TOO_HIGH token=%s mid=%.4f "
+                    "bid=%.4f cross=%.4f slip=%.2f%% gate=%.2f%%%s",
+                    token_id[:12], price, bb, cross_price,
+                    slip * 100, MAX_TAKER_SLIPPAGE * 100, key_suffix,
+                )
+                return OrderResult(
+                    order_id="", success=False,
+                    message=(
+                        f"SLIPPAGE_TOO_HIGH bid={bb:.4f} mid={price:.4f}"
+                    ),
+                )
+
+        logger.info(
+            "Cross-the-spread token=%s side=%s mid=%.4f best_%s=%.4f "
+            "→ cross=%.4f size=%.4f%s",
+            token_id[:12], side, price,
+            "ask" if side.upper() == "BUY" else "bid",
+            ba if side.upper() == "BUY" else bb,
+            cross_price, size, key_suffix,
+        )
+
         order_args = OrderArgs(
             token_id=token_id,
-            price=price,
+            price=cross_price,
             size=size,
             side=order_side,
         )
@@ -451,7 +602,7 @@ class ClobClient:
                 matched = status == "matched" or bool(tx_hashes)
                 logger.info(
                     "Order placed: %s %s @ %.4f x %.2f -> %s status=%s matched=%s%s (attempt=%d)",
-                    side, token_id, price, size, order_id,
+                    side, token_id, cross_price, size, order_id,
                     status or "?", matched, key_suffix, attempt + 1,
                 )
                 # FIX-M4: empty order_id is treated as failure (see above).

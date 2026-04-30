@@ -40,6 +40,24 @@ def _mk_live_config() -> SimpleNamespace:
     )
 
 
+def _attach_default_book(clob_mock_client) -> None:
+    """Install a crossable default book on a mocked SDK client.
+
+    FAK-cross-pricing fix (2026-04-30): ``place_limit_order`` now pre-flights
+    ``client.get_order_book`` and substitutes a cross-the-spread limit before
+    submission.  Tests that exercise the SDK call need this mock or
+    ``get_top_of_book`` returns ``(None, None)`` and the wrapper short-circuits
+    with THIN_LIQUIDITY.  ``_build_signal`` defaults to price=0.45, so bid 0.43
+    / ask 0.45 gives BUY cross 0.46 = 2.2% slip, comfortably under the 5% gate.
+    """
+    clob_mock_client.get_order_book = MagicMock(
+        return_value={
+            "bids": [{"price": "0.43", "size": "1000"}],
+            "asks": [{"price": "0.45", "size": "1000"}],
+        },
+    )
+
+
 def _build_signal(price: float = 0.45, size: float = 10.0) -> TradeSignal:
     slot = TempSlot(
         token_id_yes="tok_yes", token_id_no="tok_no",
@@ -65,6 +83,7 @@ async def test_live_success_writes_order_and_position():
 
     clob = ClobClient(_mk_live_config())
     clob._client = MagicMock()
+    _attach_default_book(clob._client)
     clob._client.create_and_post_order = MagicMock(
         return_value={"orderID": "clob_live_1", "status": "matched"},
     )
@@ -96,6 +115,7 @@ async def test_live_rate_limit_retries_then_succeeds(monkeypatch):
 
     clob = ClobClient(_mk_live_config())
     clob._client = MagicMock()
+    _attach_default_book(clob._client)
     calls = [
         RuntimeError("HTTP 429 Too Many"),
         {"orderID": "clob_live_ok", "status": "matched"},
@@ -133,6 +153,7 @@ async def test_live_connection_failure_marks_failed(monkeypatch):
 
     clob = ClobClient(_mk_live_config())
     clob._client = MagicMock()
+    _attach_default_book(clob._client)
     clob._client.create_and_post_order = MagicMock(
         side_effect=RuntimeError("connection refused"),
     )

@@ -24,6 +24,19 @@ def _make_client() -> ClobClient:
     client = ClobClient(cfg)  # type: ignore[arg-type]
     # Bypass _get_client so we don't import py-clob-client in tests.
     client._client = MagicMock()
+    # FAK-cross-pricing fix (2026-04-30): place_limit_order now pre-flights
+    # the order book and substitutes a cross-the-spread limit before sending.
+    # Tests that drive ``create_and_post_order`` directly need a default
+    # crossable book so the gate doesn't short-circuit before the SDK call.
+    # bid 0.49 / ask 0.51 produces cross_price 0.52 for BUY / 0.48 for SELL,
+    # which keeps slippage <5% for the 0.5 / 0.55 / 0.565 prices these tests
+    # use; tests that need a different book override this attribute locally.
+    client._client.get_order_book = MagicMock(
+        return_value={
+            "bids": [{"price": "0.49", "size": "1000"}],
+            "asks": [{"price": "0.51", "size": "1000"}],
+        },
+    )
     return client
 
 
@@ -225,7 +238,11 @@ async def test_v2_create_and_post_order_receives_typed_OrderArgs(monkeypatch):
         f"first arg must be OrderArgs, got {type(order_args).__name__}"
     )
     assert order_args.token_id == "tok-v2"
-    assert order_args.price == 0.55
+    # FAK-cross-pricing fix (2026-04-30): wrapper substitutes the caller's
+    # mid (0.55) with ``best_ask + 1 tick`` from the pre-flighted book.
+    # _make_client installs a default book bid 0.49 / ask 0.51, so the BUY
+    # cross is 0.52 — that is what reaches the SDK, not 0.55.
+    assert order_args.price == 0.52
     assert order_args.size == 10.0
     # Side is the v2 IntEnum (BUY=0, SELL=1), not the v1 string.
     assert order_args.side == Side.BUY

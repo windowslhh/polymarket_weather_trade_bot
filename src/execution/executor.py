@@ -308,6 +308,33 @@ class Executor:
             # cancel.  The earlier A1 best-effort cancel that ran here was
             # only correct for the GTC-era "unmatched-and-resting" failure
             # mode, which FAK eliminates by design.
+            #
+            # FAK-cross-pricing fix (2026-04-30): the wrapper now pre-flights
+            # the order book and returns success=False with a structured
+            # message ("THIN_LIQUIDITY_NO_BID/ASK", "SLIPPAGE_TOO_HIGH ...")
+            # when the book gate would never cross.  These are NOT CLOB
+            # rejects — the order was never submitted.  Surface them at
+            # WARNING with the token id and reason so a retry storm is easy
+            # to spot in tail-f.  decision_log persistence is intentionally
+            # deferred (Patch C follow-up): writing from executor would need
+            # a new evaluator/executor edge and the simpler observe-first
+            # approach reveals whether retry storm is severe enough to
+            # warrant the plumbing cost.
+            failure_msg = result.message or ""
+            if any(
+                code in failure_msg
+                for code in ("THIN_LIQUIDITY", "SLIPPAGE_TOO_HIGH")
+            ):
+                side_value = (
+                    signal.side.value
+                    if hasattr(signal.side, "value")
+                    else str(signal.side)
+                )
+                logger.warning(
+                    "Order rejected by book gate token=%s side=%s "
+                    "reason=%s — same signal will likely re-trigger next cycle",
+                    signal.token_id[:12], side_value, failure_msg,
+                )
             return
 
         if signal.side == Side.BUY:
