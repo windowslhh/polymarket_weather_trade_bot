@@ -144,6 +144,16 @@ class StrategyConfig:
     min_order_size_shares: float = 5.0
     min_order_amount_usd: float = 1.0
 
+    # FAK cross-spread slippage gate (2026-04-30) — reject orders when
+    # ``(cross_price - mid) / mid`` exceeds this fraction.  Default 5%.
+    # Promoted from a hardcoded constant in ``clob_client.place_limit_order``
+    # to a config field so thin-liquidity microstructure can be tuned via
+    # ``config.yaml`` without redeploying.  Catches Atlanta-style near-settled
+    # books where last-trade is stale and the only remaining quote is far
+    # from mid (last-trade 0.20 / best-bid 0.001 — taking that fill
+    # crystallises a loss the strategy didn't price in).
+    max_taker_slippage: float = 0.05
+
     # FIX-17 (2026-04-24): per-variant city filter.  Empty = all cities
     # allowed (default for B/C).  D' uses this to restrict its narrow
     # high-EV profile to cities whose historical forecast error is small

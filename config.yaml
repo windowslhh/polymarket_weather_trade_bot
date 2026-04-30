@@ -26,6 +26,15 @@ strategy:
   min_market_volume: 500
   # Maximum YES/NO spread to consider a slot liquid
   max_slot_spread: 0.15
+  # FAK cross-spread slippage gate (2026-04-30) — when the wrapper rewrites
+  # the limit to ``best_ask + 1 tick`` (BUY) / ``best_bid - 1 tick`` (SELL),
+  # reject the order if the resulting cross_price diverges from the strategy
+  # mid by more than this fraction.  Default 5%.  Catches Atlanta-style
+  # near-settled books where last-trade is 0.20 but the only remaining bid
+  # is 0.001.
+  # Tune here without rebuilding the Docker image (bot restart still required —
+  # load_config() reads YAML once at startup).
+  max_taker_slippage: 0.05
   # Minimum EV to keep a position; below this → auto-trim
   min_trim_ev: 0.005
   # Maximum NO price to buy (avoid asymmetric risk at high prices)

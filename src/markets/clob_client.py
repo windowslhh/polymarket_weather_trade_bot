@@ -77,6 +77,14 @@ RATE_LIMIT_CAP_S = 30.0
 # next bot start.
 TIMEOUT_RETRIES = False
 
+# Polymarket CLOB tick size for weather markets (0.01 USDC).  Used by the
+# FAK cross-spread fix to compute ``best_ask + 1 tick`` / ``best_bid - 1 tick``
+# and as the lower-bound on submitted limit prices.  Promoted from a local
+# constant in ``place_limit_order`` to module level so the cold-start
+# ``price <= TICK`` guard at the entry of ``place_limit_order`` and the
+# cross-the-spread block lower in the method share a single source.
+TICK = 0.01
+
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
     """Best-effort heuristic: py-clob-client wraps requests, so 429s arrive as
@@ -394,14 +402,48 @@ class ClobClient:
         price: float,
         size: float,
         idempotency_key: str | None = None,
+        strategy_config: object | None = None,
     ) -> OrderResult:
         """Place a limit order.
 
-        `idempotency_key` is not accepted by py-clob-client itself but is threaded
-        through so logs/paper-returns carry the breadcrumb the reconciler (FIX-05)
-        keys off of.
+        ``idempotency_key`` is not accepted by py-clob-client itself but is
+        threaded through so logs/paper-returns carry the breadcrumb the
+        reconciler (FIX-05) keys off of.
+
+        ``strategy_config`` is an optional ``StrategyConfig`` (the type is
+        elided to avoid a circular import — duck-typed via ``getattr``).
+        Used to read ``max_taker_slippage`` for the cross-spread gate.  The
+        executor passes the active variant's config; falling back to
+        ``self._config.strategy`` lets paper / test paths that don't thread
+        the variant through still see the YAML-tuned value.  Final fallback
+        is the hardcoded 5% so the gate never disappears.
         """
         key_suffix = f" key={idempotency_key[:8]}" if idempotency_key else ""
+
+        # FAK cold-start guard (2026-04-30, review #4): a cold-start Gamma 0
+        # price can leak past PriceStopGate via the 15-min position-check
+        # path (see CLAUDE.md "Position-check cycle bypasses D1's discovery
+        # filter").  Bailing here means the FAK matcher never sees a 0 limit
+        # — both because Polymarket would reject it as below tick, and
+        # because it'd compute a nonsense slippage ratio (denominator → 0).
+        # ``<=`` covers 0, negatives, and the tick boundary itself; the
+        # latter is intentional because a real entry at exactly the tick
+        # floor would still be sub-cent EV after the slippage gate.
+        # Note: SELL force-exit at floor (0.01) is also blocked here — those
+        # positions wait for settlement payout instead of attempting to sell
+        # below tick (which the orderbook can't accept anyway).
+        if price <= TICK:
+            logger.warning(
+                "Order skipped PRICE_TOO_LOW_FAK_GUARD token=%s side=%s "
+                "mid=%.4f tick=%.4f%s — likely cold-start Gamma=0 leak past "
+                "PriceStopGate; defensive guard, not the upstream fix",
+                token_id[:12], side, price, TICK, key_suffix,
+            )
+            return OrderResult(
+                order_id="", success=False,
+                message="PRICE_TOO_LOW_FAK_GUARD",
+            )
+
         if self._config.dry_run:
             logger.info(
                 "[DRY RUN] Would place %s order: token=%s price=%.4f size=%.2f%s",
@@ -480,8 +522,21 @@ class ClobClient:
         #     near-settled books where last-trade is 0.20 but the only
         #     remaining bid is 0.001 — taking that fill would crystallise a
         #     loss the strategy didn't price in.
-        TICK = 0.01
-        MAX_TAKER_SLIPPAGE = getattr(self._config, "max_taker_slippage", 0.05)
+        # ``TICK`` lives at module scope (used by the cold-start guard
+        # earlier in this method too).  ``max_taker_slippage`` resolution
+        # order: explicit ``strategy_config`` arg → ``self._config.strategy``
+        # (live config from config.yaml) → hardcoded 5% safety net.
+        MAX_TAKER_SLIPPAGE = 0.05
+        if strategy_config is not None:
+            MAX_TAKER_SLIPPAGE = getattr(
+                strategy_config, "max_taker_slippage", MAX_TAKER_SLIPPAGE,
+            )
+        else:
+            base_strategy = getattr(self._config, "strategy", None)
+            if base_strategy is not None:
+                MAX_TAKER_SLIPPAGE = getattr(
+                    base_strategy, "max_taker_slippage", MAX_TAKER_SLIPPAGE,
+                )
 
         bb, ba = await self.get_top_of_book(token_id)
 

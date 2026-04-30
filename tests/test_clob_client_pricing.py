@@ -245,10 +245,152 @@ async def test_buy_cross_clamped_at_price_cap_1_dollar():
 
 @pytest.mark.asyncio
 async def test_sell_cross_clamped_at_price_floor_1_tick():
-    """bid 0.01 → naive cross 0.00, clamped to 0.01 (1 tick floor;
-    Polymarket prices can't go below 1 tick).  Caller mid 0.01 keeps
-    slip at 0%."""
+    """bid 0.01 → naive cross 0.00 (bid - 1 tick), clamped up to 0.01
+    (one-tick floor; Polymarket can't price below tick).
+
+    Caller mid is 0.02 here — a mid of 0.01 would collide with the
+    cold-start ``price <= TICK`` guard at the top of place_limit_order
+    (review #4) and short-circuit before this branch runs.  The 50%
+    slippage relative to bid 0.01 also exceeds the default 5% gate,
+    so an explicit ``strategy_config`` with a relaxed ``max_taker_slippage``
+    is needed to isolate the floor-clamp behaviour from the slippage gate.
+    """
     client = _make_client()
+    client._client.get_order_book = MagicMock(return_value={
+        "bids": [{"price": "0.01"}],
+        "asks": [{"price": "0.03"}],
+    })
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "ok", "status": "matched"},
+    )
+    sc = SimpleNamespace(max_taker_slippage=0.99)
+    result = await client.place_limit_order(
+        token_id="tok", side="SELL", price=0.02, size=10.0,
+        strategy_config=sc,
+    )
+    assert result.success
+    order_args = client._client.create_and_post_order.call_args.args[0]
+    assert order_args.price == 0.01
+
+
+# ---------------------------------------------------------------------------
+# 13-14. ``max_taker_slippage`` resolution: explicit strategy_config wins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_max_taker_slippage_from_strategy_config_when_passed():
+    """Explicit ``strategy_config`` with ``max_taker_slippage=0.10`` lets a
+    7% slip through that the 5% default would block.  Confirms the
+    parameter wins over the wrapper's hardcoded fallback.
+    """
+    client = _make_client()
+    # mid 0.50, ask 0.53 → cross 0.54, slip = (0.54-0.50)/0.50 = 8% — over
+    # the default 5% gate but inside an override of 10%.
+    client._client.get_order_book = MagicMock(return_value={
+        "bids": [{"price": "0.49"}],
+        "asks": [{"price": "0.53"}],
+    })
+    client._client.create_and_post_order = MagicMock(
+        return_value={"orderID": "ok", "status": "matched"},
+    )
+    sc = SimpleNamespace(max_taker_slippage=0.10)
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.50, size=10.0,
+        strategy_config=sc,
+    )
+    assert result.success
+    assert client._client.create_and_post_order.call_args.args[0].price == 0.54
+
+
+@pytest.mark.asyncio
+async def test_max_taker_slippage_default_when_no_strategy_config():
+    """Without ``strategy_config`` and without a ``self._config.strategy``,
+    the wrapper falls back to the hardcoded 5%.  An 8% slip is rejected.
+    """
+    client = _make_client()
+    # ``_make_client``'s SimpleNamespace cfg has no ``strategy`` attribute,
+    # so the wrapper's fallback chain stops at the hardcoded 5%.
+    client._client.get_order_book = MagicMock(return_value={
+        "bids": [{"price": "0.49"}],
+        "asks": [{"price": "0.53"}],
+    })
+    client._client.create_and_post_order = MagicMock()
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.50, size=10.0,
+    )
+    assert not result.success
+    assert "SLIPPAGE_TOO_HIGH" in result.message
+    assert client._client.create_and_post_order.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 15-18. Cold-start ``price <= TICK`` guard (review #4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_buy_skipped_when_mid_below_tick_cold_start_guard():
+    """A BUY signal arriving with mid 0.0 (cold-start Gamma 0 leaking
+    past PriceStopGate via the 15-min position-check path) is bailed at
+    the entry of place_limit_order — neither the order book nor the
+    SDK's create_and_post_order are touched.
+    """
+    client = _make_client()
+    client._client.get_order_book = MagicMock()  # explode if reached
+    client._client.create_and_post_order = MagicMock()
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.0, size=10.0,
+    )
+    assert not result.success
+    assert result.message == "PRICE_TOO_LOW_FAK_GUARD"
+    assert client._client.get_order_book.call_count == 0
+    assert client._client.create_and_post_order.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_sell_skipped_when_mid_below_tick():
+    """SELL side mirrors the BUY guard."""
+    client = _make_client()
+    client._client.get_order_book = MagicMock()
+    client._client.create_and_post_order = MagicMock()
+    result = await client.place_limit_order(
+        token_id="tok", side="SELL", price=0.0, size=10.0,
+    )
+    assert not result.success
+    assert result.message == "PRICE_TOO_LOW_FAK_GUARD"
+    assert client._client.get_order_book.call_count == 0
+    assert client._client.create_and_post_order.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_buy_at_tick_boundary_skipped():
+    """``<=`` is intentional: a real entry at exactly the tick floor
+    (0.01) would still be sub-cent EV after the slippage gate, and we
+    never want a 0-divisor in the slip ratio.
+    """
+    client = _make_client()
+    client._client.get_order_book = MagicMock()
+    client._client.create_and_post_order = MagicMock()
+    result = await client.place_limit_order(
+        token_id="tok", side="BUY", price=0.01, size=10.0,
+    )
+    assert not result.success
+    assert result.message == "PRICE_TOO_LOW_FAK_GUARD"
+    assert client._client.create_and_post_order.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_buy_just_above_tick_proceeds():
+    """0.011 is just above the guard, so the wrapper proceeds to the
+    book lookup and (with a tight enough book + relaxed slip gate) to
+    the SDK.  Confirms the guard is strictly bounded — not eating
+    legitimate low-price entries.
+    """
+    client = _make_client()
+    # bid 0.01 / ask 0.02 → BUY cross = 0.03, slip = (0.03-0.011)/0.011 ≈ 173%.
+    # Pass a relaxed strategy_config so the slippage gate doesn't fire and
+    # we can confirm the order actually reaches the SDK.
     client._client.get_order_book = MagicMock(return_value={
         "bids": [{"price": "0.01"}],
         "asks": [{"price": "0.02"}],
@@ -256,9 +398,11 @@ async def test_sell_cross_clamped_at_price_floor_1_tick():
     client._client.create_and_post_order = MagicMock(
         return_value={"orderID": "ok", "status": "matched"},
     )
+    sc = SimpleNamespace(max_taker_slippage=2.0)
     result = await client.place_limit_order(
-        token_id="tok", side="SELL", price=0.01, size=10.0,
+        token_id="tok", side="BUY", price=0.011, size=10.0,
+        strategy_config=sc,
     )
     assert result.success
-    order_args = client._client.create_and_post_order.call_args.args[0]
-    assert order_args.price == 0.01
+    # ask 0.02 + 1 tick = 0.03 reaches the SDK
+    assert client._client.create_and_post_order.call_args.args[0].price == 0.03

@@ -644,12 +644,33 @@ class Store:
 
     async def mark_order_failed(
         self, idempotency_key: str, reason: str,
+        order_id: str | None = None,
     ) -> None:
-        await self.db.execute(
-            "UPDATE orders SET status = 'failed', failure_reason = ? "
-            "WHERE idempotency_key = ?",
-            (reason[:500], idempotency_key),
-        )
+        """Promote a pending order row to ``status='failed'`` with the
+        failure reason.
+
+        ``order_id`` is the CLOB-returned order id, when one exists.
+        ``insert_pending_order`` writes ``order_id=''`` because we don't
+        know the id until the SDK call returns; under the FAK-era flow
+        we now get an id back even on matched=False (server accepted +
+        async-killed).  Persisting it lets the late-fill probe in the
+        executor and the FIX-05 reconciler key off the real id without
+        having to grep logs.  Existing callers that don't have an id
+        (pre-call exception, timeout) pass None and the row keeps its
+        empty default — backwards compatible.
+        """
+        if order_id:
+            await self.db.execute(
+                "UPDATE orders SET status = 'failed', failure_reason = ?, "
+                "order_id = ? WHERE idempotency_key = ?",
+                (reason[:500], order_id, idempotency_key),
+            )
+        else:
+            await self.db.execute(
+                "UPDATE orders SET status = 'failed', failure_reason = ? "
+                "WHERE idempotency_key = ?",
+                (reason[:500], idempotency_key),
+            )
         await self.db.commit()
 
     async def get_pending_orders(self) -> list[dict]:
