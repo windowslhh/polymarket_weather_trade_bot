@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 # server may still cross the order — leaving DB out of sync with chain
 # (the "ghost-fill SELL" pattern: 3 SELLs filled but DB never closed,
 # $4.46 USDC realized P&L unrecorded as of the 2026-04-30 audit).
-# The probe polls ``get_fill_summary`` ``LATE_FILL_PROBE_ATTEMPTS`` times
-# spaced ``LATE_FILL_PROBE_BACKOFF_S`` apart (first attempt is immediate,
+# The probe polls ``get_fill_summary`` ``late_fill_probe_attempts`` times
+# spaced ``late_fill_probe_backoff_s`` apart (first attempt is immediate,
 # subsequent attempts each sleep one backoff interval).  Total worst-case
 # wall time = (attempts - 1) × backoff = 20s with the defaults.  Chosen
 # at 10s × 3 = 30s window rather than 30s × 3 = 90s because:
@@ -31,8 +31,13 @@ logger = logging.getLogger(__name__)
 #       sampling 3× across 30s catches the trade reliably.
 #   (c) 60-min cycle penalty drops from 1.5% (90s) to 0.5% (30s); for
 #       the 15-min position-check the saving matters more.
-LATE_FILL_PROBE_ATTEMPTS = 3
-LATE_FILL_PROBE_BACKOFF_S = 10.0
+# Promoted from module constants to ``StrategyConfig`` fields (analogous
+# to ``max_taker_slippage``) so the window can be tuned via ``config.yaml``
+# without redeploy if Polymarket's async-match latency drifts.  The
+# ``_DEFAULT_*`` values below are the legacy-behaviour fallbacks used when
+# a paper / test path doesn't thread a ``StrategyConfig`` through.
+_DEFAULT_LATE_FILL_PROBE_ATTEMPTS = 3
+_DEFAULT_LATE_FILL_PROBE_BACKOFF_S = 10.0
 
 
 def _should_probe_late_fill(result: OrderResult) -> bool:
@@ -92,8 +97,8 @@ class Executor:
         token_id: str,
         order_id: str,
         created_at_epoch: int,
-        max_attempts: int = LATE_FILL_PROBE_ATTEMPTS,
-        backoff_seconds: float = LATE_FILL_PROBE_BACKOFF_S,
+        max_attempts: int = _DEFAULT_LATE_FILL_PROBE_ATTEMPTS,
+        backoff_seconds: float = _DEFAULT_LATE_FILL_PROBE_BACKOFF_S,
     ):
         """Probe ``get_fill_summary`` up to ``max_attempts`` times for a
         late-resolving FAK order.  Returns the ``FillSummary`` on the
@@ -415,10 +420,28 @@ class Executor:
                     "token=%s order=%s",
                     signal.token_id[:12], result.order_id[:14],
                 )
+                # Resolve probe parameters from the active strategy config
+                # so config.yaml tuning takes effect on next bot restart
+                # without a code change.  ``strategy_config`` is the same
+                # variable the wrapper's slippage gate reads above (~line
+                # 354) — reuse rather than re-getattr.  Defaults match
+                # ``StrategyConfig`` (and the legacy module fallbacks)
+                # so paper / test paths without a real config get the
+                # same 3 × 10s window as before.
+                late_fill_attempts = getattr(
+                    strategy_config, "late_fill_probe_attempts",
+                    _DEFAULT_LATE_FILL_PROBE_ATTEMPTS,
+                )
+                late_fill_backoff = getattr(
+                    strategy_config, "late_fill_probe_backoff_s",
+                    _DEFAULT_LATE_FILL_PROBE_BACKOFF_S,
+                )
                 summary = await self._poll_for_late_fill(
                     token_id=signal.token_id,
                     order_id=result.order_id,
                     created_at_epoch=order_created_at,
+                    max_attempts=late_fill_attempts,
+                    backoff_seconds=late_fill_backoff,
                 )
                 if summary is not None and summary.shares > 0:
                     # Late fill confirmed.  Run the same SELL finalize

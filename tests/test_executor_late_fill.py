@@ -407,3 +407,61 @@ async def test_sell_success_path_unchanged(fast_sleep):
         positions = [dict(r) for r in await cur.fetchall()]
     assert positions[0]["status"] == "closed"
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# 9. Probe parameters come from StrategyConfig (config.yaml-tunable)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_attempts_and_backoff_read_from_strategy_config(
+    fast_sleep, monkeypatch,
+):
+    """``late_fill_probe_attempts`` / ``late_fill_probe_backoff_s`` move
+    from module constants to ``StrategyConfig`` fields so they're tunable
+    via ``config.yaml`` without redeploy.  Pin that the executor reads
+    them off ``clob._config.strategy`` and threads them into
+    ``_poll_for_late_fill`` — not the ``_DEFAULT_*`` fallbacks.
+    """
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = _mk_clob_mock()
+    # 5 attempts × 2.5s backoff is intentionally different from the
+    # defaults (3 / 10.0) so a regression that ignores strategy_config
+    # surfaces as a wrong call_count.
+    clob._config = SimpleNamespace(
+        dry_run=False, paper=False,
+        strategy=SimpleNamespace(
+            late_fill_probe_attempts=5,
+            late_fill_probe_backoff_s=2.5,
+        ),
+    )
+    clob.get_conditional_balance = AsyncMock(return_value=10_000_000)
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="0xtune", success=False,
+            message="order not filled (status=delayed)",
+        ),
+    )
+    clob.get_fill_summary = AsyncMock(return_value=None)
+
+    # Spy on _poll_for_late_fill so we can assert the resolved kwargs
+    # without depending on the probe loop's internal sleep cadence.
+    captured: dict = {}
+    real_poll = Executor._poll_for_late_fill
+
+    async def _spy(self, **kwargs):
+        captured.update(kwargs)
+        return await real_poll(self, **kwargs)
+
+    monkeypatch.setattr(Executor, "_poll_for_late_fill", _spy)
+
+    await _seed_open_position(store, "tok_tune", shares=5.0)
+    executor = Executor(clob, tracker)
+    await executor.execute_signals([_build_sell_signal("tok_tune", 0.45)])
+
+    assert captured["max_attempts"] == 5
+    assert captured["backoff_seconds"] == 2.5
+    assert clob.get_fill_summary.call_count == 5
+    await store.close()

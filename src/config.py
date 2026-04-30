@@ -154,6 +154,20 @@ class StrategyConfig:
     # crystallises a loss the strategy didn't price in).
     max_taker_slippage: float = 0.05
 
+    # Late-fill probe window for SELL ``status=delayed`` FAK orders
+    # (Plan A α, 2026-04-30).  Polymarket's matcher returns 200 with
+    # ``status=delayed`` and decides fill-or-kill asynchronously; the
+    # probe re-checks ``get_fill_summary`` to catch fills the wrapper
+    # already declared failed.  Total worst-case wait =
+    # ``(attempts - 1) × backoff``; defaults give a 20s window.
+    # Promoted from module constants in ``executor.py`` to config fields
+    # (analogous to ``max_taker_slippage``) so the cadence can be tuned
+    # via ``config.yaml`` if Polymarket's async-match latency drifts.
+    # Bot restart still required — load_config() reads YAML once at
+    # startup.
+    late_fill_probe_attempts: int = 3
+    late_fill_probe_backoff_s: float = 10.0
+
     # FIX-17 (2026-04-24): per-variant city filter.  Empty = all cities
     # allowed (default for B/C).  D' uses this to restrict its narrow
     # high-EV profile to cities whose historical forecast error is small

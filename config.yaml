@@ -35,6 +35,14 @@ strategy:
   # Tune here without rebuilding the Docker image (bot restart still required —
   # load_config() reads YAML once at startup).
   max_taker_slippage: 0.05
+  # Late-fill probe window for SELL status=delayed FAK orders.  Polymarket's
+  # matcher accepts these and resolves async (typically <5s; >30s is
+  # pathological).  Total wait = (attempts - 1) × backoff; defaults give
+  # 20s of poll window across 3 samples.  Widen if you see ghost-fill
+  # SELL drift (chain filled, DB still open) creep back in; narrow if
+  # the 60-min cycle penalty for unmatched FAKs becomes annoying.
+  late_fill_probe_attempts: 3
+  late_fill_probe_backoff_s: 10.0
   # Minimum EV to keep a position; below this → auto-trim
   min_trim_ev: 0.005
   # Maximum NO price to buy (avoid asymmetric risk at high prices)
