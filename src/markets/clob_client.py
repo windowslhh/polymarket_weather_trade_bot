@@ -48,6 +48,21 @@ except Exception as exc:  # noqa: BLE001
 # but still server-valid; the per-order USDC delta is ≤ $0.005,
 # below our $1 SELL gate so functionally invisible.  Idempotent at
 # import time, runs before any ``_get_client`` lazy-init.
+#
+# 2026-05-01 (review #5): switch from ``logger.warning + continue`` to
+# ``sys.exit(2)`` analogous to ``check_station_alignment``.  Rationale:
+# the original try/except quietly let the bot start with the wire
+# payload still carrying 4-5 decimal amounts, which Polymarket then
+# rejected mid-cycle.  The 2026-04-29 production incident (20 BUY
+# rejections over 7h, audit confirmed all pre-deploy) had nothing to
+# do with the patch itself — the patch worked once deployed — but the
+# silent fail-soft hides the same class of regression if py-clob-client
+# ships a future version where ``ROUNDING_CONFIG`` / ``RoundConfig``
+# moves or renames.  Fail-fast at startup makes "the SDK shape changed"
+# loud instead of "trades silently fail at 4 decimals again."  Paper /
+# dry-run modes go through the same import path so they fail-fast too;
+# this is intentional — paper config divergence from live is exactly
+# what we're protecting against.
 try:
     from py_clob_client_v2.order_builder import builder as _v2_builder
     from py_clob_client_v2.order_builder.builder import RoundConfig as _RC
@@ -55,8 +70,30 @@ try:
         _v2_builder.ROUNDING_CONFIG[_ts] = _RC(
             price=_cfg.price, size=_cfg.size, amount=2,
         )
+    # Belt-and-braces: verify the in-memory dict actually carries
+    # ``amount=2`` after the rewrite.  If a future SDK adds new tick
+    # sizes the loop won't have populated, this catches the gap before
+    # the first live order tries to use that tick.
+    for _ts, _cfg in _v2_builder.ROUNDING_CONFIG.items():
+        if _cfg.amount != 2:
+            raise RuntimeError(
+                f"ROUNDING_CONFIG[{_ts!r}].amount={_cfg.amount}, "
+                f"expected 2 — patch did not take effect"
+            )
 except Exception as exc:  # noqa: BLE001
-    logger.warning("v2-9 ROUNDING_CONFIG monkey-patch failed: %s", exc)
+    import sys as _sys
+    logger.error(
+        "v2-9 ROUNDING_CONFIG monkey-patch failed: %s — refusing to "
+        "start.  Polymarket will reject orders with >2 decimal "
+        "maker_amount; failing fast is safer than 400'ing every BUY "
+        "until someone notices.  Likely cause: py-clob-client SDK "
+        "shape changed (RoundConfig fields renamed, ROUNDING_CONFIG "
+        "moved, etc.) — inspect "
+        "py_clob_client_v2.order_builder.builder and re-pin the "
+        "patch.  Bypass with care.",
+        exc,
+    )
+    _sys.exit(2)
 
 # FIX-04: network resilience knobs. Kept module-level so tests can monkeypatch
 # them without touching the client.
