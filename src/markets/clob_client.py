@@ -327,9 +327,26 @@ class ClobClient:
     ) -> tuple[float | None, float | None]:
         """Returns ``(best_bid, best_ask)`` or ``(None, None)`` on empty book / error.
 
-        Polymarket ``/book`` returns ``bids`` sorted desc by price and
-        ``asks`` sorted asc.  An empty side maps to ``None`` so callers
-        can treat it as a thin-liquidity skip rather than a hard error.
+        Polymarket ``/book`` returns levels in "outside-in" order: ``bids``
+        ascending by price (worst first, best last) and ``asks``
+        descending by price (worst first, best last).  An empty side maps
+        to ``None`` so callers can treat it as a thin-liquidity skip
+        rather than a hard error.
+
+        2026-05-01 P0 regression fix: the previous implementation
+        documented the OPPOSITE ordering ("bids desc, asks asc") and
+        read ``bids[0]`` / ``asks[0]`` accordingly — picking the WORST
+        price on each side every time.  Live Polymarket /book responses
+        consistently return bids ASC / asks DESC (verified across three
+        unrelated markets on 2026-05-01).  Combined with the
+        cross-the-spread + 5% slippage gate added in 2f25a1a, this
+        produced cross_price ≈ 1.00 on every BUY (clamped from
+        ``worst_ask + 1 tick``), tripping the gate and rejecting 65
+        consecutive BUY attempts over 18+ hours of "0 trade" silence.
+        Switching to ``max(bids)`` / ``min(asks)`` makes the
+        implementation ordering-independent — works whether Polymarket
+        keeps the current order, flips it, or hands back a deliberately
+        unsorted shape.
 
         Used by ``place_limit_order`` to convert a midpoint-derived limit
         into a cross-the-spread limit (see FAK-cross-pricing fix:
@@ -353,26 +370,32 @@ class ClobClient:
             book = getattr(book, "__dict__", {}) or {}
         bids = book.get("bids") or []
         asks = book.get("asks") or []
+
+        def _price(entry) -> float | None:
+            """Pull the ``price`` field off either a dict or a SDK
+            BookLevel-shaped object, returning ``None`` on any
+            malformed entry so a single bad row doesn't poison the
+            whole min/max scan.
+            """
+            try:
+                raw = (
+                    entry["price"] if isinstance(entry, dict)
+                    else getattr(entry, "price", None)
+                )
+                if raw is None:
+                    return None
+                return float(raw)
+            except (KeyError, ValueError, TypeError):
+                return None
+
         bb: float | None = None
         ba: float | None = None
         if bids:
-            try:
-                top_bid = bids[0]
-                bb = float(
-                    top_bid["price"] if isinstance(top_bid, dict)
-                    else getattr(top_bid, "price", 0.0)
-                )
-            except (KeyError, ValueError, TypeError):
-                bb = None
+            valid = [p for p in (_price(b) for b in bids) if p is not None]
+            bb = max(valid) if valid else None
         if asks:
-            try:
-                top_ask = asks[0]
-                ba = float(
-                    top_ask["price"] if isinstance(top_ask, dict)
-                    else getattr(top_ask, "price", 0.0)
-                )
-            except (KeyError, ValueError, TypeError):
-                ba = None
+            valid = [p for p in (_price(a) for a in asks) if p is not None]
+            ba = min(valid) if valid else None
         return bb, ba
 
     async def get_midpoint(self, token_id: str) -> float | None:

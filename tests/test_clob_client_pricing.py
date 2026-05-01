@@ -43,14 +43,99 @@ def _make_client(*, paper: bool = False, dry_run: bool = False) -> ClobClient:
 
 @pytest.mark.asyncio
 async def test_get_top_of_book_normal():
+    """Live Polymarket /book ordering: ``bids`` ASC by price (worst first,
+    best last), ``asks`` DESC by price (worst first, best last).  Verified
+    via raw curl on three unrelated markets on 2026-05-01.  The fixture
+    here mirrors that real shape — the pre-fix version had the opposite
+    ordering (best first), which masked the production bug that read
+    ``[0]`` and got the worst price each time.
+    """
     client = _make_client()
     client._client.get_order_book = MagicMock(return_value={
-        "bids": [{"price": "0.49", "size": "100"}, {"price": "0.48", "size": "50"}],
-        "asks": [{"price": "0.51", "size": "100"}, {"price": "0.52", "size": "50"}],
+        # bids ASC: 0.48 (worst) → 0.49 (best)
+        "bids": [{"price": "0.48", "size": "50"}, {"price": "0.49", "size": "100"}],
+        # asks DESC: 0.52 (worst) → 0.51 (best)
+        "asks": [{"price": "0.52", "size": "50"}, {"price": "0.51", "size": "100"}],
     })
     bb, ba = await client.get_top_of_book("tok")
     assert bb == 0.49
     assert ba == 0.51
+
+
+@pytest.mark.asyncio
+async def test_get_top_of_book_handles_unsorted():
+    """Defensive: ordering-independence is the whole point of the
+    max/min implementation.  If Polymarket ever flips the order, ships
+    a bug, or hands back a deliberately unsorted book, ``max(bids)``
+    and ``min(asks)`` still resolve to the right tip.  This pins the
+    invariant so a future "optimisation" back to indexed reads
+    immediately fails.
+    """
+    client = _make_client()
+    client._client.get_order_book = MagicMock(return_value={
+        # Unsorted: best bid 0.49 in the middle, best ask 0.51 last
+        "bids": [
+            {"price": "0.45", "size": "10"},
+            {"price": "0.49", "size": "100"},   # ← TRUE best bid
+            {"price": "0.47", "size": "30"},
+            {"price": "0.46", "size": "20"},
+        ],
+        "asks": [
+            {"price": "0.55", "size": "20"},
+            {"price": "0.53", "size": "30"},
+            {"price": "0.52", "size": "40"},
+            {"price": "0.51", "size": "100"},   # ← TRUE best ask
+        ],
+    })
+    bb, ba = await client.get_top_of_book("tok")
+    assert bb == 0.49
+    assert ba == 0.51
+
+
+@pytest.mark.asyncio
+async def test_get_top_of_book_reproduces_2026_05_01_p0_book_shape():
+    """Real Miami 92-93°F May 2 (NO token 5762...) book snapshot from
+    2026-05-01 08:07 CST, 18 hours into the 0-trade incident:
+
+        bids ASC: 0.01, 0.02, ..., 0.55, 0.56, 0.57, 0.58, 0.59, 0.60
+        asks DESC: 0.99, 0.97, 0.95, 0.82, 0.80, ..., 0.65, 0.63, 0.61
+
+    Pre-fix code read ``bids[0]=0.01`` and ``asks[0]=0.99``, making
+    cross_price for BUY = 1.00 and the 5% slippage gate kill every
+    submission.  Post-fix max/min picks ``bb=0.60``, ``ba=0.61``,
+    cross=0.62, slip = (0.62-0.60)/0.60 = 3.3% < 5% → order goes
+    through.  This test reproduces that exact shape (truncated to
+    representative levels) as a permanent regression marker.
+    """
+    client = _make_client()
+    client._client.get_order_book = MagicMock(return_value={
+        "bids": [
+            {"price": "0.01", "size": "2735"},
+            {"price": "0.10", "size": "4372"},
+            {"price": "0.50", "size": "15"},
+            {"price": "0.55", "size": "195.41"},
+            {"price": "0.59", "size": "10.16"},
+            {"price": "0.60", "size": "48.78"},   # best bid
+        ],
+        "asks": [
+            {"price": "0.99", "size": "285"},
+            {"price": "0.97", "size": "860"},
+            {"price": "0.82", "size": "15"},
+            {"price": "0.71", "size": "33.92"},
+            {"price": "0.65", "size": "12"},
+            {"price": "0.63", "size": "198.41"},
+            {"price": "0.61", "size": "45"},      # best ask
+        ],
+    })
+    bb, ba = await client.get_top_of_book("tok")
+    assert bb == 0.60, (
+        f"bb={bb}: pre-fix bug would return 0.01 (bids[0]); "
+        f"max(bids) must yield 0.60"
+    )
+    assert ba == 0.61, (
+        f"ba={ba}: pre-fix bug would return 0.99 (asks[0]); "
+        f"min(asks) must yield 0.61"
+    )
 
 
 @pytest.mark.asyncio
