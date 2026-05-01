@@ -217,6 +217,7 @@ async def run(args: argparse.Namespace) -> None:
         store=store, alerter=alerter,
         query_clob_order=None if is_paper else _probe,
         is_paper=is_paper,
+        clob_client=None if is_paper else live_clob_for_probe,
     )
 
     # Build empirical forecast error distributions (cached, ~7 day refresh)

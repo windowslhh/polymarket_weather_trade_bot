@@ -60,6 +60,7 @@ async def reconcile_pending_orders(
     *,
     is_paper: bool = False,
     exit_on_mismatch: bool = True,
+    clob_client: Any | None = None,
 ) -> None:
     """Resolve orphaned pending orders before the bot starts trading.
 
@@ -86,6 +87,15 @@ async def reconcile_pending_orders(
     # close_positions_for_token leaves the position open; fix that first
     # so subsequent size calculations reflect the truth.
     await _reconcile_sell_hybrid_state(store, alerter)
+
+    # GF-3 (2026-05-01): scan failed-delayed BUY orders that may have
+    # actually filled on chain (the executor's BUY late-fill probe is
+    # GF-1 — this is the post-crash safety net for cases where the bot
+    # died between submit and probe completion, or for legacy rows
+    # written before GF-1 landed).  Skipped in paper mode (no live CLOB
+    # to query) and when no probe is configured.
+    if not is_paper and clob_client is not None:
+        await _reconcile_ghost_buy_fills(store, alerter, clob_client)
 
     pending = await store.get_pending_orders()
     if not pending:
@@ -257,6 +267,73 @@ async def _force_fail_by_id(store: Store, row_id: int, reason: str) -> None:
         (reason[:500], row_id),
     )
     await store.db.commit()
+
+
+async def _reconcile_ghost_buy_fills(
+    store: Store, alerter: Alerter, clob_client: Any,
+) -> None:
+    """GF-3: rescan ``status='failed' AND failure_reason LIKE '%delayed%'``
+    BUY orders.  CLOB ``status=delayed matched=False`` is asynchronous —
+    the server may match the order seconds after our wrapper marked it
+    failed, leaving a chain position the DB never recorded.  GF-1 covers
+    this in-line at submit time; this function is the safety net for
+    crashes between submit and probe completion, plus legacy rows
+    written before GF-1 landed.
+
+    For each candidate, calls ``get_fill_summary`` (same primitive the
+    executor uses).  If a fill is found, atomically promotes the orders
+    row to 'filled' and inserts a position row via the shared
+    ``recover_one_ghost_fill`` helper.  Skips rows already paired with
+    a position (idempotent across reconciler runs).
+    """
+    from src.recovery.ghost_fills import recover_one_ghost_fill
+    candidates = await store.get_failed_delayed_buy_orders()
+    if not candidates:
+        return
+    logger.warning(
+        "Reconciler GF-3: %d failed-delayed BUY order(s) need ghost-fill probe",
+        len(candidates),
+    )
+    recovered = 0
+    for row in candidates:
+        try:
+            ok, msg = await recover_one_ghost_fill(
+                store=store,
+                clob_client=clob_client,
+                failed_order_row=row,
+            )
+        except Exception as exc:
+            logger.exception(
+                "GF-3: recover_one_ghost_fill raised for order_id=%s",
+                row.get("order_id"),
+            )
+            await alerter.send(
+                "warning",
+                f"Reconciler GF-3: probe raised for order id={row['id']} — {exc}",
+            )
+            continue
+        if ok:
+            recovered += 1
+            logger.warning(
+                "GF-3: recovered ghost fill order_id=%s — %s",
+                str(row.get("order_id"))[:14], msg,
+            )
+            await alerter.send(
+                "warning",
+                f"Reconciler GF-3: recovered ghost fill for order id={row['id']} "
+                f"({row.get('token_id', '')[:12]}) — {msg}",
+            )
+        else:
+            logger.info(
+                "GF-3: no fill on chain for order_id=%s (%s)",
+                str(row.get("order_id"))[:14], msg,
+            )
+    if recovered:
+        await alerter.send(
+            "warning",
+            f"Reconciler GF-3: recovered {recovered}/{len(candidates)} ghost BUY fill(s); "
+            "DB now reflects on-chain reality.",
+        )
 
 
 async def _reconcile_sell_hybrid_state(

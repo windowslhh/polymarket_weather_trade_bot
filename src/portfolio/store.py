@@ -681,6 +681,176 @@ class Store:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_failed_delayed_buy_orders(self) -> list[dict]:
+        """GF-3: failed BUY orders whose failure_reason mentions 'delayed' —
+        candidates for ghost-fill recovery.  CLOB ``status=delayed
+        matched=False`` was previously treated as a hard failure, but
+        production data on 2026-05-01 (orders #521/#522) showed the
+        server can asynchronously match the order seconds after our
+        wrapper marks it failed.  These rows need a one-time
+        get_fill_summary probe to confirm whether a position should be
+        materialised retroactively.  Excludes rows already paired with
+        a position (source_order_id match) to keep the recovery
+        idempotent across restarts.
+        """
+        async with self.db.execute(
+            """SELECT * FROM orders
+               WHERE side = 'BUY'
+                 AND status = 'failed'
+                 AND failure_reason LIKE '%delayed%'
+                 AND order_id IS NOT NULL AND order_id != ''
+                 AND NOT EXISTS (
+                     SELECT 1 FROM positions p
+                     WHERE p.source_order_id = orders.order_id
+                 )
+               ORDER BY id"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def recover_ghost_buy_fill(
+        self,
+        *,
+        failed_order_id: int,
+        clob_order_id: str,
+        event_id: str,
+        token_id: str,
+        token_type: str,
+        city: str,
+        slot_label: str,
+        entry_price: float,
+        size_usd: float,
+        shares: float,
+        strategy: str,
+        buy_reason: str,
+        entry_ev: float | None = None,
+        entry_win_prob: float | None = None,
+        match_price: float | None = None,
+        fee_paid_usd: float | None = None,
+    ) -> int:
+        """GF-2 / GF-3: atomically materialise the on-chain consequence of
+        a BUY order that the bot incorrectly marked 'failed' (FAK
+        status=delayed → server-side async match → position never landed
+        in DB).
+
+        Three outcomes (all idempotent):
+
+        1. **Already recovered** — a position with this exact
+           ``source_order_id`` exists.  No-op, returns -1.
+        2. **Same slot has another open position** (event_id, token_id,
+           strategy) — merge the new on-chain shares into the existing
+           position: shares accumulate, match_price moves to the
+           shares-weighted average, size_usd / fee_paid_usd accumulate.
+           ``buy_reason`` gets a ``+merged:<order_id>`` suffix so audit
+           queries can grep recovered fills.  Returns the existing
+           position id.
+        3. **Fresh slot** — insert a new position row, same shape as
+           ``finalize_buy_order`` would have produced for a synchronous
+           fill.  Returns the new position id.
+
+        ``idx_positions_no_dup ON (event_id, token_id, strategy) WHERE
+        status='open'`` makes outcome (3) crash with IntegrityError if
+        outcome (2) was missed — that's the GF-Block-5 fix from the
+        2026-05-01 review.  Production case: orders #521/#522 share
+        (event=429707, token=23666..., strategy=D) so the second
+        recovery would hit the unique constraint.
+
+        Both outcomes (2) and (3) wrap their writes in an explicit
+        try/commit/rollback so an INSERT or UPDATE failure (concurrent
+        write, schema drift, NULL violation) doesn't leak a half-applied
+        transaction into the next caller's commit (GF-Block-4).
+        """
+        async with self.db.execute(
+            "SELECT id FROM positions WHERE source_order_id = ?",
+            (clob_order_id,),
+        ) as cur:
+            already = await cur.fetchone()
+        if already is not None:
+            return -1
+
+        async with self.db.execute(
+            """SELECT id, shares, size_usd, match_price, fee_paid_usd, buy_reason
+                 FROM positions
+                WHERE event_id = ? AND token_id = ? AND strategy = ?
+                  AND status = 'open'""",
+            (event_id, token_id, strategy),
+        ) as cur:
+            sibling = await cur.fetchone()
+
+        try:
+            if sibling is not None:
+                old_shares = float(sibling["shares"] or 0.0)
+                old_size = float(sibling["size_usd"] or 0.0)
+                old_match = sibling["match_price"]
+                old_fee = float(sibling["fee_paid_usd"] or 0.0)
+
+                total_shares = old_shares + shares
+                total_size = old_size + size_usd
+                total_fee = old_fee + (fee_paid_usd or 0.0)
+                if total_shares > 0:
+                    base_match = (
+                        old_match
+                        if old_match is not None
+                        else float(sibling.get("entry_price") or entry_price)
+                    )
+                    new_match = match_price if match_price is not None else entry_price
+                    weighted_match = (
+                        old_shares * base_match + shares * new_match
+                    ) / total_shares
+                else:
+                    weighted_match = match_price
+
+                merged_reason = (
+                    f"{sibling['buy_reason'] or ''}+merged:{clob_order_id[:14]}"
+                )[:500]
+
+                await self.db.execute(
+                    """UPDATE positions
+                          SET shares = ?, size_usd = ?, match_price = ?,
+                              fee_paid_usd = ?, buy_reason = ?
+                        WHERE id = ?""",
+                    (total_shares, total_size, weighted_match,
+                     total_fee, merged_reason, sibling["id"]),
+                )
+                await self.db.execute(
+                    "UPDATE orders SET status = 'filled', "
+                    "failure_reason = 'ghost_recovered_merged', "
+                    "filled_at = datetime('now') WHERE id = ?",
+                    (failed_order_id,),
+                )
+                await self.db.commit()
+                return int(sibling["id"])
+
+            await self.db.execute(
+                "UPDATE orders SET status = 'filled', "
+                "failure_reason = 'ghost_recovered', "
+                "filled_at = datetime('now') WHERE id = ?",
+                (failed_order_id,),
+            )
+            pos_cursor = await self.db.execute(
+                """INSERT INTO positions (event_id, token_id, token_type, city, slot_label, side,
+                                           entry_price, size_usd, shares, strategy, buy_reason,
+                                           entry_ev, entry_win_prob, source_order_id,
+                                           match_price, fee_paid_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, token_id, token_type, city, slot_label, "BUY",
+                 entry_price, size_usd, shares, strategy, buy_reason,
+                 entry_ev, entry_win_prob, clob_order_id, match_price, fee_paid_usd),
+            )
+            await self.db.commit()
+            return pos_cursor.lastrowid  # type: ignore[return-value]
+        except Exception:
+            # Explicit rollback so a partial UPDATE does not leak into the
+            # next caller's commit.  aiosqlite's default isolation_level
+            # opens an implicit transaction on the first DML; without
+            # this the half-applied UPDATE persists in connection state
+            # and gets committed by whatever runs next (GF-Block-4).
+            try:
+                await self.db.rollback()
+            except Exception:
+                logger.exception("recover_ghost_buy_fill: rollback also raised")
+            raise
+
     # ── FIX-08: persistent exit cooldowns ─────────────────────────────
 
     async def record_exit_cooldown(

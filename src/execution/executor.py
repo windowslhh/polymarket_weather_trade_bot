@@ -551,10 +551,17 @@ class Executor:
             # 2026-04-30 found 3 SELLs filled on chain but DB still
             # showed open positions, $4.46 P&L unrecorded).
             #
-            # Probe is SELL-only on purpose: BUY's failure mode is
-            # 400 "no orders found" (FAK fast-path reject — never queues),
-            # so BUY late-fills don't happen in practice.  Per user
-            # scope: don't touch BUY behaviour.
+            # 2026-05-01 GF-1: extend the same probe to BUY.  The original
+            # comment claimed BUY late-fills "don't happen in practice"
+            # because BUY's failure mode is FAK fast-path reject — but
+            # production data on 2026-05-01 contradicted this: orders #521
+            # / #522 (Miami 90-91 May 1) returned status=delayed
+            # matched=False, were marked 'failed' in DB, yet on-chain
+            # showed 6.18 / 6.08 NO shares filled at 79.9¢ / 80.2¢.  The
+            # mechanism is identical to SELL: server accepts the FAK,
+            # asynchronously matches it within seconds, and the DB-side
+            # write happens on our too-eager mark_failed.  Mirror the
+            # SELL probe.
             if signal.side == Side.SELL and _should_probe_late_fill(result):
                 logger.info(
                     "SELL status=delayed — probing for late fill "
@@ -613,6 +620,90 @@ class Executor:
                     "order=%s — no fill found",
                     signal.token_id[:12], result.order_id[:14],
                 )
+
+            # GF-1: BUY late-fill probe (mirror of SELL probe above).
+            # Same parameters (StrategyConfig.late_fill_probe_attempts /
+            # _backoff_s) so config tuning applies symmetrically.  Probe
+            # success → record_fill_atomic with the on-chain summary so
+            # the position lands in DB exactly as if the order had
+            # returned matched=True synchronously.  Probe negative →
+            # fall through to mark_order_failed + token cooldown (same
+            # as deterministic-failure path) so we don't keep submitting.
+            if signal.side == Side.BUY and _should_probe_late_fill(result):
+                logger.info(
+                    "BUY status=delayed — probing for late fill "
+                    "token=%s order=%s",
+                    signal.token_id[:12], result.order_id[:14],
+                )
+                late_fill_attempts = getattr(
+                    strategy_config, "late_fill_probe_attempts",
+                    _DEFAULT_LATE_FILL_PROBE_ATTEMPTS,
+                )
+                late_fill_backoff = getattr(
+                    strategy_config, "late_fill_probe_backoff_s",
+                    _DEFAULT_LATE_FILL_PROBE_BACKOFF_S,
+                )
+                # GF-Concern-6 (2026-05-01 review): swallow probe-side
+                # exceptions so a transient CLOB / network failure can't
+                # leave us in pending status forever (next cycle would
+                # re-probe, fail again, and we'd never mark_failed +
+                # cool the token).  Treat exception as "no fill found"
+                # — the GF-3 startup reconciler will catch any actual
+                # ghost on the next bot restart.
+                try:
+                    summary = await self._poll_for_late_fill(
+                        token_id=signal.token_id,
+                        order_id=result.order_id,
+                        created_at_epoch=order_created_at,
+                        max_attempts=late_fill_attempts,
+                        backoff_seconds=late_fill_backoff,
+                    )
+                except Exception:
+                    logger.exception(
+                        "BUY late-fill probe raised for token=%s order=%s "
+                        "— falling through to mark_failed",
+                        signal.token_id[:12], result.order_id[:14],
+                    )
+                    summary = None
+                if summary is not None and summary.shares > 0:
+                    # Ghost-fill recovered.  record_fill_atomic flips the
+                    # pending order to 'filled' AND inserts the position
+                    # row in one commit (same path as the synchronous
+                    # success branch below).  size_usd inside
+                    # record_fill_atomic recomputes to actual_shares ×
+                    # match_price (Bug-C-followup) so DB exposure
+                    # reflects on-chain notional, not planned.
+                    await self._portfolio.record_fill_atomic(
+                        idempotency_key=idempotency_key,
+                        order_id=result.order_id,
+                        event_id=signal.event.event_id,
+                        token_id=signal.token_id,
+                        token_type=signal.token_type,
+                        city=signal.event.city,
+                        slot_label=signal.slot.outcome_label,
+                        side=signal.side.value,
+                        price=price,
+                        size_usd=size_usd,
+                        strategy=signal.strategy,
+                        buy_reason=signal.reason,
+                        entry_ev=signal.expected_value,
+                        entry_win_prob=signal.estimated_win_prob,
+                        match_price=summary.match_price,
+                        fee_paid_usd=summary.fee_paid_usd,
+                        actual_shares=summary.net_shares,
+                    )
+                    logger.warning(
+                        "BUY delayed-fill recovered token=%s order=%s "
+                        "shares=%.4f match=%.4f",
+                        signal.token_id[:12], result.order_id[:14],
+                        summary.net_shares, summary.match_price,
+                    )
+                    return
+                logger.warning(
+                    "BUY delayed-kill confirmed after probe token=%s "
+                    "order=%s — no fill found",
+                    signal.token_id[:12], result.order_id[:14],
+                )
             await store.mark_order_failed(
                 idempotency_key,
                 result.message or "unknown CLOB failure",
@@ -640,12 +731,23 @@ class Executor:
             # reveals whether retry storm is severe enough to warrant the
             # plumbing cost.
             failure_msg = result.message or ""
+            # 2026-05-01 G-3 extension: FAK delayed-kill on BUY means the
+            # ask-side quantity at our cross_price was already gone by the
+            # time the order reached the matcher.  Same root cause as
+            # SLIPPAGE_TOO_HIGH (orderbook moved between our gate and the
+            # matcher) — same retry-storm risk, same fix (cool the token).
+            # SELL "status=delayed" is a separate concern handled by the
+            # late-fill probe above; cooldown only fires here on BUY.
+            is_buy_delayed = (
+                signal.side == Side.BUY
+                and "delayed" in failure_msg.lower()
+            )
             if any(
                 code in failure_msg
                 for code in (
                     "THIN_LIQUIDITY", "SLIPPAGE_TOO_HIGH", "PRICE_TOO_LOW",
                 )
-            ):
+            ) or is_buy_delayed:
                 side_value = (
                     signal.side.value
                     if hasattr(signal.side, "value")
@@ -669,6 +771,8 @@ class Executor:
                         code = "THIN_LIQUIDITY"
                     elif "PRICE_TOO_LOW" in failure_msg:
                         code = "PRICE_TOO_LOW"
+                    elif is_buy_delayed:
+                        code = "FAK_DELAYED_KILL"
                     self._mark_token_cooling(signal.token_id, reason=code)
             return
 

@@ -334,40 +334,91 @@ async def test_mark_order_failed_persists_order_id():
 
 
 # ---------------------------------------------------------------------------
-# 7. BUY path is untouched — no probe, no late-fill recovery
+# 7. BUY status=delayed triggers GF-1 late-fill probe (mirror of SELL).
+#    Probe negative → mark failed + token cooldown.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_buy_branch_unchanged(fast_sleep):
+async def test_buy_branch_probes_when_delayed(fast_sleep):
+    """GF-1 (2026-05-01): BUY status=delayed now triggers a late-fill
+    probe (the original "BUY late-fills don't happen" assumption was
+    falsified by orders #521/#522 ghost-filling on chain on
+    2026-05-01).  Probe negative path: mark failed + cool token."""
     store = await _mk_store()
     tracker = PortfolioTracker(store)
     clob = _mk_clob_mock()
-    # Even a BUY with a delayed-shaped failure must not probe — Plan A α
-    # is SELL-only by user scope (BUY's failure mode is FAK fast-path
-    # 400, not status=delayed, so a BUY late-fill is essentially a
-    # non-occurrence in production).
     clob.place_limit_order = AsyncMock(
         return_value=OrderResult(
             order_id="0xbuy", success=False,
             message="order not filled (status=delayed)",
         ),
     )
-    clob.get_fill_summary = AsyncMock()
+    # G-1 revalidate path: get_top_of_book returns (None, None) → skip
+    clob.get_top_of_book = AsyncMock(return_value=(None, None))
+    # GF-1 probe: returns None — no late fill on chain
+    clob.get_fill_summary = AsyncMock(return_value=None)
 
     executor = Executor(clob, tracker)
     await executor.execute_signals([_build_buy_signal("tok_buy", 0.45)])
 
-    # No probe — the BUY branch flowed straight to mark_order_failed.
-    assert clob.get_fill_summary.call_count == 0
+    # GF-1: probe ran on BUY (call_count >= 1; max_attempts default = 3)
+    assert clob.get_fill_summary.call_count >= 1
     async with store.db.execute(
         "SELECT status, order_id, side FROM orders"
     ) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
     assert rows[0]["status"] == "failed"
     assert rows[0]["side"] == "BUY"
-    # order_id still persists on failure (Patch A α #3).
     assert rows[0]["order_id"] == "0xbuy"
+    # G-3 extension: BUY-side delayed-kill cools the token
+    assert executor._is_token_cooling("tok_buy")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_buy_branch_recovers_ghost_fill(fast_sleep):
+    """GF-1 positive path: BUY status=delayed but server actually filled
+    it asynchronously → probe finds the fill → record_fill_atomic
+    materialises the position; orders row goes 'filled'; no token
+    cooldown (the order genuinely succeeded)."""
+    store = await _mk_store()
+    tracker = PortfolioTracker(store)
+    clob = _mk_clob_mock()
+    clob.place_limit_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="0xrecover", success=False,
+            message="order not filled (status=delayed)",
+        ),
+    )
+    clob.get_top_of_book = AsyncMock(return_value=(None, None))
+    clob.get_fill_summary = AsyncMock(
+        return_value=FillSummary(
+            shares=10.0, match_price=0.46,
+            fee_paid_usd=0.02, net_shares=9.95,
+        ),
+    )
+
+    executor = Executor(clob, tracker)
+    await executor.execute_signals([_build_buy_signal("tok_recover", 0.45)])
+
+    # Order promoted to 'filled' (not 'failed') — recovered path
+    async with store.db.execute(
+        "SELECT status FROM orders"
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    assert rows[0]["status"] == "filled"
+    # Position materialised with on-chain fill data
+    async with store.db.execute(
+        "SELECT status, shares, match_price FROM positions"
+    ) as cur:
+        positions = [dict(r) for r in await cur.fetchall()]
+    assert len(positions) == 1
+    assert positions[0]["status"] == "open"
+    assert positions[0]["shares"] == 9.95
+    assert positions[0]["match_price"] == 0.46
+    # Token must NOT be in cooldown — order succeeded
+    assert not executor._is_token_cooling("tok_recover")
     await store.close()
 
 
