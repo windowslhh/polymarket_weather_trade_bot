@@ -101,11 +101,26 @@ class PortfolioTracker:
         SELL "not enough balance" 400 that motivated this fix).  Falls back
         to the legacy ``size_usd / price`` formula for paper mode and any
         callsite that hasn't been updated.
+
+        2026-05-01 Bug-C-followup: ``size_usd`` was previously written as
+        the *planned* notional even on partial fills, leaving the field at
+        e.g. $4.77 when only $1.79 actually crossed (38% fill, position
+        #13 case).  Every downstream cap calculation reads SUM(size_usd),
+        so the stale field inflated city / total exposure and starved
+        subsequent BUYs of room.  Now: when both actual_shares and
+        match_price are present, recompute size_usd as the on-chain
+        notional (shares × weighted-avg fill price).  Falls back to the
+        planned value for paper / partial-summary cases.
         """
         if actual_shares is not None and actual_shares > 0:
             shares = actual_shares
         else:
             shares = size_usd / price if price > 0 else 0
+        if (
+            actual_shares is not None and actual_shares > 0
+            and match_price is not None and match_price > 0
+        ):
+            size_usd = actual_shares * match_price
         position_id = await self._store.finalize_buy_order(
             idempotency_key=idempotency_key,
             order_id=order_id,

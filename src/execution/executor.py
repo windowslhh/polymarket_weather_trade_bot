@@ -550,6 +550,54 @@ class Executor:
                 # (Polymarket deducts fee in shares from the token side).
                 actual_shares = summary.net_shares
 
+            # 2026-05-01 partial-fill observability: FAK on a thin book may
+            # only cross part of our requested size and still come back as
+            # success=True (server kills the unfilled remainder).  Record
+            # the deviation so the audit trail shows what was actually
+            # bought vs what was sized — record_fill_atomic now writes the
+            # on-chain notional, but a SKIP row in decision_log makes
+            # partial-fills greppable rather than buried in shares math.
+            if (
+                actual_shares is not None and actual_shares > 0
+                and price > 0
+            ):
+                planned_shares = size_usd / price
+                if planned_shares > 0 and actual_shares < planned_shares * 0.95:
+                    fill_ratio = actual_shares / planned_shares
+                    logger.warning(
+                        "Partial fill detected token=%s order=%s "
+                        "planned=%.4f actual=%.4f ratio=%.1f%%",
+                        signal.token_id[:12], result.order_id[:14],
+                        planned_shares, actual_shares, fill_ratio * 100,
+                    )
+                    try:
+                        await self._portfolio.store.insert_decision_log(
+                            cycle_at=datetime.now(timezone.utc).isoformat(),
+                            city=signal.event.city,
+                            event_id=signal.event.event_id,
+                            signal_type=signal.token_type.value,
+                            slot_label=signal.slot.outcome_label,
+                            forecast_high_f=None,
+                            daily_max_f=None,
+                            trend_state="",
+                            win_prob=signal.estimated_win_prob,
+                            expected_value=signal.expected_value,
+                            price=price,
+                            size_usd=size_usd,
+                            action="SKIP",
+                            reason=(
+                                f"[{signal.strategy}] PARTIAL_FILL: "
+                                f"ratio={fill_ratio:.2%} "
+                                f"({actual_shares:.4f}/{planned_shares:.4f})"
+                            ),
+                            strategy=signal.strategy,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to insert PARTIAL_FILL decision_log for %s",
+                            signal.slot.outcome_label,
+                        )
+
             await self._portfolio.record_fill_atomic(
                 idempotency_key=idempotency_key,
                 order_id=result.order_id,

@@ -1011,6 +1011,21 @@ class Rebalancer:
                 else:
                     logger.debug("Position check: no urgent signals")
 
+                # 2026-05-01 D-3: refresh daily_pnl snapshot whenever
+                # position_check executed BUYs (entry-scan) or SELLs
+                # (EXIT/TRIM) — without this the dashboard's exposure
+                # field stayed pinned to the last 60-min rebalance and
+                # under-reported by one full position-check window.
+                if signals:
+                    try:
+                        await self._portfolio.snapshot_pnl(
+                            self._clob, self._last_gamma_prices,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Position check: snapshot_pnl failed (non-fatal)",
+                        )
+
             except Exception:
                 logger.exception("Position check failed")
 
@@ -1050,6 +1065,13 @@ class Rebalancer:
         events = list(self._last_events)
         if not events:
             return scan_signals
+
+        # 2026-05-01 D-2: stamp one cycle_at per entry-scan pass so
+        # decision_log rows are groupable.  Mirrors how the 60-min
+        # evaluator path does it — without this the 15-min entry-scan
+        # cycle was a black box (8/15 historical positions opened here
+        # had no decision_log trace at all).
+        cycle_at = datetime.now(timezone.utc).isoformat()
 
         # 1. Refresh Gamma outcomePrices for every active token EXCEPT
         #    those the held-position phase already refreshed this
@@ -1259,15 +1281,79 @@ class Rebalancer:
                 # Locked wins first (higher confidence), then forecast-NO.
                 for signal in locked_signals + no_signals:
                     if new_count >= max_new:
+                        # 2026-05-01 D-2: same EVENT_CAP_FULL log as main
+                        # evaluator path so the audit trail can show
+                        # which signals were starved by the per-event
+                        # max even though they passed gate matrix.
+                        try:
+                            await self._portfolio.insert_decision_log(
+                                cycle_at=cycle_at,
+                                city=event.city,
+                                event_id=event.event_id,
+                                signal_type=signal.token_type.value,
+                                slot_label=signal.slot.outcome_label,
+                                forecast_high_f=forecast.predicted_high_f if forecast else None,
+                                daily_max_f=daily_max,
+                                trend_state=trend_state.value if trend_state else "",
+                                win_prob=signal.estimated_win_prob,
+                                expected_value=signal.expected_value,
+                                price=signal.slot.price_no,
+                                size_usd=0.0,
+                                action="SKIP",
+                                reason=f"[{strat_name}] EVENT_CAP_FULL (entry-scan)",
+                                strategy=strat_name,
+                            )
+                        except Exception:
+                            logger.debug("Failed to log EVENT_CAP_FULL skip")
                         break
                     tid = signal.token_id
                     exit_time = self._recent_exits.get(tid)
                     if exit_time and (now - exit_time).total_seconds() < cooldown_seconds:
+                        try:
+                            await self._portfolio.insert_decision_log(
+                                cycle_at=cycle_at,
+                                city=event.city,
+                                event_id=event.event_id,
+                                signal_type=signal.token_type.value,
+                                slot_label=signal.slot.outcome_label,
+                                forecast_high_f=forecast.predicted_high_f if forecast else None,
+                                daily_max_f=daily_max,
+                                trend_state=trend_state.value if trend_state else "",
+                                win_prob=signal.estimated_win_prob,
+                                expected_value=signal.expected_value,
+                                price=signal.slot.price_no,
+                                size_usd=0.0,
+                                action="SKIP",
+                                reason=f"[{strat_name}] EXIT_COOLDOWN (entry-scan)",
+                                strategy=strat_name,
+                            )
+                        except Exception:
+                            logger.debug("Failed to log EXIT_COOLDOWN skip")
                         continue
                     size = compute_size(
                         signal, strat_city_exp, strat_total_exp, effective_cfg,
                     )
                     if size <= 0:
+                        try:
+                            await self._portfolio.insert_decision_log(
+                                cycle_at=cycle_at,
+                                city=event.city,
+                                event_id=event.event_id,
+                                signal_type=signal.token_type.value,
+                                slot_label=signal.slot.outcome_label,
+                                forecast_high_f=forecast.predicted_high_f if forecast else None,
+                                daily_max_f=daily_max,
+                                trend_state=trend_state.value if trend_state else "",
+                                win_prob=signal.estimated_win_prob,
+                                expected_value=signal.expected_value,
+                                price=signal.slot.price_no,
+                                size_usd=0.0,
+                                action="SKIP",
+                                reason=f"[{strat_name}] SIZE_ZERO (entry-scan)",
+                                strategy=strat_name,
+                            )
+                        except Exception:
+                            logger.debug("Failed to log SIZE_ZERO skip")
                         continue
                     signal.suggested_size_usd = size
                     signal.strategy = strat_name
@@ -1275,6 +1361,26 @@ class Rebalancer:
                         f"[{strat_name}] {signal.reason}, "
                         f"EV={signal.expected_value:.3f} (entry-scan)"
                     )
+                    try:
+                        await self._portfolio.insert_decision_log(
+                            cycle_at=cycle_at,
+                            city=event.city,
+                            event_id=event.event_id,
+                            signal_type=signal.token_type.value,
+                            slot_label=signal.slot.outcome_label,
+                            forecast_high_f=forecast.predicted_high_f if forecast else None,
+                            daily_max_f=daily_max,
+                            trend_state=trend_state.value if trend_state else "",
+                            win_prob=signal.estimated_win_prob,
+                            expected_value=signal.expected_value,
+                            price=signal.slot.price_no,
+                            size_usd=size,
+                            action="BUY",
+                            reason=signal.reason,
+                            strategy=strat_name,
+                        )
+                    except Exception:
+                        logger.debug("Failed to log entry-scan BUY decision")
                     scan_signals.append(signal)
                     strat_city_exp += size
                     strat_total_exp += size
