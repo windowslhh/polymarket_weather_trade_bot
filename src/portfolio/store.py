@@ -338,6 +338,65 @@ class Store:
         )
         await self.db.commit()
 
+    async def partial_close_position(
+        self,
+        *,
+        position_id: int,
+        shares_sold: float,
+        new_size_usd: float,
+        partial_exit_reason: str,
+    ) -> None:
+        """SELL partial fill: reduce open position's shares + size_usd
+        without flipping status to closed.
+
+        Production trigger (2026-05-02): a SELL FAK against a thin book
+        can fill only part of the requested size — the matcher kills
+        the unmatched remainder server-side.  Pre-fix, the SELL success
+        branch ran ``close_position`` unconditionally, marking the
+        whole position closed at ``match_price``; the on-chain
+        leftover (settler later redeems it) showed up as a P&L
+        discrepancy between dashboard and chain.
+
+        Atomic UPDATE inside an explicit try/rollback so a half-applied
+        decrement can't leak into the next caller's commit (mirrors the
+        recover_ghost_buy_fill safety pattern).  Realized P&L for the
+        sold fraction is recorded by the caller against ``daily_pnl``
+        via ``upsert_daily_pnl`` — keeping the position-row P&L slot
+        for the eventual full close keeps audit clean.
+        """
+        try:
+            cur = await self.db.execute(
+                "SELECT shares FROM positions WHERE id = ? AND status = 'open'",
+                (position_id,),
+            )
+            row = await cur.fetchone()
+            await cur.close()
+            if row is None:
+                logger.warning(
+                    "partial_close_position: id=%d not open — skipping",
+                    position_id,
+                )
+                return
+            current = float(row["shares"] or 0.0)
+            new_shares = max(0.0, current - shares_sold)
+            await self.db.execute(
+                """UPDATE positions
+                   SET shares = ?, size_usd = ?,
+                       buy_reason = substr(
+                           COALESCE(buy_reason, '') || ?, 1, 500)
+                   WHERE id = ?""",
+                (new_shares, new_size_usd,
+                 f"+partial_sell:{shares_sold:.4f}@{partial_exit_reason[:80]}",
+                 position_id),
+            )
+            await self.db.commit()
+        except Exception:
+            try:
+                await self.db.rollback()
+            except Exception:
+                logger.exception("partial_close_position: rollback also raised")
+            raise
+
     # ── Redeem-state helpers ──────────────────────────────────────────
     # The settler flips ``redeem_status`` NULL → 'pending' before invoking
     # the redeemer; on receipt it writes the final tx hash + status.  All

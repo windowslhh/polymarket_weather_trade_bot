@@ -423,8 +423,10 @@ async def test_buy_branch_recovers_ghost_fill(fast_sleep):
 
 
 # ---------------------------------------------------------------------------
-# 8. SELL success path is untouched: no probe when the wrapper says
-#    success=True (matched immediately).
+# 8. SELL success path: get_fill_summary is now consulted (2026-05-02
+#    SELL partial-fill detection) but on a clean full fill the position
+#    still flips to closed at the actual match_price.  Probe is the
+#    late-fill probe — it's separate, only fires on success=False.
 # ---------------------------------------------------------------------------
 
 
@@ -436,16 +438,22 @@ async def test_sell_success_path_unchanged(fast_sleep):
     clob.place_limit_order = AsyncMock(
         return_value=OrderResult(order_id="0xfast", success=True),
     )
-    clob.get_fill_summary = AsyncMock()
+    # Full fill: net_shares (5.0) ≥ planned (5.0) × 0.95 → close path.
+    clob.get_fill_summary = AsyncMock(
+        return_value=FillSummary(
+            shares=5.0, match_price=0.46,
+            fee_paid_usd=0.0, net_shares=5.0,
+        ),
+    )
 
     await _seed_open_position(store, "tok_fast", shares=5.0)
     executor = Executor(clob, tracker)
     await executor.execute_signals([_build_sell_signal("tok_fast", 0.45)])
 
-    # Probe must not fire on a clean success — get_fill_summary is only
-    # consumed by the BUY branch's match_price recording (and we're SELL
-    # here) plus the late-fill probe (skipped on success).
-    assert clob.get_fill_summary.call_count == 0
+    # get_fill_summary IS called now (one call from the SELL success
+    # branch's partial-fill check; the late-fill probe is a separate
+    # codepath that only fires on success=False).
+    assert clob.get_fill_summary.call_count == 1
     async with store.db.execute(
         "SELECT status, order_id FROM orders"
     ) as cur:
@@ -453,10 +461,12 @@ async def test_sell_success_path_unchanged(fast_sleep):
     assert rows[0]["status"] == "filled"
     assert rows[0]["order_id"] == "0xfast"
     async with store.db.execute(
-        "SELECT status FROM positions"
+        "SELECT status, exit_price FROM positions"
     ) as cur:
         positions = [dict(r) for r in await cur.fetchall()]
     assert positions[0]["status"] == "closed"
+    # exit_price is the actual match (0.46), not the limit (0.45).
+    assert positions[0]["exit_price"] == pytest.approx(0.46)
     await store.close()
 
 

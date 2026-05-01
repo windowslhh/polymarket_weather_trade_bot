@@ -195,6 +195,102 @@ class PortfolioTracker:
                 ))
         return slots
 
+    async def partial_close_positions_for_token(
+        self,
+        *,
+        event_id: str,
+        token_id: str,
+        strategy: str,
+        actual_shares_sold: float,
+        match_price: float,
+        exit_reason: str,
+    ) -> tuple[int, float]:
+        """SELL partial fill: split the on-chain ``actual_shares_sold``
+        across all matching open positions in proportion to each
+        position's current ``shares``, decrement each, and accumulate
+        realized P&L into today's ``daily_pnl.realized_pnl`` row.
+
+        Returns ``(positions_touched, realized_pnl_total)``.
+
+        Why proportional: ``idx_positions_no_dup ON (event_id,
+        token_id, strategy) WHERE status='open'`` keeps the common
+        case to one open position (the GF-3 merge path enforces this).
+        Multi-row only happens with legacy data or cross-strategy
+        edge cases — the proportional split covers it without needing
+        a special path.
+
+        Why daily_pnl-only: the position row keeps its
+        ``realized_pnl`` field NULL until the eventual full close so
+        the audit trail of "this position settled at X" stays clean.
+        Partial-sale P&L is real and must land somewhere — daily_pnl
+        is the only running tally that's not position-keyed.  A future
+        full close uses unchanged ``effective_entry`` × remaining
+        ``shares``, so no double-count: the partial sold portion is
+        captured here, the rest at final close.
+        """
+        positions = [
+            p for p in await self._store.get_open_positions(
+                event_id=event_id, strategy=strategy,
+            )
+            if p["token_id"] == token_id and p["status"] == "open"
+        ]
+        if not positions:
+            return 0, 0.0
+
+        total_shares = sum(p["shares"] for p in positions)
+        if total_shares <= 0:
+            return 0, 0.0
+
+        # Cap actual sold to total shares (defensive — the executor's
+        # SELL clamp already does this, but a tighter belt costs nothing).
+        sold_capped = min(actual_shares_sold, total_shares)
+        realized_total = 0.0
+        touched = 0
+        for pos in positions:
+            allocated = sold_capped * (pos["shares"] / total_shares)
+            if allocated <= 0:
+                continue
+            new_shares = pos["shares"] - allocated
+            # size_usd shrinks proportionally so SUM(size_usd) stays
+            # consistent with the on-chain position notional.
+            new_size = (
+                pos["size_usd"] * (new_shares / pos["shares"])
+                if pos["shares"] > 0 else 0.0
+            )
+            effective_entry = effective_entry_price(pos)
+            realized_total += (match_price - effective_entry) * allocated
+            await self._store.partial_close_position(
+                position_id=pos["id"],
+                shares_sold=allocated,
+                new_size_usd=new_size,
+                partial_exit_reason=exit_reason,
+            )
+            touched += 1
+            logger.warning(
+                "Partial sell on position id=%d: %.4f → %.4f shares "
+                "(sold %.4f @ $%.4f, realized=$%.4f)",
+                pos["id"], pos["shares"], new_shares,
+                allocated, match_price,
+                (match_price - effective_entry) * allocated,
+            )
+
+        # Push realized into today's daily_pnl bucket.  Mirror
+        # snapshot_pnl's UTC keying so downstream readers (circuit
+        # breaker, dashboard) see a consistent date column.
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
+        existing_realized = await self._store.get_daily_pnl(today) or 0.0
+        # Re-snapshot exposure + unrealized since they're stale post-decrement.
+        try:
+            exposure = await self._store.get_total_exposure()
+        except Exception:
+            exposure = 0.0
+        await self._store.upsert_daily_pnl(
+            today, existing_realized + realized_total, 0.0, exposure,
+        )
+
+        return touched, realized_total
+
     async def close_positions_for_token(
         self,
         event_id: str,

@@ -880,13 +880,108 @@ class Executor:
                 actual_shares=actual_shares,
             )
         else:  # Side.SELL
+            # 2026-05-02 SELL partial-fill detection (mirror of BUY GF-1).
+            # Pre-fix, the success branch unconditionally ran
+            # close_positions_for_token, marking positions closed at
+            # ``price`` (the limit, not the actual match).  When FAK on a
+            # thin book filled only part of ``shares``, the killed
+            # remainder stayed on chain while the DB declared the slot
+            # closed — settler later redeemed the leftover but realized
+            # P&L was misallocated.  Use get_fill_summary to get
+            # net_shares + match_price (same primitive BUY uses), and
+            # branch on whether actual fill matched planned within 5%.
+            sell_match_price: float = price
+            sell_actual_shares: float | None = None
+            try:
+                sell_summary = await self._clob.get_fill_summary(
+                    token_id=signal.token_id,
+                    order_id=result.order_id,
+                    created_at_epoch=order_created_at,
+                )
+            except Exception:
+                logger.exception(
+                    "SELL get_fill_summary raised for %s — falling back "
+                    "to limit price + planned shares",
+                    result.order_id,
+                )
+                sell_summary = None
+            if sell_summary is not None:
+                sell_match_price = sell_summary.match_price
+                sell_actual_shares = sell_summary.net_shares
+
             await store.finalize_sell_order(idempotency_key, result.order_id)
-            closed = await self._portfolio.close_positions_for_token(
-                event_id=signal.event.event_id,
-                token_id=signal.token_id,
-                strategy=signal.strategy,
-                exit_reason=signal.reason,
-                exit_price=price,
+
+            planned_sell_shares = shares
+            is_partial = (
+                sell_actual_shares is not None
+                and planned_sell_shares > 0
+                and sell_actual_shares < planned_sell_shares * 0.95
             )
-            logger.info("Closed %d positions for %s", closed, signal.slot.outcome_label)
+            if is_partial:
+                fill_ratio = sell_actual_shares / planned_sell_shares
+                logger.warning(
+                    "SELL partial fill detected token=%s order=%s "
+                    "planned=%.4f actual=%.4f ratio=%.1f%% — "
+                    "decrementing position rather than full close",
+                    signal.token_id[:12], result.order_id[:14],
+                    planned_sell_shares, sell_actual_shares,
+                    fill_ratio * 100,
+                )
+                touched, realized = await self._portfolio.partial_close_positions_for_token(
+                    event_id=signal.event.event_id,
+                    token_id=signal.token_id,
+                    strategy=signal.strategy,
+                    actual_shares_sold=sell_actual_shares,
+                    match_price=sell_match_price,
+                    exit_reason=signal.reason,
+                )
+                try:
+                    await self._portfolio.store.insert_decision_log(
+                        cycle_at=datetime.now(timezone.utc).isoformat(),
+                        city=signal.event.city,
+                        event_id=signal.event.event_id,
+                        signal_type=signal.token_type.value,
+                        slot_label=signal.slot.outcome_label,
+                        forecast_high_f=None,
+                        daily_max_f=None,
+                        trend_state="",
+                        win_prob=signal.estimated_win_prob,
+                        expected_value=signal.expected_value,
+                        price=sell_match_price,
+                        size_usd=sell_actual_shares * sell_match_price,
+                        action="SKIP",
+                        reason=(
+                            f"[{signal.strategy}] PARTIAL_SELL: "
+                            f"ratio={fill_ratio:.2%} "
+                            f"({sell_actual_shares:.4f}/{planned_sell_shares:.4f}) "
+                            f"realized=${realized:.4f} touched={touched}"
+                        ),
+                        strategy=signal.strategy,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to insert PARTIAL_SELL decision_log",
+                    )
+                logger.info(
+                    "Partial SELL: %d position(s) decremented, "
+                    "$%.4f realized → daily_pnl",
+                    touched, realized,
+                )
+            else:
+                # Full fill (or no summary available — fall back to
+                # legacy close path so behaviour matches pre-fix when
+                # /data/trades is unavailable).  Use the actual match
+                # price when we have it for tighter realized P&L vs
+                # using the limit cap.
+                closed = await self._portfolio.close_positions_for_token(
+                    event_id=signal.event.event_id,
+                    token_id=signal.token_id,
+                    strategy=signal.strategy,
+                    exit_reason=signal.reason,
+                    exit_price=sell_match_price,
+                )
+                logger.info(
+                    "Closed %d positions for %s (match=$%.4f)",
+                    closed, signal.slot.outcome_label, sell_match_price,
+                )
         logger.info("Order executed successfully: %s", result.order_id)
