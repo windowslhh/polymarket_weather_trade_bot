@@ -636,6 +636,45 @@ class Rebalancer:
                     except Exception:
                         logger.warning("Position check: price refresh failed, using cached prices")
 
+                    # 2026-05-01 G-2: pull CLOB best_bid for each held NO
+                    # token and pin _last_gamma_prices to min(gamma, bid).
+                    # NO holdings exit at best_bid (FAK SELL), so a stale
+                    # Gamma "last-trade=0.50" while CLOB bid=0.10 makes
+                    # TRIM/EXIT evaluators think the position is "down 50%
+                    # — hold" when reality is "down 90% — exit".  This is
+                    # the structural mirror of G-1: decision layer must
+                    # see the exit-side CLOB truth, not stale last-trade.
+                    # Paper / dry-run modes return (None, None) from
+                    # get_top_of_book, so this is a no-op there.
+                    try:
+                        clob_results = await asyncio.gather(
+                            *[self._clob.get_top_of_book(tid) for tid in held_token_ids],
+                            return_exceptions=True,
+                        )
+                    except Exception:
+                        clob_results = []
+                        logger.debug(
+                            "Position check: CLOB top-of-book gather failed; "
+                            "skipping bid-cross-validate",
+                        )
+                    cross_pinned = 0
+                    for tid, res in zip(held_token_ids, clob_results):
+                        if isinstance(res, Exception):
+                            continue
+                        best_bid, _ = res
+                        if best_bid is None or best_bid <= 0:
+                            continue
+                        cached = self._last_gamma_prices.get(tid)
+                        if cached is not None and best_bid < cached:
+                            self._last_gamma_prices[tid] = best_bid
+                            cross_pinned += 1
+                    if cross_pinned:
+                        logger.info(
+                            "Position check: pinned %d/%d held prices to "
+                            "CLOB best_bid (was higher than Gamma smoothed)",
+                            cross_pinned, len(held_token_ids),
+                        )
+
                     try:
                         market_data = await refresh_gamma_market_data(held_token_ids)
                     except Exception:

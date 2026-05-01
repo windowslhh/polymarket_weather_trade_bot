@@ -65,6 +65,35 @@ class Executor:
         # can await them before the process exits.  Tasks self-remove via
         # a done callback.
         self._in_flight: set[asyncio.Task] = set()
+        # 2026-05-01 G-3: token-level cooldown for deterministic-failure
+        # signals (SLIPPAGE_TOO_HIGH, REVALIDATE_EV_BELOW_GATE, THIN_LIQUIDITY).
+        # Same logical signal regenerates next cycle from cached Gamma
+        # prices; without a cooldown we get a retry-storm (token 5762207
+        # was retried 51 times pre-fix).  Window is in-process only —
+        # restart clears it, which is fine because thin-market spread
+        # behaviour is hour-scale and a reboot resets the assumption set.
+        self._token_cooldowns: dict[str, datetime] = {}
+
+    _TOKEN_COOLDOWN_MINUTES = 30
+
+    def _mark_token_cooling(self, token_id: str, *, reason: str) -> None:
+        """Record a deterministic-failure cooldown for a token."""
+        until = datetime.now(timezone.utc).timestamp() + self._TOKEN_COOLDOWN_MINUTES * 60
+        self._token_cooldowns[token_id] = datetime.fromtimestamp(until, tz=timezone.utc)
+        logger.info(
+            "Token cooldown set token=%s reason=%s minutes=%d",
+            token_id[:12], reason, self._TOKEN_COOLDOWN_MINUTES,
+        )
+
+    def _is_token_cooling(self, token_id: str) -> bool:
+        """True if the token is in a deterministic-failure cooldown window."""
+        until = self._token_cooldowns.get(token_id)
+        if until is None:
+            return False
+        if datetime.now(timezone.utc) >= until:
+            self._token_cooldowns.pop(token_id, None)
+            return False
+        return True
 
     async def wait_until_idle(self, timeout: float = 30.0) -> bool:
         """Block until all in-flight executions finish, up to `timeout` sec.
@@ -214,6 +243,37 @@ class Executor:
         size_usd = signal.suggested_size_usd
 
         if signal.side == Side.BUY and size_usd <= 0:
+            return
+
+        # 2026-05-01 G-3: short-circuit BUYs whose token is in cooldown.
+        # Avoids re-issuing the same signal that just failed deterministically.
+        # SELL bypasses the cooldown (we always want to be able to exit
+        # losing positions even if a prior SELL hit a transient failure).
+        if signal.side == Side.BUY and self._is_token_cooling(signal.token_id):
+            logger.info(
+                "BUY skipped TOKEN_COOLDOWN token=%s slot=%s",
+                signal.token_id[:12], signal.slot.outcome_label,
+            )
+            try:
+                await self._portfolio.store.insert_decision_log(
+                    cycle_at=datetime.now(timezone.utc).isoformat(),
+                    city=signal.event.city,
+                    event_id=signal.event.event_id,
+                    signal_type=signal.token_type.value,
+                    slot_label=signal.slot.outcome_label,
+                    forecast_high_f=None,
+                    daily_max_f=None,
+                    trend_state="",
+                    win_prob=signal.estimated_win_prob,
+                    expected_value=signal.expected_value,
+                    price=price,
+                    size_usd=size_usd,
+                    action="SKIP",
+                    reason=f"[{signal.strategy}] TOKEN_COOLDOWN",
+                    strategy=signal.strategy,
+                )
+            except Exception:
+                logger.debug("Failed to insert TOKEN_COOLDOWN decision_log")
             return
 
         if signal.side == Side.SELL:
@@ -370,6 +430,87 @@ class Executor:
             )
             return
 
+        # 2026-05-01 G-1: BUY EV revalidation against live CLOB best_ask.
+        # The decision layer evaluated EV using Gamma's outcomePrices[1]
+        # (last-trade) which can be 60+ minutes stale.  In thin markets
+        # (e.g. Houston D+2 slots) the live CLOB best_ask is 0.20+ above
+        # Gamma mid — passing the strategy's min_no_ev gate but failing
+        # the executor's 5% slippage gate every cycle, indefinitely.
+        # Pre-flight here: re-compute EV at cross_price = best_ask + tick.
+        # If the revalidated EV is below min_no_ev, SKIP without inserting
+        # a pending order (no retry storm, no orders-table pollution).
+        # Paper / dry-run already returned above, so get_top_of_book is
+        # safe to hit here.  SELL uses best_bid not best_ask; we keep the
+        # in-flight slippage gate as the SELL-side defence for now.
+        is_paper = getattr(clob_config, "paper", False) is True
+        if signal.side == Side.BUY and not is_paper:
+            min_no_ev = getattr(strategy_config, "min_no_ev", 0.05) if strategy_config else 0.05
+            try:
+                _, best_ask = await self._clob.get_top_of_book(signal.token_id)
+            except Exception:
+                logger.exception(
+                    "BUY revalidation: get_top_of_book raised for %s — proceeding with signal price",
+                    signal.token_id[:12],
+                )
+                best_ask = None
+            if best_ask is not None and best_ask > 0:
+                tick = 0.01
+                # Match clob_client.place_limit_order's cross_price formula
+                # exactly (round-then-clamp, see clob_client.py:614) so the
+                # revalidate-EV computation uses the same number the order
+                # would actually be placed at — avoids a ~0.003 drift between
+                # gate evaluation here and the real cross at submission.
+                cross_price = round(best_ask + tick, 2)
+                if cross_price > 1.0:
+                    cross_price = 1.0
+                wp = signal.estimated_win_prob
+                # cross_price == 1.0 (best_ask >= 0.99) yields EV = -(1-wp) ≤ 0,
+                # which always trips min_no_ev=0.05.  Allow it through the
+                # gate so the SKIP path catches it pre-submission instead
+                # of letting the SLIPPAGE gate reject post-submission.
+                if 0 < wp < 1 and cross_price > 0:
+                    revalidated_ev = wp * (1.0 - cross_price) - (1.0 - wp) * cross_price
+                    if revalidated_ev < min_no_ev:
+                        logger.info(
+                            "BUY revalidation REJECT token=%s gamma_price=%.4f "
+                            "clob_ask=%.4f cross=%.4f wp=%.4f revalidated_ev=%.4f "
+                            "< min_ev=%.4f — skipping without order",
+                            signal.token_id[:12], price, best_ask, cross_price,
+                            wp, revalidated_ev, min_no_ev,
+                        )
+                        try:
+                            await self._portfolio.store.insert_decision_log(
+                                cycle_at=datetime.now(timezone.utc).isoformat(),
+                                city=signal.event.city,
+                                event_id=signal.event.event_id,
+                                signal_type=signal.token_type.value,
+                                slot_label=signal.slot.outcome_label,
+                                forecast_high_f=None,
+                                daily_max_f=None,
+                                trend_state="",
+                                win_prob=wp,
+                                expected_value=revalidated_ev,
+                                price=cross_price,
+                                size_usd=size_usd,
+                                action="SKIP",
+                                reason=(
+                                    f"[{signal.strategy}] REVALIDATE_EV_BELOW_GATE: "
+                                    f"gamma={price:.4f} ask={best_ask:.4f} "
+                                    f"cross={cross_price:.4f} ev={revalidated_ev:.4f}"
+                                ),
+                                strategy=signal.strategy,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to insert REVALIDATE_EV_BELOW_GATE decision_log",
+                            )
+                        # Mark token as cooling so next cycle doesn't re-issue
+                        # the same hopeless signal (G-3).
+                        self._mark_token_cooling(
+                            signal.token_id, reason="REVALIDATE_EV_BELOW_GATE",
+                        )
+                        return
+
         # FIX-03: persist a pending order before hitting CLOB so a crash between
         # the CLOB fill and the position insert leaves a discoverable breadcrumb.
         # H-1: include signal.strategy so the reconciler can match SELL orders
@@ -512,9 +653,23 @@ class Executor:
                 )
                 logger.warning(
                     "Order rejected by book gate token=%s side=%s "
-                    "reason=%s — same signal will likely re-trigger next cycle",
+                    "reason=%s",
                     signal.token_id[:12], side_value, failure_msg,
                 )
+                # 2026-05-01 G-3: deterministic book-gate rejects mean
+                # the signal will keep regenerating from stale Gamma each
+                # cycle.  BUY-side cool the token so the next cycle's
+                # signal short-circuits before submission.  SELL-side
+                # we don't cool — exit signals must remain runnable.
+                if signal.side == Side.BUY:
+                    code = "BOOK_GATE_REJECT"
+                    if "SLIPPAGE_TOO_HIGH" in failure_msg:
+                        code = "SLIPPAGE_TOO_HIGH"
+                    elif "THIN_LIQUIDITY" in failure_msg:
+                        code = "THIN_LIQUIDITY"
+                    elif "PRICE_TOO_LOW" in failure_msg:
+                        code = "PRICE_TOO_LOW"
+                    self._mark_token_cooling(signal.token_id, reason=code)
             return
 
         if signal.side == Side.BUY:
